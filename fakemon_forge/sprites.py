@@ -18,11 +18,36 @@ def generate_sprite(prompt: str, output_path: str, *, pipeline) -> None:
     sprite.save(output_path)
 
 
+def generate_sprite_img2img(
+    prompt: str, image_path: str, output_path: str, *, pipeline
+) -> None:
+    init = Image.open(image_path).convert("RGB").resize((_GEN_SIZE, _GEN_SIZE), Image.LANCZOS)
+    result = pipeline(prompt=prompt, image=init)
+    sprite = postprocess(result.images[0])
+    sprite.save(output_path)
+
+
 def load_txt2img_pipeline():
     try:
         from diffusers import StableDiffusionPipeline
         import torch
         pipe = StableDiffusionPipeline.from_pretrained(
+            _MODEL_ID, torch_dtype=torch.float32
+        )
+        return pipe
+    except Exception as exc:
+        print(
+            f"Error: failed to load model '{_MODEL_ID}': {exc}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+
+def load_img2img_pipeline():
+    try:
+        from diffusers import StableDiffusionImg2ImgPipeline
+        import torch
+        pipe = StableDiffusionImg2ImgPipeline.from_pretrained(
             _MODEL_ID, torch_dtype=torch.float32
         )
         return pipe
