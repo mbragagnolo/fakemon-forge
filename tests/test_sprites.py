@@ -11,6 +11,7 @@ from fakemon_forge.sprites import (
     postprocess,
     load_txt2img_pipeline,
     load_img2img_pipeline,
+    _clip_prompt,
 )
 
 # ---------------------------------------------------------------------------
@@ -39,6 +40,35 @@ def _noisy_image(w=512, h=512):
         for _ in range(w * h)
     ])
     return img
+
+
+# ---------------------------------------------------------------------------
+# _clip_prompt()
+# ---------------------------------------------------------------------------
+
+def test_clip_prompt_short_prompt_unchanged():
+    short = "a fire lizard with three tails"
+    assert _clip_prompt(short) == short
+
+
+def test_clip_prompt_truncates_long_prompt():
+    long = " ".join(["word"] * 80)
+    result = _clip_prompt(long)
+    assert len(result.split()) == 50
+
+
+def test_clip_prompt_exactly_50_words_unchanged():
+    exact = " ".join(["word"] * 50)
+    assert _clip_prompt(exact) == exact
+
+
+def test_generate_sprite_prompt_is_clipped(tmp_path):
+    long_prompt = " ".join(["fire"] * 80)
+    pipe = _fake_pipeline(_rgb_image())
+    out = tmp_path / "sprite.png"
+    generate_sprite(long_prompt, str(out), pipeline=pipe)
+    sent_prompt = pipe.call_args.kwargs["prompt"]
+    assert len(sent_prompt.split()) <= 60
 
 
 # ---------------------------------------------------------------------------
