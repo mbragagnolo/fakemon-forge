@@ -27,14 +27,19 @@ def generate_sprite_img2img(
     sprite.save(output_path)
 
 
+def _device_and_dtype():
+    import torch
+    if torch.cuda.is_available():
+        return "cuda", torch.float16
+    return "cpu", torch.float32
+
+
 def load_txt2img_pipeline():
     try:
         from diffusers import StableDiffusionPipeline
-        import torch
-        pipe = StableDiffusionPipeline.from_pretrained(
-            _MODEL_ID, torch_dtype=torch.float32
-        )
-        return pipe
+        device, dtype = _device_and_dtype()
+        pipe = StableDiffusionPipeline.from_pretrained(_MODEL_ID, torch_dtype=dtype)
+        return pipe.to(device)
     except Exception as exc:
         print(
             f"Error: failed to load model '{_MODEL_ID}': {exc}",
@@ -46,11 +51,9 @@ def load_txt2img_pipeline():
 def load_img2img_pipeline():
     try:
         from diffusers import StableDiffusionImg2ImgPipeline
-        import torch
-        pipe = StableDiffusionImg2ImgPipeline.from_pretrained(
-            _MODEL_ID, torch_dtype=torch.float32
-        )
-        return pipe
+        device, dtype = _device_and_dtype()
+        pipe = StableDiffusionImg2ImgPipeline.from_pretrained(_MODEL_ID, torch_dtype=dtype)
+        return pipe.to(device)
     except Exception as exc:
         print(
             f"Error: failed to load model '{_MODEL_ID}': {exc}",

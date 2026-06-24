@@ -126,7 +126,7 @@ def test_pipeline_called_exactly_once(tmp_path):
 # load_txt2img_pipeline()
 # ---------------------------------------------------------------------------
 
-def _mock_modules(pipe_side_effect=None):
+def _mock_modules(pipe_side_effect=None, cuda=False):
     """Return patched sys.modules with fake diffusers + torch."""
     mock_pipe_cls = MagicMock()
     if pipe_side_effect:
@@ -139,6 +139,8 @@ def _mock_modules(pipe_side_effect=None):
 
     mock_torch = MagicMock()
     mock_torch.float32 = "float32"
+    mock_torch.float16 = "float16"
+    mock_torch.cuda.is_available.return_value = cuda
 
     return {"diffusers": mock_diffusers, "torch": mock_torch}, mock_pipe_cls
 
@@ -180,6 +182,34 @@ def test_load_error_mentions_exception(capsys):
         with pytest.raises(SystemExit):
             load_txt2img_pipeline()
     assert "missing weights" in capsys.readouterr().err
+
+
+def test_load_uses_float16_when_cuda_available():
+    mods, mock_pipe_cls = _mock_modules(cuda=True)
+    with patch.dict("sys.modules", mods):
+        load_txt2img_pipeline()
+    assert mock_pipe_cls.from_pretrained.call_args.kwargs["torch_dtype"] == "float16"
+
+
+def test_load_uses_float32_when_no_cuda():
+    mods, mock_pipe_cls = _mock_modules(cuda=False)
+    with patch.dict("sys.modules", mods):
+        load_txt2img_pipeline()
+    assert mock_pipe_cls.from_pretrained.call_args.kwargs["torch_dtype"] == "float32"
+
+
+def test_load_moves_pipeline_to_cuda_when_available():
+    mods, mock_pipe_cls = _mock_modules(cuda=True)
+    with patch.dict("sys.modules", mods):
+        load_txt2img_pipeline()
+    mock_pipe_cls.from_pretrained.return_value.to.assert_called_once_with("cuda")
+
+
+def test_load_moves_pipeline_to_cpu_when_no_cuda():
+    mods, mock_pipe_cls = _mock_modules(cuda=False)
+    with patch.dict("sys.modules", mods):
+        load_txt2img_pipeline()
+    mock_pipe_cls.from_pretrained.return_value.to.assert_called_once_with("cpu")
 
 
 # ---------------------------------------------------------------------------
@@ -281,7 +311,7 @@ def test_img2img_pipeline_called_exactly_once(tmp_path):
 # load_img2img_pipeline()
 # ---------------------------------------------------------------------------
 
-def _mock_img2img_modules(pipe_side_effect=None):
+def _mock_img2img_modules(pipe_side_effect=None, cuda=False):
     mock_pipe_cls = MagicMock()
     if pipe_side_effect:
         mock_pipe_cls.from_pretrained.side_effect = pipe_side_effect
@@ -293,6 +323,8 @@ def _mock_img2img_modules(pipe_side_effect=None):
 
     mock_torch = MagicMock()
     mock_torch.float32 = "float32"
+    mock_torch.float16 = "float16"
+    mock_torch.cuda.is_available.return_value = cuda
 
     return {"diffusers": mock_diffusers, "torch": mock_torch}, mock_pipe_cls
 
