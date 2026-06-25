@@ -16,7 +16,7 @@ def _clip_prompt(prompt: str) -> str:
 
 
 def postprocess(image: Image.Image) -> Image.Image:
-    image = image.resize((_SPRITE_SIZE, _SPRITE_SIZE), Image.LANCZOS)
+    image = image.resize((_SPRITE_SIZE, _SPRITE_SIZE), Image.NEAREST)
     image = ImageEnhance.Color(image).enhance(1.8)
     image = ImageEnhance.Contrast(image).enhance(1.1)
     return image.quantize(colors=_PALETTE_COLORS)
