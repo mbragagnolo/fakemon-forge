@@ -1,5 +1,5 @@
 import sys
-from PIL import Image
+from PIL import Image, ImageEnhance
 
 _MODEL_ID = "lambdalabs/sd-pokemon-diffusers"
 _GEN_SIZE = 512
@@ -17,6 +17,8 @@ def _clip_prompt(prompt: str) -> str:
 
 def postprocess(image: Image.Image) -> Image.Image:
     image = image.resize((_SPRITE_SIZE, _SPRITE_SIZE), Image.LANCZOS)
+    image = ImageEnhance.Color(image).enhance(1.8)
+    image = ImageEnhance.Contrast(image).enhance(1.1)
     return image.quantize(colors=_PALETTE_COLORS)
 
 
