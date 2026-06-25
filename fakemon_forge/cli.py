@@ -17,12 +17,25 @@ def parse_args(argv=None):
         default="single",
         help="Generate one form ('single') or a 3-stage evolutionary line ('line')",
     )
+    parser.add_argument(
+        "--tier",
+        choices=["standard", "pseudo", "legendary", "mythical"],
+        default="standard",
+        help="Power tier: standard, pseudo (pseudo-legendary line), legendary, or mythical",
+    )
     return parser.parse_args(argv)
 
 
 def validate_args(args):
     if not args.image and not args.description:
         print("Error: at least one of --image or --description must be provided.", file=sys.stderr)
+        sys.exit(1)
+
+    if getattr(args, "tier", "standard") in ("legendary", "mythical") and args.mode == "line":
+        print(
+            f"Error: --tier {args.tier} is always a single form; use --mode single.",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     if args.image:

@@ -100,3 +100,54 @@ def test_validate_accepts_jpeg_extension(tmp_path):
 def test_validate_invalid_mode():
     with pytest.raises(SystemExit):
         parse_args(["--description", "blob", "--mode", "duo"])
+
+
+# --- --tier ---
+
+def test_parse_tier_defaults_to_standard():
+    args = parse_args(["--description", "fire lizard"])
+    assert args.tier == "standard"
+
+
+def test_parse_tier_pseudo():
+    args = parse_args(["--description", "fire lizard", "--tier", "pseudo"])
+    assert args.tier == "pseudo"
+
+
+def test_parse_tier_legendary():
+    args = parse_args(["--description", "fire lizard", "--tier", "legendary"])
+    assert args.tier == "legendary"
+
+
+def test_parse_tier_mythical():
+    args = parse_args(["--description", "fire lizard", "--tier", "mythical"])
+    assert args.tier == "mythical"
+
+
+def test_parse_tier_invalid():
+    with pytest.raises(SystemExit):
+        parse_args(["--description", "blob", "--tier", "uber"])
+
+
+def test_validate_legendary_with_line_exits(capsys):
+    args = parse_args(["--description", "fire lizard", "--tier", "legendary", "--mode", "line"])
+    with pytest.raises(SystemExit) as exc:
+        validate_args(args)
+    assert exc.value.code == 1
+
+
+def test_validate_mythical_with_line_exits(capsys):
+    args = parse_args(["--description", "fire lizard", "--tier", "mythical", "--mode", "line"])
+    with pytest.raises(SystemExit) as exc:
+        validate_args(args)
+    assert exc.value.code == 1
+
+
+def test_validate_legendary_with_single_passes():
+    args = parse_args(["--description", "fire lizard", "--tier", "legendary"])
+    validate_args(args)  # should not raise
+
+
+def test_validate_pseudo_with_line_passes():
+    args = parse_args(["--description", "fire lizard", "--tier", "pseudo", "--mode", "line"])
+    validate_args(args)  # should not raise

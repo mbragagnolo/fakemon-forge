@@ -220,3 +220,22 @@ def test_sprite_saved_inside_stage_dir(ctx):
     main(["--description", "fire lizard"])
     sprite_path = ctx["sprite"].call_args.args[1]
     assert sprite_path == str(ctx["stage_dir"] / "sprite.png")
+
+
+# ---------------------------------------------------------------------------
+# Tier passthrough
+# ---------------------------------------------------------------------------
+
+def test_tier_defaults_to_standard_in_llm_call(ctx):
+    main(["--description", "fire lizard"])
+    assert ctx["gen"].call_args.kwargs.get("tier", "standard") == "standard"
+
+
+def test_tier_pseudo_passed_to_llm(ctx):
+    main(["--description", "fire lizard", "--tier", "pseudo", "--mode", "line"])
+    assert ctx["gen"].call_args.kwargs["tier"] == "pseudo"
+
+
+def test_tier_legendary_passed_to_llm(ctx):
+    main(["--description", "fire lizard", "--tier", "legendary"])
+    assert ctx["gen"].call_args.kwargs["tier"] == "legendary"

@@ -197,3 +197,93 @@ def test_build_client_from_api_key():
         MockMistral.return_value = fake_client
         generate_fakemon("fire lizard", "single", api_key="sk-test")
         MockMistral.assert_called_once_with(api_key="sk-test")
+
+
+# ---------------------------------------------------------------------------
+# Tier BST targets in prompt
+# ---------------------------------------------------------------------------
+
+def _get_prompt_text(client):
+    messages = client.chat.complete.call_args.kwargs["messages"]
+    return " ".join(m["content"] for m in messages)
+
+
+def test_standard_tier_bst_in_prompt():
+    client = _make_client(json.dumps([_STAGE_1]))
+    generate_fakemon("fire lizard", "single", tier="standard", client=client)
+    text = _get_prompt_text(client)
+    assert "300" in text
+
+
+def test_standard_line_bst_includes_stage3_target():
+    client = _make_client(json.dumps(_LINE))
+    generate_fakemon("fire lizard", "line", tier="standard", client=client)
+    text = _get_prompt_text(client)
+    assert "520" in text
+
+
+def test_pseudo_tier_bst_includes_600():
+    client = _make_client(json.dumps(_LINE))
+    generate_fakemon("fire lizard", "line", tier="pseudo", client=client)
+    text = _get_prompt_text(client)
+    assert "600" in text
+
+
+def test_legendary_tier_bst_in_prompt():
+    client = _make_client(json.dumps([_STAGE_1]))
+    generate_fakemon("fire lizard", "single", tier="legendary", client=client)
+    text = _get_prompt_text(client)
+    assert "580" in text
+
+
+def test_mythical_tier_bst_in_prompt():
+    client = _make_client(json.dumps([_STAGE_1]))
+    generate_fakemon("fire lizard", "single", tier="mythical", client=client)
+    text = _get_prompt_text(client)
+    assert "600" in text
+
+
+# ---------------------------------------------------------------------------
+# Evolutionary line progression guidance
+# ---------------------------------------------------------------------------
+
+def test_line_prompt_mentions_juvenile_stage():
+    client = _make_client(json.dumps(_LINE))
+    generate_fakemon("fire lizard", "line", client=client)
+    text = _get_prompt_text(client)
+    assert any(w in text.lower() for w in ("juvenile", "child", "small"))
+
+
+def test_line_prompt_mentions_adult_stage():
+    client = _make_client(json.dumps(_LINE))
+    generate_fakemon("fire lizard", "line", client=client)
+    text = _get_prompt_text(client)
+    assert any(w in text.lower() for w in ("adult", "final form", "fully"))
+
+
+def test_line_prompt_mentions_visual_distinction():
+    client = _make_client(json.dumps(_LINE))
+    generate_fakemon("fire lizard", "line", client=client)
+    text = _get_prompt_text(client)
+    assert any(w in text.lower() for w in ("silhouette", "distinct", "different"))
+
+
+def test_pseudo_tier_prompt_mentions_pseudo_legendary():
+    client = _make_client(json.dumps(_LINE))
+    generate_fakemon("fire lizard", "line", tier="pseudo", client=client)
+    text = _get_prompt_text(client)
+    assert "pseudo" in text.lower()
+
+
+def test_legendary_tier_prompt_mentions_legendary():
+    client = _make_client(json.dumps([_STAGE_1]))
+    generate_fakemon("fire lizard", "single", tier="legendary", client=client)
+    text = _get_prompt_text(client)
+    assert "legendary" in text.lower()
+
+
+def test_single_mode_does_not_mention_evo_progression():
+    client = _make_client(json.dumps([_STAGE_1]))
+    generate_fakemon("fire lizard", "single", client=client)
+    text = _get_prompt_text(client)
+    assert "juvenile" not in text.lower() and "adolescent" not in text.lower()

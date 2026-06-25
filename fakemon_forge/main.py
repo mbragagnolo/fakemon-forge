@@ -36,7 +36,7 @@ def main(argv=None):
     parts = [p for p in [vision_desc, args.description] if p]
     combined = "\n\n".join(parts)
 
-    stages = generate_fakemon(combined, args.mode, client=client)
+    stages = generate_fakemon(combined, args.mode, tier=args.tier, client=client)
 
     if args.image:
         pipeline = load_img2img_pipeline()

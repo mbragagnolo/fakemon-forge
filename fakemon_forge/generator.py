@@ -5,6 +5,13 @@ from mistralai.client import Mistral
 
 _MODEL = "mistral-large-latest"
 
+_BST_TARGETS = {
+    "standard": {"stage1": 300, "stage2": 420, "stage3": 520},
+    "pseudo":   {"stage1": 300, "stage2": 420, "stage3": 600},
+    "legendary":{"stage1": 580},
+    "mythical": {"stage1": 600},
+}
+
 _SYSTEM_PROMPT = """\
 You are a Pokémon game designer. Generate Fakemon data as a JSON array.
 Each element represents one evolutionary stage and must have exactly these fields:
@@ -16,15 +23,55 @@ Each element represents one evolutionary stage and must have exactly these field
   pokedex_entry – 2–3 sentence flavour text (string)
   sprite_prompt – detailed visual description for pixel-art generation (string)
 
-BST targets: stage 1 ≈ 300, stage 2 ≈ 420, stage 3 ≈ 520.
-All three stage names and sprite prompts must share a clear thematic throughline.
+All stage names and sprite prompts must share a clear thematic throughline.
 Return ONLY the JSON array. No markdown fences, no explanation, no extra keys.\
 """
 
+_EVO_PROGRESSION = """\
 
-def _user_prompt(description: str, mode: str) -> str:
-    count = "one stage (stage 1 only)" if mode == "single" else "three evolutionary stages (stages 1, 2, and 3)"
-    return f"Generate {count} for a Fakemon based on this description:\n\n{description}"
+Evolutionary progression — each stage must look and feel visually distinct:
+  Stage 1: juvenile/child form — small and simple, cute or curious expression, \
+limited limbs or features, undeveloped power.
+  Stage 2: adolescent/teenage form — noticeably larger, silhouette more defined, \
+signature features emerging, power becoming apparent.
+  Stage 3: adult/final form — fully developed, imposing presence, complex design \
+with a different silhouette from stage 1, design complexity at its peak.\
+"""
+
+_TIER_NOTES = {
+    "pseudo":    "\nThis is a pseudo-legendary line: the final form should rival legendary "
+                 "Pokémon in visual impact and raw power.",
+    "legendary": "\nThis is a legendary Pokémon: unique, awe-inspiring, and lore-significant. "
+                 "It should feel like a force of nature.",
+    "mythical":  "\nThis is a mythical Pokémon: mysterious, rarely seen, tied to ancient legend.",
+}
+
+
+def _user_prompt(description: str, mode: str, tier: str) -> str:
+    targets = _BST_TARGETS[tier]
+
+    if mode == "single":
+        count = "one stage (stage 1 only)"
+        bst_hint = f"BST target: ~{targets['stage1']}."
+        evo_text = ""
+    else:
+        count = "three evolutionary stages (stages 1, 2, and 3)"
+        bst_hint = (
+            f"BST targets: stage 1 ~{targets['stage1']}, "
+            f"stage 2 ~{targets['stage2']}, "
+            f"stage 3 ~{targets['stage3']}."
+        )
+        evo_text = _EVO_PROGRESSION
+
+    tier_note = _TIER_NOTES.get(tier, "")
+
+    return (
+        f"Generate {count} for a Fakemon based on this description:\n\n"
+        f"{description}\n\n"
+        f"{bst_hint}"
+        f"{evo_text}"
+        f"{tier_note}"
+    )
 
 
 def _strip_fences(text: str) -> str:
@@ -38,6 +85,7 @@ def _strip_fences(text: str) -> str:
 def generate_fakemon(
     description: str,
     mode: str,
+    tier: str = "standard",
     *,
     client=None,
     api_key: str = None,
@@ -47,7 +95,7 @@ def generate_fakemon(
 
     messages = [
         {"role": "system", "content": _SYSTEM_PROMPT},
-        {"role": "user", "content": _user_prompt(description, mode)},
+        {"role": "user", "content": _user_prompt(description, mode, tier)},
     ]
 
     raw = None
