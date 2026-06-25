@@ -11,8 +11,19 @@ from fakemon_forge.sprites import (
     postprocess,
     load_txt2img_pipeline,
     load_img2img_pipeline,
-    _clip_prompt,
+    _encode_prompt,
 )
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def _stub_encode_prompt():
+    """Patch _encode_prompt for all sprite tests so compel isn't required."""
+    with patch("fakemon_forge.sprites._encode_prompt", return_value=MagicMock()):
+        yield
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -43,32 +54,47 @@ def _noisy_image(w=512, h=512):
 
 
 # ---------------------------------------------------------------------------
-# _clip_prompt()
+# _encode_prompt()
 # ---------------------------------------------------------------------------
 
-def test_clip_prompt_short_prompt_unchanged():
-    short = "a fire lizard with three tails"
-    assert _clip_prompt(short) == short
-
-
-def test_clip_prompt_truncates_long_prompt():
-    long = " ".join(["word"] * 80)
-    result = _clip_prompt(long)
-    assert len(result.split()) == 50
-
-
-def test_clip_prompt_exactly_50_words_unchanged():
-    exact = " ".join(["word"] * 50)
-    assert _clip_prompt(exact) == exact
-
-
-def test_generate_sprite_prompt_is_clipped(tmp_path):
-    long_prompt = " ".join(["fire"] * 80)
+def test_encode_prompt_called_with_prompt_and_pipeline(tmp_path):
     pipe = _fake_pipeline(_rgb_image())
     out = tmp_path / "sprite.png"
-    generate_sprite(long_prompt, str(out), pipeline=pipe)
-    sent_prompt = pipe.call_args.kwargs["prompt"]
-    assert len(sent_prompt.split()) <= 60
+    fake_embeds = MagicMock()
+    with patch("fakemon_forge.sprites._encode_prompt", return_value=fake_embeds) as mock_enc:
+        generate_sprite("spiky ice wolf", str(out), pipeline=pipe)
+    mock_enc.assert_called_once_with("spiky ice wolf", pipe)
+
+
+def test_encode_prompt_result_passed_as_prompt_embeds(tmp_path):
+    pipe = _fake_pipeline(_rgb_image())
+    out = tmp_path / "sprite.png"
+    fake_embeds = MagicMock()
+    with patch("fakemon_forge.sprites._encode_prompt", return_value=fake_embeds):
+        generate_sprite("fire lizard", str(out), pipeline=pipe)
+    assert pipe.call_args.kwargs["prompt_embeds"] is fake_embeds
+
+
+def test_img2img_encode_prompt_called(tmp_path):
+    init_img = tmp_path / "drawing.png"
+    _rgb_image(100, 100).save(str(init_img))
+    pipe = _fake_img2img_pipeline(_rgb_image())
+    out = tmp_path / "sprite.png"
+    fake_embeds = MagicMock()
+    with patch("fakemon_forge.sprites._encode_prompt", return_value=fake_embeds) as mock_enc:
+        generate_sprite_img2img("spiky ice wolf", str(init_img), str(out), pipeline=pipe)
+    mock_enc.assert_called_once_with("spiky ice wolf", pipe)
+
+
+def test_img2img_encode_prompt_result_passed_as_prompt_embeds(tmp_path):
+    init_img = tmp_path / "drawing.png"
+    _rgb_image(100, 100).save(str(init_img))
+    pipe = _fake_img2img_pipeline(_rgb_image())
+    out = tmp_path / "sprite.png"
+    fake_embeds = MagicMock()
+    with patch("fakemon_forge.sprites._encode_prompt", return_value=fake_embeds):
+        generate_sprite_img2img("fire lizard", str(init_img), str(out), pipeline=pipe)
+    assert pipe.call_args.kwargs["prompt_embeds"] is fake_embeds
 
 
 # ---------------------------------------------------------------------------
@@ -129,11 +155,14 @@ def test_saved_sprite_has_palette_mode(tmp_path):
     assert Image.open(out).mode == "P"
 
 
-def test_pipeline_called_with_prompt(tmp_path):
+def test_pipeline_called_with_prompt_embeds(tmp_path):
     pipe = _fake_pipeline(_rgb_image())
     out = tmp_path / "sprite.png"
-    generate_sprite("spiky ice wolf", str(out), pipeline=pipe)
-    assert pipe.call_args.kwargs["prompt"] == "spiky ice wolf"
+    fake_embeds = MagicMock()
+    with patch("fakemon_forge.sprites._encode_prompt", return_value=fake_embeds):
+        generate_sprite("spiky ice wolf", str(out), pipeline=pipe)
+    assert "prompt_embeds" in pipe.call_args.kwargs
+    assert "prompt" not in pipe.call_args.kwargs
 
 
 def test_pipeline_called_with_512x512(tmp_path):
@@ -290,13 +319,16 @@ def test_img2img_saved_sprite_has_palette_mode(tmp_path):
     assert Image.open(out).mode == "P"
 
 
-def test_img2img_pipeline_called_with_prompt(tmp_path):
+def test_img2img_pipeline_called_with_prompt_embeds(tmp_path):
     init_img = tmp_path / "drawing.png"
     _rgb_image(100, 100).save(str(init_img))
     pipe = _fake_img2img_pipeline(_rgb_image())
     out = tmp_path / "sprite.png"
-    generate_sprite_img2img("spiky ice wolf", str(init_img), str(out), pipeline=pipe)
-    assert pipe.call_args.kwargs["prompt"] == "spiky ice wolf"
+    fake_embeds = MagicMock()
+    with patch("fakemon_forge.sprites._encode_prompt", return_value=fake_embeds):
+        generate_sprite_img2img("spiky ice wolf", str(init_img), str(out), pipeline=pipe)
+    assert "prompt_embeds" in pipe.call_args.kwargs
+    assert "prompt" not in pipe.call_args.kwargs
 
 
 def test_img2img_conditioning_image_passed_to_pipeline(tmp_path):

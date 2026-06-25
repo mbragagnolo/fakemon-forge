@@ -7,12 +7,10 @@ _SPRITE_SIZE = 96
 _PALETTE_COLORS = 16
 
 
-_CLIP_MAX_WORDS = 50  # CLIP tokenises to ~77 tokens; 50 words stays safely under
-
-
-def _clip_prompt(prompt: str) -> str:
-    words = prompt.split()
-    return " ".join(words[:_CLIP_MAX_WORDS]) if len(words) > _CLIP_MAX_WORDS else prompt
+def _encode_prompt(prompt: str, pipeline):
+    from compel import Compel
+    compel = Compel(tokenizer=pipeline.tokenizer, text_encoder=pipeline.text_encoder)
+    return compel(prompt)
 
 
 def postprocess(image: Image.Image) -> Image.Image:
@@ -23,7 +21,8 @@ def postprocess(image: Image.Image) -> Image.Image:
 
 
 def generate_sprite(prompt: str, output_path: str, *, pipeline) -> None:
-    result = pipeline(prompt=_clip_prompt(prompt), width=_GEN_SIZE, height=_GEN_SIZE)
+    conditioning = _encode_prompt(prompt, pipeline)
+    result = pipeline(prompt_embeds=conditioning, width=_GEN_SIZE, height=_GEN_SIZE)
     sprite = postprocess(result.images[0])
     sprite.save(output_path)
 
@@ -32,7 +31,8 @@ def generate_sprite_img2img(
     prompt: str, image_path: str, output_path: str, *, pipeline
 ) -> None:
     init = Image.open(image_path).convert("RGB").resize((_GEN_SIZE, _GEN_SIZE), Image.LANCZOS)
-    result = pipeline(prompt=_clip_prompt(prompt), image=init)
+    conditioning = _encode_prompt(prompt, pipeline)
+    result = pipeline(prompt_embeds=conditioning, image=init)
     sprite = postprocess(result.images[0])
     sprite.save(output_path)
 
