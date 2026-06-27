@@ -1,3 +1,5 @@
+import colorsys
+import hashlib
 import sys
 from pathlib import Path
 from PIL import Image, ImageEnhance
@@ -20,9 +22,13 @@ _TYPE_TAGS = {
     "Dark": "darktype", "Steel": "steeltype", "Fairy": "fairytype",
 }
 
+_GEN_STYLE = "gen3"
 
-def build_prompt(sprite_prompt: str, types: list[str]) -> str:
-    tags = " ".join(_TYPE_TAGS[t] for t in types if t in _TYPE_TAGS)
+
+def build_prompt(sprite_prompt: str, types: list[str], extra_tags: list[str] | None = None) -> str:
+    type_tags = [_TYPE_TAGS[t] for t in types if t in _TYPE_TAGS]
+    all_tags = type_tags + [_GEN_STYLE] + (extra_tags or [])
+    tags = " ".join(all_tags)
     return f"{tags} {sprite_prompt}".strip() if tags else sprite_prompt
 
 
@@ -39,29 +45,85 @@ def postprocess(image: Image.Image) -> Image.Image:
     return image.quantize(colors=_PALETTE_COLORS)
 
 
-def generate_sprite(prompt: str, types: list[str], output_path: str, *, pipeline) -> None:
-    conditioning = _encode_prompt(build_prompt(prompt, types), pipeline)
+def _is_achromatic(r: int, g: int, b: int) -> bool:
+    lum = 0.299 * r + 0.587 * g + 0.114 * b
+    return lum < 40 or lum > 215
+
+
+def generate_shiny(sprite_path: str, name: str, output_path: str) -> None:
+    """Derive a shiny palette from an existing sprite by hue-rotating mid-tone colors.
+
+    Black (lum < 40) and white (lum > 215) entries are preserved exactly.
+    The hue shift is seeded from the Pokémon's name so each one is unique.
+    """
+    img = Image.open(sprite_path)
+    if img.mode != "P":
+        raise ValueError(f"Expected palette-mode image, got {img.mode}")
+
+    hue_shift = (int(hashlib.md5(name.encode()).hexdigest(), 16) % 161 + 100) / 360.0
+
+    flat = img.getpalette()  # [R, G, B, R, G, B, ...] × 256
+    new_palette = []
+    for i in range(0, len(flat), 3):
+        r, g, b = flat[i], flat[i + 1], flat[i + 2]
+        if _is_achromatic(r, g, b):
+            new_palette.extend([r, g, b])
+        else:
+            h, s, v = colorsys.rgb_to_hsv(r / 255, g / 255, b / 255)
+            h = (h + hue_shift) % 1.0
+            nr, ng, nb = colorsys.hsv_to_rgb(h, s, v)
+            new_palette.extend([round(nr * 255), round(ng * 255), round(nb * 255)])
+
+    shiny = img.copy()
+    shiny.putpalette(new_palette)
+    shiny.save(output_path)
+
+
+def _make_generator(seed: int | None):
+    import torch
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    g = torch.Generator(device=device)
+    if seed is not None:
+        g.manual_seed(seed)
+    return g
+
+
+def generate_sprite(
+    prompt: str, types: list[str], output_path: str, *, pipeline,
+    extra_tags: list[str] | None = None, seed: int | None = None,
+) -> None:
+    conditioning = _encode_prompt(build_prompt(prompt, types, extra_tags), pipeline)
     result = pipeline(
         prompt_embeds=conditioning,
         width=_GEN_SIZE,
         height=_GEN_SIZE,
         num_inference_steps=_NUM_STEPS,
         guidance_scale=_CFG_SCALE,
+        generator=_make_generator(seed),
     )
     sprite = postprocess(result.images[0])
     sprite.save(output_path)
 
 
+def generate_back_sprite(
+    prompt: str, types: list[str], output_path: str, *, pipeline, seed: int | None = None
+) -> None:
+    generate_sprite(prompt, types, output_path, pipeline=pipeline, extra_tags=["backside"], seed=seed)
+
+
+
 def generate_sprite_img2img(
-    prompt: str, types: list[str], image_path: str, output_path: str, *, pipeline
+    prompt: str, types: list[str], image_path: str, output_path: str, *, pipeline,
+    extra_tags: list[str] | None = None, seed: int | None = None,
 ) -> None:
     init = Image.open(image_path).convert("RGB").resize((_GEN_SIZE, _GEN_SIZE), Image.LANCZOS)
-    conditioning = _encode_prompt(build_prompt(prompt, types), pipeline)
+    conditioning = _encode_prompt(build_prompt(prompt, types, extra_tags), pipeline)
     result = pipeline(
         prompt_embeds=conditioning,
         image=init,
         num_inference_steps=_NUM_STEPS,
         guidance_scale=_CFG_SCALE,
+        generator=_make_generator(seed),
     )
     sprite = postprocess(result.images[0])
     sprite.save(output_path)

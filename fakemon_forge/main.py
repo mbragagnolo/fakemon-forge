@@ -1,4 +1,5 @@
 import os
+import random
 import sys
 
 from mistralai.client import Mistral
@@ -8,7 +9,9 @@ from fakemon_forge.vision import describe_image
 from fakemon_forge.generator import generate_fakemon
 from fakemon_forge.sprites import (
     generate_sprite,
+    generate_back_sprite,
     generate_sprite_img2img,
+    generate_shiny,
     load_txt2img_pipeline,
     load_img2img_pipeline,
 )
@@ -47,17 +50,54 @@ def main(argv=None):
     stage_dirs = write_output(stages)
 
     for stage, stage_dir in zip(stages, stage_dirs):
+        seed = random.randint(0, 2**32 - 1)
+
         sprite_path = str(stage_dir / "sprite.png")
         try:
             if args.image:
                 generate_sprite_img2img(
-                    stage["sprite_prompt"], stage["types"], args.image, sprite_path, pipeline=pipeline
+                    stage["sprite_prompt"], stage["types"], args.image, sprite_path,
+                    pipeline=pipeline, seed=seed,
                 )
             else:
-                generate_sprite(args.description, stage["types"], sprite_path, pipeline=pipeline)
+                generate_sprite(args.description, stage["types"], sprite_path, pipeline=pipeline, seed=seed)
         except Exception as exc:
             print(
                 f"Warning: sprite generation failed for {stage['name']}: {exc}",
+                file=sys.stderr,
+            )
+            continue
+
+        back_path = str(stage_dir / "sprite_back.png")
+        try:
+            if args.image:
+                generate_sprite_img2img(
+                    stage["sprite_prompt"], stage["types"], args.image, back_path,
+                    pipeline=pipeline, extra_tags=["backside"], seed=seed,
+                )
+            else:
+                generate_back_sprite(args.description, stage["types"], back_path, pipeline=pipeline, seed=seed)
+        except Exception as exc:
+            print(
+                f"Warning: back sprite generation failed for {stage['name']}: {exc}",
+                file=sys.stderr,
+            )
+
+        shiny_path = str(stage_dir / "sprite_shiny.png")
+        try:
+            generate_shiny(sprite_path, stage["name"], shiny_path)
+        except Exception as exc:
+            print(
+                f"Warning: shiny generation failed for {stage['name']}: {exc}",
+                file=sys.stderr,
+            )
+
+        back_shiny_path = str(stage_dir / "sprite_back_shiny.png")
+        try:
+            generate_shiny(back_path, stage["name"], back_shiny_path)
+        except Exception as exc:
+            print(
+                f"Warning: back shiny generation failed for {stage['name']}: {exc}",
                 file=sys.stderr,
             )
 
