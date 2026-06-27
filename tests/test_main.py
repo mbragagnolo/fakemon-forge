@@ -111,11 +111,11 @@ def test_txt2img_path_calls_generate_sprite(ctx):
     ctx["sprite_i2i"].assert_not_called()
 
 
-def test_txt2img_sprite_called_with_sprite_prompt(ctx):
+def test_txt2img_sprite_called_with_user_description(ctx):
     main(["--description", "fire lizard"])
     kwargs = ctx["sprite"].call_args.kwargs
     assert kwargs["pipeline"] is not None
-    assert ctx["sprite"].call_args.args[0] == _STAGE_1["sprite_prompt"]
+    assert ctx["sprite"].call_args.args[0] == "fire lizard"
 
 
 def test_txt2img_vision_step_skipped(ctx):
@@ -218,7 +218,7 @@ def test_write_output_called_with_stages(ctx):
 
 def test_sprite_saved_inside_stage_dir(ctx):
     main(["--description", "fire lizard"])
-    sprite_path = ctx["sprite"].call_args.args[1]
+    sprite_path = ctx["sprite"].call_args.args[2]
     assert sprite_path == str(ctx["stage_dir"] / "sprite.png")
 
 

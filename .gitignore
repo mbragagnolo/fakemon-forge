@@ -7,3 +7,5 @@ dist/
 build/
 *.egg-info/
 .pytest_cache/
+models/
+test_sprite.png

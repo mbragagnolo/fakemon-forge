@@ -13,6 +13,7 @@ from fakemon_forge.sprites import (
     load_img2img_pipeline,
 )
 from fakemon_forge.writer import write_output
+from fakemon_forge.export_ini import export_ini
 
 
 def main(argv=None):
@@ -50,17 +51,20 @@ def main(argv=None):
         try:
             if args.image:
                 generate_sprite_img2img(
-                    stage["sprite_prompt"], args.image, sprite_path, pipeline=pipeline
+                    stage["sprite_prompt"], stage["types"], args.image, sprite_path, pipeline=pipeline
                 )
             else:
-                generate_sprite(stage["sprite_prompt"], sprite_path, pipeline=pipeline)
+                generate_sprite(args.description, stage["types"], sprite_path, pipeline=pipeline)
         except Exception as exc:
             print(
                 f"Warning: sprite generation failed for {stage['name']}: {exc}",
                 file=sys.stderr,
             )
 
-    print(f"Done! Output written to output/{stages[0]['name']}/")
+    for stage_dir in stage_dirs:
+        export_ini(stage_dir)
+
+    print(f"Done! Output written to {stage_dirs[0].parent}/")
 
 
 if __name__ == "__main__":
