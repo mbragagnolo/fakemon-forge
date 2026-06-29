@@ -20,7 +20,7 @@ Each element represents one evolutionary stage and must have exactly these field
   types         – list of 1 or 2 type strings, e.g. ["Fire"] or ["Water", "Flying"]
   ability       – one ability name (string)
   base_stats    – object with integer values for: hp, attack, defense, sp_atk, sp_def, speed
-  pokedex_entry – 2–3 sentence flavour text (string)
+  pokedex_entry – 2 sentence flavour text (string)
   sprite_prompt – visual description for pixel-art sprite generation; max 75 words, lead with the creature's most distinctive shape and colour features (string)
 
 All stage names and sprite prompts must share a clear thematic throughline.

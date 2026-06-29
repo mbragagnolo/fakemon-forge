@@ -40,7 +40,7 @@ def _encode_prompt(prompt: str, pipeline):
 
 def postprocess(image: Image.Image) -> Image.Image:
     image = image.resize((_SPRITE_SIZE, _SPRITE_SIZE), Image.NEAREST)
-    image = ImageEnhance.Color(image).enhance(1.8)
+    image = ImageEnhance.Color(image).enhance(1.1)
     image = ImageEnhance.Contrast(image).enhance(1.1)
     return image.quantize(colors=_PALETTE_COLORS)
 
@@ -60,7 +60,7 @@ def generate_shiny(sprite_path: str, name: str, output_path: str) -> None:
     if img.mode != "P":
         raise ValueError(f"Expected palette-mode image, got {img.mode}")
 
-    hue_shift = (int(hashlib.md5(name.encode()).hexdigest(), 16) % 161 + 100) / 360.0
+    hue_shift = (int(hashlib.md5(name.encode()).hexdigest(), 16) % 300 + 30) / 360.0
 
     flat = img.getpalette()  # [R, G, B, R, G, B, ...] × 256
     new_palette = []
