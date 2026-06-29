@@ -114,7 +114,7 @@ def generate_back_sprite(
 
 def generate_sprite_img2img(
     prompt: str, types: list[str], image_path: str, output_path: str, *, pipeline,
-    extra_tags: list[str] | None = None, seed: int | None = None,
+    extra_tags: list[str] | None = None, seed: int | None = None, strength: float = 0.8,
 ) -> None:
     init = Image.open(image_path).convert("RGB").resize((_GEN_SIZE, _GEN_SIZE), Image.LANCZOS)
     conditioning = _encode_prompt(build_prompt(prompt, types, extra_tags), pipeline)
@@ -124,9 +124,15 @@ def generate_sprite_img2img(
         num_inference_steps=_NUM_STEPS,
         guidance_scale=_CFG_SCALE,
         generator=_make_generator(seed),
+        strength=strength,
     )
     sprite = postprocess(result.images[0])
     sprite.save(output_path)
+
+
+def make_img2img_pipeline(txt2img_pipe):
+    from diffusers import StableDiffusionImg2ImgPipeline
+    return StableDiffusionImg2ImgPipeline(**txt2img_pipe.components)
 
 
 def _device_and_dtype():

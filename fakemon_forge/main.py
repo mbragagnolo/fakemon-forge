@@ -9,11 +9,11 @@ from fakemon_forge.vision import describe_image
 from fakemon_forge.generator import generate_fakemon
 from fakemon_forge.sprites import (
     generate_sprite,
-    generate_back_sprite,
     generate_sprite_img2img,
     generate_shiny,
     load_txt2img_pipeline,
     load_img2img_pipeline,
+    make_img2img_pipeline,
 )
 from fakemon_forge.writer import write_output
 from fakemon_forge.export_ini import export_ini
@@ -44,8 +44,10 @@ def main(argv=None):
 
     if args.image:
         pipeline = load_img2img_pipeline()
+        img2img_pipeline = pipeline
     else:
         pipeline = load_txt2img_pipeline()
+        img2img_pipeline = make_img2img_pipeline(pipeline)
 
     stage_dirs = write_output(stages)
 
@@ -70,13 +72,12 @@ def main(argv=None):
 
         back_path = str(stage_dir / "sprite_back.png")
         try:
-            if args.image:
-                generate_sprite_img2img(
-                    stage["sprite_prompt"], stage["types"], args.image, back_path,
-                    pipeline=pipeline, extra_tags=["backside"], seed=seed,
-                )
-            else:
-                generate_back_sprite(args.description, stage["types"], back_path, pipeline=pipeline, seed=seed)
+            init_image = args.image if args.image else sprite_path
+            generate_sprite_img2img(
+                stage["sprite_prompt"], stage["types"], init_image, back_path,
+                pipeline=img2img_pipeline, extra_tags=["backside"], seed=seed,
+                strength=0.65,
+            )
         except Exception as exc:
             print(
                 f"Warning: back sprite generation failed for {stage['name']}: {exc}",
