@@ -1,5 +1,0 @@
-- [ ] Run `pytest` from the repo root and confirm it is green (161 passed, ~36 `ml` skips in the torch-free sandbox — skips are expected, not failures).
-- [ ] In a REPL, feed a real SD sprite (noisy near-white background) to `_flatten_background_to_key` and confirm the whole background flattens to a single exact `(200, 200, 168)` while the creature is visually untouched.
-- [ ] Feed a sprite with an interior gap (e.g. between legs / a ring shape) and confirm the enclosed pocket is keyed to `(200, 200, 168)`, not just the outer border.
-- [ ] Feed a gradient/vignette-background image and confirm it returns a valid RGB image, prints a single stderr warning mentioning the border, and does NOT raise or abort generation.
-- [ ] Confirm the passed-in image is unchanged after the call (helper returns a fresh image; nothing else in `sprites.py` — `postprocess`, `quantize_to_reference`, `generate_shiny`, `main` — behaves differently).
