@@ -1,121 +1,136 @@
-# Spec: fakemon-forge
+# Spec: Palette-lock quantize helper (`quantize_to_reference`)
 
 ## Summary
-A CLI tool that takes a child's drawing (scan/photo) and/or a text description and generates a complete Pokémon-like creature (Fakemon) — including a GBA-style pixel art sprite, base stats, typing, ability, and Pokédex entry. Optionally generates a full 3-stage evolutionary line.
+
+Add a pure-PIL helper to `fakemon_forge/sprites.py` that quantizes an image
+against a **reference** palette instead of building a fresh adaptive one.
+
+Today `postprocess(image)` resizes to 96×96 (NEAREST), bumps colour/contrast
+via `ImageEnhance`, then calls `image.quantize(colors=16)` — which invents a
+brand-new adaptive 16-colour palette every call, so no two sprites share the
+same 16 colours. The authentic Gen 3 model requires a *single shared 16-colour
+palette* across a creature's whole sprite set (front animation frames + back
+sprite all index into one palette).
+
+This slice adds the foundational primitive that shared-palette work will build
+on: given a reference `P`-mode image, quantize any input so its output reuses
+the reference's **exact** palette. `postprocess` is left untouched — this is an
+additive function, not a replacement.
+
+This is slice 1/4 of #1. It introduces only the primitive; wiring it into the
+sprite-generation flow (front frames, back sprite, callers, CLI) is out of
+scope for this slice.
 
 ## Inputs
 
-| Name | Type | Required | Description |
-|------|------|----------|-------------|
-| `--image` | file path (jpg/png) | No* | Scan or photo of a hand-drawn creature |
-| `--description` | string | No* | Free-text description of the creature ("breathes fire, three tails") |
-| `--mode` | `single` \| `line` | No | Whether to generate one form or a 3-stage evolutionary line. Defaults to `single`. |
+- `image: Image.Image` — the image to quantize. Typically RGB straight from the
+  diffusion pipeline (`result.images[0]`), at generation size (e.g. 768×768),
+  but any size/mode Pillow can resize and enhance is acceptable. The helper
+  does its own resize + enhance, so callers pass the raw image.
+- `reference: Image.Image` — a palette-mode (`P`) PIL image whose palette the
+  output must adopt. In practice produced by `postprocess(...)` on the first
+  sprite of the set, whose palette becomes the locked palette for the rest.
 
-*At least one of `--image` or `--description` must be provided.
+Suggested signature: `quantize_to_reference(image, reference)`.
 
 ## Outputs
 
-A folder tree under `output/` named after the generated Fakemon:
-
-```
-output/
-  <Name>/
-    stage1_<Name>/
-      sprite.png        # 96x96 GBA-style pixel art
-      stats.json        # base stats, type, ability
-      entry.md          # Pokédex entry
-    stage2_<Name2>/     # only if --mode line
-      sprite.png
-      stats.json
-      entry.md
-    stage3_<Name3>/     # only if --mode line
-      sprite.png
-      stats.json
-      entry.md
-```
-
-`stats.json` shape:
-```json
-{
-  "name": "Flamburr",
-  "stage": 1,
-  "types": ["Fire"],
-  "ability": "Blaze",
-  "base_stats": {
-    "hp": 45,
-    "attack": 52,
-    "defense": 43,
-    "sp_atk": 60,
-    "sp_def": 50,
-    "speed": 65
-  }
-}
-```
+- Returns a new `P`-mode `Image.Image` of size 96×96 (`_SPRITE_SIZE`).
+- `result.getpalette()` is byte-for-byte identical to `reference.getpalette()`.
+- Pixel indices reference at most 16 (`_PALETTE_COLORS`) distinct palette
+  entries (bounded by the reference palette populated by `postprocess`, which
+  quantizes to 16 colours).
+- Neither `image` nor `reference` is mutated.
 
 ## Behavior
 
-### Pipeline (per run)
+1. Validate `reference` is `P`-mode (see Errors).
+2. Resize `image` to `(_SPRITE_SIZE, _SPRITE_SIZE)` with `Image.NEAREST`.
+3. Apply `ImageEnhance.Color(...).enhance(1.1)` then
+   `ImageEnhance.Contrast(...).enhance(1.1)` — identical constants/order to
+   `postprocess`, so an image run through either path gets the same pre-steps.
+4. Quantize against the reference palette via
+   `image.quantize(palette=reference)`, which reuses the reference's palette
+   rather than deriving a new one.
+5. Return the resulting `P`-mode image.
 
-1. **Vision step** (only if `--image` provided): send the drawing to Mistral's vision model to extract a plain-English description of the creature's appearance, colors, and notable features.
-
-2. **LLM generation step**: send the combined vision description + user `--description` to `mistral-large`. The prompt instructs it to produce, for each stage required by `--mode`:
-   - A portmanteau-style name
-   - Type(s) (one or two)
-   - One ability
-   - Six base stats (HP, Atk, Def, Sp.Atk, Sp.Def, Speed) balanced to a total BST appropriate for the stage
-   - A short Pokédex entry (2–3 sentences)
-   - A detailed visual prompt for sprite generation (creature appearance, colors, pose, style keywords)
-
-3. **Image generation step** (per stage):
-   - Load `lambdalabs/sd-pokemon-diffusers` via `diffusers`
-   - If `--image` provided: run **img2img** using the drawing as conditioning image + the stage's visual prompt
-   - If no image provided: run **txt2img** using the stage's visual prompt
-   - Generate at 512×512
-   - Post-process: downsample to 96×96 + palette quantization to 16 colors (GBA approximation)
-   - Save as `sprite.png`
-
-4. **Write outputs**: serialize `stats.json` and `entry.md` for each stage, create folder structure.
-
-### Evolutionary line logic (`--mode line`)
-- Stage 1: the base form as described by the user/drawing
-- Stage 2 & 3: LLM invents evolved forms — larger/more powerful/more complex visually, with escalating BST
-- All three stage names and visual prompts are generated in a single LLM call to ensure thematic consistency
+Because every image quantized against the same `reference` produces the same
+palette, two different inputs against one reference yield two outputs with
+identical palettes — the property this slice exists to provide.
 
 ## Edge cases
 
-| Case | Handling |
-|------|----------|
-| Neither `--image` nor `--description` provided | Exit with a clear error message before any API calls |
-| `--image` path does not exist or is not an image | Validate file exists and has an image extension; exit with error |
-| Mistral API returns malformed JSON for stats | Retry once; if it fails again, exit with error and print raw LLM response |
-| Image generation produces a blank/corrupt output | Save it anyway and warn the user; do not block the rest of the output |
-| `--mode single` with a name collision in `output/` | Append a numeric suffix (e.g. `Flamburr_2/`) rather than overwriting |
+- **Two different inputs, same reference** → both outputs carry the reference's
+  palette exactly (equal `getpalette()`). This is the core guarantee.
+- **Reference produced by `postprocess`** → its palette may be padded to 256
+  entries by Pillow; the output's palette matches it byte-for-byte regardless
+  of how many entries are actually used, and distinct indices used stay ≤ 16.
+- **Non-RGB input** (e.g. `RGBA`, `L`): Pillow's `quantize(palette=...)` and the
+  resize/enhance steps convert as needed; not a targeted use case for this slice
+  but should not raise. (Assumption — see below.)
+- **Input already 96×96**: resize is a no-op; behaviour unchanged.
 
 ## Errors
 
-| Failure mode | Surface |
-|---|---|
-| Missing required input | `sys.exit(1)` with human-readable message |
-| Mistral API auth failure | `sys.exit(1)` with message pointing to env var |
-| Diffusers model load failure (OOM, missing weights) | `sys.exit(1)` with model name and exception |
-| Unexpected LLM output structure | Retry once, then `sys.exit(1)` and print raw response for debugging |
+- If `reference.mode != "P"`, raise `ValueError` with a clear message, matching
+  the style already used in `generate_shiny`, e.g.
+  `raise ValueError(f"Expected palette-mode reference image, got {reference.mode}")`.
+  Rationale: `Image.quantize(palette=...)` requires a `P`-mode palette image;
+  failing early with a readable message beats Pillow's internal error.
+- No other input validation is added in this slice (input `image` mode/size are
+  handled by resize/enhance/quantize).
 
 ## Constraints & dependencies
 
-- **Language**: Python 3.10+
-- **LLM**: Mistral API (`mistral-large`; vision step uses a Mistral vision-capable model e.g. `pixtral-large` or `mistral-small` with vision). API key read from `MISTRAL_API_KEY` environment variable.
-- **Image generation**: `diffusers` library, model `lambdalabs/sd-pokemon-diffusers`
-- **Image post-processing**: `Pillow` for downsampling and palette quantization
-- **No separate server required** — all image generation runs in-process
-- **Style target**: GBA Gen 3 Pokémon sprite aesthetic (96×96, limited palette, white or transparent background)
-- **Output format**: PNG sprites, JSON stats, Markdown Pokédex entries
+- Pure PIL only — no torch/diffusers, no network, no filesystem I/O. The
+  function must run in the torch-free keep sandbox.
+- Reuse existing module constants `_SPRITE_SIZE` (96) and `_PALETTE_COLORS`
+  (16) rather than hard-coding.
+- Must not mutate inputs. Pillow's `resize`/`ImageEnhance`/`quantize` all return
+  new images, so following the `postprocess` pattern (rebind local names, never
+  operate in place) satisfies this.
+- Do **not** modify `postprocess`; the adaptive path stays intact.
 
-## Open questions / assumptions
+## Tests
 
-- [ASSUMED] Mistral vision step uses `pixtral-large` or equivalent vision model available on the Mistral API. If the user's Mistral plan does not include vision, a fallback to text-only mode should be added.
-- [ASSUMED] The 16-color palette quantization uses Pillow's `Image.quantize()` with no specific GBA palette — a real GBA palette constraint could be added later.
-- [ASSUMED] Sprite background is white (not transparent) for simplicity; transparency can be added as a post-processing flag later.
-- [ASSUMED] No animated sprites — static PNG only.
-- [ASSUMED] BST targets per stage: ~300 (stage 1), ~420 (stage 2), ~520 (stage 3), loosely following Gen 3 conventions.
-- [OPEN] A signature move was out of scope for v1 but was noted as a potential addition.
-- [OPEN] Catch rate, egg group, and gender ratio were out of scope for v1.
+Add to `tests/test_sprites.py` (runs in the torch-free sandbox; no
+`@pytest.mark.ml`). Build the reference with `postprocess(_noisy_image())` so it
+has a real 16-colour palette. Cover:
+
+- Output mode is `P` and size is `(96, 96)`.
+- Output palette equals the reference palette exactly
+  (`out.getpalette() == reference.getpalette()`).
+- Output uses at most 16 distinct colour indices (mirror the existing
+  `test_postprocess_at_most_16_colors` idiom for counting distinct indices).
+- Two different input images quantized against the same reference produce
+  outputs with identical palettes.
+- Inputs are not mutated (e.g. reference/input size and mode unchanged after the
+  call), following `test_postprocess_does_not_mutate_input`.
+
+No `ml`-marked tests are added; the full suite stays green on the host and the
+light slice stays green without torch.
+
+## Assumptions
+
+Marked items are defaults chosen here, not confirmed by existing code/tests/docs.
+
+- **[picked]** Function name is `quantize_to_reference(image, reference)`, per
+  the issue's suggestion. If a different name is preferred, only the name
+  changes, not the behaviour.
+- **[picked]** The helper performs its own resize + enhance (rather than
+  assuming the caller pre-processed), keeping callers simple and matching
+  `postprocess` parity. This is the issue's chosen default.
+- **[picked]** `reference` is required to be `P`-mode; a non-`P` reference
+  raises `ValueError` (message style borrowed from `generate_shiny`). This
+  mirrors Pillow's own requirement for `quantize(palette=...)`.
+- **[picked]** The enhance constants (`1.1`, `1.1`) and order (Color then
+  Contrast) are copied verbatim from `postprocess` for parity; they are not
+  re-tuned in this slice.
+- **[picked]** Non-RGB inputs are tolerated (delegated to Pillow) but not a
+  targeted use case; no extra handling or validation is added for them.
+- **[picked]** Palette equality is asserted via `getpalette()` byte-for-byte,
+  including any 256-entry padding Pillow adds — callers care that the palettes
+  are *identical*, not about the used-entry count.
+- **[confirmed by issue]** Wiring this helper into the actual generation flow
+  (choosing a reference frame; applying it to back/front sprites, callers, CLI)
+  is deferred to later slices of #1 and is out of scope here.

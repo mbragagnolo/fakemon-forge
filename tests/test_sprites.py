@@ -14,6 +14,7 @@ from PIL import Image
 
 from fakemon_forge.sprites import (
     postprocess,
+    quantize_to_reference,
     build_prompt,
     load_txt2img_pipeline,
     load_img2img_pipeline,
@@ -87,6 +88,51 @@ def test_postprocess_does_not_mutate_input():
     original_size = img.size
     postprocess(img)
     assert img.size == original_size
+
+
+# ---------------------------------------------------------------------------
+# quantize_to_reference()
+# ---------------------------------------------------------------------------
+
+def test_quantize_to_reference_output_is_palette_96x96():
+    ref = postprocess(_noisy_image())
+    out = quantize_to_reference(_rgb_image(), ref)
+    assert out.mode == "P"
+    assert out.size == (96, 96)
+
+
+def test_quantize_to_reference_reuses_reference_palette():
+    ref = postprocess(_noisy_image())
+    out = quantize_to_reference(_rgb_image(), ref)
+    assert out.getpalette() == ref.getpalette()
+
+
+def test_quantize_to_reference_at_most_16_colors():
+    ref = postprocess(_noisy_image())
+    out = quantize_to_reference(_noisy_image(), ref)
+    assert len(set(out.get_flattened_data())) <= 16
+
+
+def test_quantize_to_reference_shares_palette_across_inputs():
+    ref = postprocess(_noisy_image())
+    out_a = quantize_to_reference(_rgb_image(color=(200, 100, 50)), ref)
+    out_b = quantize_to_reference(_rgb_image(color=(20, 180, 220)), ref)
+    assert out_a.getpalette() == out_b.getpalette() == ref.getpalette()
+
+
+def test_quantize_to_reference_does_not_mutate_inputs():
+    ref = postprocess(_noisy_image())
+    ref_size, ref_mode, ref_palette = ref.size, ref.mode, ref.getpalette()
+    img = _rgb_image()
+    img_size, img_mode = img.size, img.mode
+    quantize_to_reference(img, ref)
+    assert (ref.size, ref.mode, ref.getpalette()) == (ref_size, ref_mode, ref_palette)
+    assert (img.size, img.mode) == (img_size, img_mode)
+
+
+def test_quantize_to_reference_rejects_non_palette_reference():
+    with pytest.raises(ValueError, match="palette-mode"):
+        quantize_to_reference(_rgb_image(), _rgb_image())
 
 
 # ---------------------------------------------------------------------------
