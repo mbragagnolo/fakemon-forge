@@ -23,6 +23,13 @@ _KEY_TOLERANCE = 30
 # flat backdrop, not a gradient/vignette) when at least this fraction of its
 # pixels are within ``_KEY_TOLERANCE`` of the mean border colour.
 _BORDER_UNIFORM_FRACTION = 0.9
+# Gen-3 palette contract: 3 reserved slots (key, black, white) plus at most this
+# many creature colours, so the whole palette stays <= 16.
+_MAX_CREATURE_COLORS = 13
+# Tunable eyeball placeholder (kept smaller than the detection ``_KEY_TOLERANCE``
+# above): a creature colour within this Euclidean RGB distance of ``_KEY_COLOR``
+# is nudged away so it can never be mistaken for the transparency background.
+_KEY_COLLISION_DISTANCE = 12
 
 _TYPE_TAGS = {
     "Normal": "normaltype", "Fire": "firetype", "Water": "watertype",
@@ -149,6 +156,72 @@ def _flatten_background_to_key(image: Image.Image) -> Image.Image:
             if p != _KEY_COLOR and _rgb_distance(p, bg) <= _KEY_TOLERANCE:
                 px[x, y] = _KEY_COLOR
     return out
+
+
+def _nudge_off_key(color: tuple[int, int, int]) -> tuple[int, int, int]:
+    """Push a creature colour beyond ``_KEY_COLLISION_DISTANCE`` of ``_KEY_COLOR``.
+
+    A creature colour within the collision radius of the transparency key could
+    be confused with the flattened background, so it is moved along the
+    key->colour direction just past the radius (a fixed fallback direction is
+    used on the degenerate ``colour == key`` case). Channels are clamped to
+    ``[0, 255]``. Colours already outside the radius are returned unchanged.
+    """
+    if _rgb_distance(color, _KEY_COLOR) > _KEY_COLLISION_DISTANCE:
+        return color
+    direction = [color[i] - _KEY_COLOR[i] for i in range(3)]
+    norm = (direction[0] ** 2 + direction[1] ** 2 + direction[2] ** 2) ** 0.5
+    if norm == 0:
+        direction, norm = [0, 0, 1], 1.0  # colour == key: fixed fallback direction
+    # +2 leaves margin so integer rounding can't pull the result back inside.
+    target = _KEY_COLLISION_DISTANCE + 2
+    return tuple(
+        min(255, max(0, round(_KEY_COLOR[i] + direction[i] / norm * target)))
+        for i in range(3)
+    )
+
+
+def _quantize_gen3(image: Image.Image) -> Image.Image:
+    """Return a 96x96 ``P``-mode image obeying the Gen-3 palette contract.
+
+    Palette layout: ``_KEY_COLOR`` at index 0, reserved black and white at
+    indices 1 and 2 (always present, even if the creature uses neither), then up
+    to ``_MAX_CREATURE_COLORS`` creature colours. Every background (key) pixel
+    decodes to index 0 and no creature colour lands within
+    ``_KEY_COLLISION_DISTANCE`` of the key.
+
+    Deterministic pure PIL (median-cut + fixed arithmetic). Assumes RGB input
+    (mirroring ``_flatten_background_to_key``) and does not mutate it.
+    """
+    # Resize + enhance for parity with ``postprocess``, done BEFORE flattening so
+    # the enhance can't shift the key off its byte-exact value.
+    enhanced = image.resize((_SPRITE_SIZE, _SPRITE_SIZE), Image.NEAREST)
+    enhanced = ImageEnhance.Color(enhanced).enhance(1.1)
+    enhanced = ImageEnhance.Contrast(enhanced).enhance(1.1)
+
+    flat = _flatten_background_to_key(enhanced)
+
+    # Quantize the creature region alone (key pixels excluded) so the whole
+    # 13-colour budget is spent on the creature, then nudge any colour off the key.
+    creature_pixels = [p for p in flat.get_flattened_data() if p != _KEY_COLOR]
+    creature_colors: list[tuple[int, int, int]] = []
+    if creature_pixels:
+        scratch = Image.new("RGB", (len(creature_pixels), 1))
+        scratch.putdata(creature_pixels)
+        quantized = scratch.quantize(colors=_MAX_CREATURE_COLORS)
+        qpal = quantized.getpalette()
+        used = sorted({idx for _, idx in quantized.getcolors(maxcolors=len(creature_pixels))})
+        creature_colors = [_nudge_off_key(tuple(qpal[i * 3:i * 3 + 3])) for i in used]
+
+    # Assemble the deterministic palette and map every pixel against it (dither
+    # off). The key is index 0 with no duplicate, so background pixels resolve to
+    # index 0; creature pixels near pure black/white legitimately snap to the
+    # reserved slots without spending creature budget.
+    palette_colors = [_KEY_COLOR, (0, 0, 0), (255, 255, 255)] + creature_colors
+    flat_palette = [channel for color in palette_colors for channel in color]
+    reference = Image.new("P", (1, 1))
+    reference.putpalette(flat_palette)
+    return flat.quantize(palette=reference, dither=Image.Dither.NONE)
 
 
 def _is_achromatic(r: int, g: int, b: int) -> bool:

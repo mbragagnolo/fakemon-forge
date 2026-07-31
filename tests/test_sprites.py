@@ -23,7 +23,11 @@ from fakemon_forge.sprites import (
     build_frame2,
     _background_index,
     _flatten_background_to_key,
+    _quantize_gen3,
+    _rgb_distance,
     _KEY_COLOR,
+    _MAX_CREATURE_COLORS,
+    _KEY_COLLISION_DISTANCE,
     load_txt2img_pipeline,
     load_img2img_pipeline,
     _BASE_MODEL_ID,
@@ -647,3 +651,118 @@ def test_build_frame2_always_shares_palette_96x96():
         assert out.mode == "P"
         assert out.size == (96, 96)
         assert out.getpalette() == frame1.getpalette()
+
+
+# ---------------------------------------------------------------------------
+# _quantize_gen3()
+# ---------------------------------------------------------------------------
+
+def _multicolor_creature():
+    """96x96 RGB: solid-white background (flattens to key) with a many-colour blob."""
+    img = Image.new("RGB", (96, 96), (255, 255, 255))
+    rng = random.Random(3)
+    px = img.load()
+    for y in range(20, 76):
+        for x in range(20, 76):
+            px[x, y] = (rng.randint(0, 180), rng.randint(0, 180), rng.randint(0, 180))
+    return img
+
+
+def _used_colors(out):
+    """Distinct RGB palette colours actually referenced by ``out``'s pixels."""
+    pal = out.getpalette()
+    return {tuple(pal[i * 3:i * 3 + 3]) for i in set(out.get_flattened_data())}
+
+
+def test_quantize_gen3_output_is_palette_96x96():
+    out = _quantize_gen3(_sprite_rgb())
+    assert out.mode == "P"
+    assert out.size == (96, 96)
+
+
+def test_quantize_gen3_key_at_index_0():
+    out = _quantize_gen3(_sprite_rgb())
+    assert out.getpalette()[0:3] == [200, 200, 168]
+
+
+def test_quantize_gen3_reserves_black_and_white_at_fixed_slots():
+    out = _quantize_gen3(_sprite_rgb())
+    pal = out.getpalette()
+    assert pal[3:6] == [0, 0, 0]
+    assert pal[6:9] == [255, 255, 255]
+
+
+def test_quantize_gen3_creature_colour_budget():
+    out = _quantize_gen3(_multicolor_creature())
+    used = _used_colors(out)
+    reserved = {_KEY_COLOR, (0, 0, 0), (255, 255, 255)}
+    creature = used - reserved
+    assert len(creature) <= _MAX_CREATURE_COLORS
+    assert len(used) <= 16
+
+
+def test_quantize_gen3_background_maps_to_index_0():
+    out = _quantize_gen3(_noisy_border_sprite())
+    px = out.load()
+    w, h = out.size
+    for x in range(w):
+        assert px[x, 0] == 0
+        assert px[x, h - 1] == 0
+    for y in range(h):
+        assert px[0, y] == 0
+        assert px[w - 1, y] == 0
+
+
+def test_quantize_gen3_enclosed_pocket_maps_to_index_0():
+    out = _quantize_gen3(_ring_sprite())
+    px = out.load()
+    for point in ((48, 48), (46, 48), (48, 46)):
+        assert px[point] == 0
+
+
+def test_quantize_gen3_reserves_black_white_even_when_creature_uses_neither():
+    img = Image.new("RGB", (96, 96), (255, 255, 255))
+    ImageDraw.Draw(img).ellipse((30, 30, 66, 66), fill=(120, 90, 150))
+    out = _quantize_gen3(img)
+    pal = out.getpalette()
+    assert pal[3:6] == [0, 0, 0]
+    assert pal[6:9] == [255, 255, 255]
+    # ... and the creature genuinely uses neither reserved slot.
+    used = _used_colors(out)
+    assert (0, 0, 0) not in used
+    assert (255, 255, 255) not in used
+
+
+def test_quantize_gen3_nudges_creature_colour_off_key():
+    img = Image.new("RGB", (96, 96), (255, 255, 255))
+    # Body deliberately near the key (dist 10 < _KEY_COLLISION_DISTANCE).
+    ImageDraw.Draw(img).ellipse((30, 30, 66, 66), fill=(200, 200, 178))
+    out = _quantize_gen3(img)
+    pal = out.getpalette()
+    indices = set(out.get_flattened_data())
+    assert any(i != 0 for i in indices)  # the creature is visible, not swallowed
+    for idx in indices:
+        if idx == 0:
+            continue
+        colour = tuple(pal[idx * 3:idx * 3 + 3])
+        assert _rgb_distance(colour, _KEY_COLOR) > _KEY_COLLISION_DISTANCE
+
+
+def test_quantize_gen3_all_background_does_not_crash():
+    img = Image.new("RGB", (96, 96), (255, 255, 255))
+    out = _quantize_gen3(img)
+    assert out.mode == "P"
+    assert set(out.get_flattened_data()) == {0}
+    pal = out.getpalette()
+    assert pal[0:3] == [200, 200, 168]
+    assert pal[3:6] == [0, 0, 0]
+    assert pal[6:9] == [255, 255, 255]
+
+
+def test_quantize_gen3_does_not_mutate_input():
+    img = _sprite_rgb()
+    original_data = list(img.get_flattened_data())
+    original_size = img.size
+    _quantize_gen3(img)
+    assert img.size == original_size
+    assert list(img.get_flattened_data()) == original_data
