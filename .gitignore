@@ -7,5 +7,6 @@ dist/
 build/
 *.egg-info/
 .pytest_cache/
+.claude/settings.local.json
 models/
 test_sprite.png

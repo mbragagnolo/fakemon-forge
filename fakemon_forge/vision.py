@@ -4,7 +4,7 @@ from pathlib import Path
 
 from mistralai.client import Mistral
 
-_VISION_MODEL = "pixtral-large-latest"
+_VISION_MODEL = "mistral-large-latest"
 
 _MIME = {
     ".jpg": "image/jpeg",
