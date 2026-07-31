@@ -42,6 +42,7 @@ def ctx(tmp_path, monkeypatch):
         patch("fakemon_forge.main.generate_frame2")                as m_frame2,
         patch("fakemon_forge.main.generate_shiny")                 as m_shiny,
         patch("fakemon_forge.main.stitch_spritesheet")             as m_stitch,
+        patch("fakemon_forge.main.generate_icon")                  as m_icon,
         patch("fakemon_forge.main.write_output", return_value=[stage_dir]) as m_write,
         patch("fakemon_forge.main.export_ini")                     as m_export,
     ):
@@ -50,6 +51,7 @@ def ctx(tmp_path, monkeypatch):
             "t2i": m_t2i, "i2i": m_i2i, "make_i2i": m_make_i2i,
             "sprite": m_sprite, "sprite_i2i": m_sprite_i2i,
             "frame2": m_frame2, "shiny": m_shiny, "stitch": m_stitch,
+            "icon": m_icon,
             "write": m_write, "export": m_export, "stage_dir": stage_dir,
         }
 
@@ -77,11 +79,12 @@ def ctx_line(tmp_path, monkeypatch):
         patch("fakemon_forge.main.generate_frame2")           as m_frame2,
         patch("fakemon_forge.main.generate_shiny")            as m_shiny,
         patch("fakemon_forge.main.stitch_spritesheet")        as m_stitch,
+        patch("fakemon_forge.main.generate_icon")             as m_icon,
         patch("fakemon_forge.main.write_output", return_value=dirs),
         patch("fakemon_forge.main.export_ini"),
     ):
         yield {"sprite": m_sprite, "frame2": m_frame2, "shiny": m_shiny,
-               "stitch": m_stitch, "dirs": dirs}
+               "stitch": m_stitch, "icon": m_icon, "dirs": dirs}
 
 
 # ---------------------------------------------------------------------------
@@ -356,6 +359,42 @@ def test_tier_pseudo_passed_to_llm(ctx):
 def test_tier_legendary_passed_to_llm(ctx):
     main(["--description", "fire lizard", "--tier", "legendary"])
     assert ctx["gen"].call_args.kwargs["tier"] == "legendary"
+
+
+# ---------------------------------------------------------------------------
+# Party-menu icon (sprite_small.png)
+# ---------------------------------------------------------------------------
+
+def test_icon_generated_once_per_stage(ctx):
+    main(["--description", "fire lizard"])
+    ctx["icon"].assert_called_once()
+    assert ctx["icon"].call_args.args == (
+        str(ctx["stage_dir"] / "sprite.png"),
+        str(ctx["stage_dir"] / "sprite_small.png"),
+    )
+
+
+def test_icon_generated_three_times_in_line_mode(ctx_line):
+    main(["--description", "fire lizard", "--mode", "line"])
+    assert ctx_line["icon"].call_count == 3
+
+
+def test_icon_failure_warns_but_does_not_exit(ctx, capsys):
+    ctx["icon"].side_effect = RuntimeError("icon crash")
+    main(["--description", "fire lizard"])   # must not raise
+    err = capsys.readouterr().err
+    assert "Warning" in err
+    assert "Flamburr" in err
+    # an icon failure must NOT skip the rest of the stage: a later block in the
+    # same stage still runs (the spritesheet is still stitched).
+    ctx["stitch"].assert_called_once()
+
+
+def test_icon_not_added_to_spritesheet_layout():
+    from fakemon_forge.sprites import _SHEET_LAYOUT
+    names = {name for name, *_ in _SHEET_LAYOUT}
+    assert len(_SHEET_LAYOUT) == 6
+    assert "sprite_small.png" not in names
 
 
 # ---------------------------------------------------------------------------
