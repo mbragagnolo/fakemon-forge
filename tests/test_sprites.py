@@ -200,6 +200,33 @@ def test_quantize_to_reference_rejects_non_palette_reference():
         quantize_to_reference(_rgb_image(), _rgb_image())
 
 
+def test_quantize_to_reference_noisy_background_maps_to_index_0():
+    # A candidate with a noisy near-white background must have its whole
+    # background flattened to the key and nearest-map to index 0 (the key
+    # slot) — NOT to the reserved white slot.
+    reference = postprocess(_sprite_rgb())
+    assert reference.getpalette()[0:3] == [200, 200, 168]  # key at index 0
+    out = quantize_to_reference(_noisy_border_sprite(), reference)
+    assert out.getpalette() == reference.getpalette()
+    px = out.load()
+    w, h = out.size
+    for x in range(w):
+        assert px[x, 0] == 0
+        assert px[x, h - 1] == 0
+    for y in range(h):
+        assert px[0, y] == 0
+        assert px[w - 1, y] == 0
+
+
+def test_quantize_to_reference_preserves_reserved_slots_through_lock():
+    reference = postprocess(_sprite_rgb())
+    out = quantize_to_reference(_noisy_border_sprite(), reference)
+    pal = out.getpalette()
+    assert pal[0:3] == [200, 200, 168]  # key at index 0
+    assert pal[3:6] == [0, 0, 0]        # reserved black
+    assert pal[6:9] == [255, 255, 255]  # reserved white
+
+
 # ---------------------------------------------------------------------------
 # Back-sprite palette lock (pure core of the reference-locked back sprite)
 # ---------------------------------------------------------------------------
@@ -242,6 +269,39 @@ def test_cross_view_shinies_share_one_rotated_palette(tmp_path):
     assert shiny_palettes[0] == shiny_palettes[1] == shiny_palettes[2]
     # Rotation actually happened (mid-tone entries changed).
     assert shiny_palettes[0] != reference.getpalette()
+    # Key / white / black are pinned: identical to the normals' across views.
+    for shiny_pal in shiny_palettes:
+        assert shiny_pal[0:3] == reference.getpalette()[0:3]  # key
+        assert shiny_pal[3:6] == reference.getpalette()[3:6]  # black
+        assert shiny_pal[6:9] == reference.getpalette()[6:9]  # white
+
+
+def test_generate_shiny_pins_chromatic_key_at_index_0(tmp_path):
+    """The key (200,200,168) is chromatic (lum ~196) but must never rotate."""
+    sprite = postprocess(_sprite_rgb())
+    assert sprite.getpalette()[0:3] == [200, 200, 168]
+    src = tmp_path / "sprite.png"
+    out = tmp_path / "sprite_shiny.png"
+    sprite.save(str(src))
+    generate_shiny(str(src), "Flamburr", str(out))
+    assert Image.open(str(out)).getpalette()[0:3] == [200, 200, 168]
+
+
+def test_generate_shiny_pins_white_black_but_rotates_creature(tmp_path):
+    sprite = postprocess(_sprite_rgb())
+    src = tmp_path / "sprite.png"
+    out = tmp_path / "sprite_shiny.png"
+    sprite.save(str(src))
+    generate_shiny(str(src), "Flamburr", str(out))
+    orig = sprite.getpalette()
+    shiny = Image.open(str(out)).getpalette()
+    # White and black entries are copied through unchanged.
+    for i in range(0, len(orig), 3):
+        triple = orig[i:i + 3]
+        if triple in ([0, 0, 0], [255, 255, 255]):
+            assert shiny[i:i + 3] == triple
+    # ... yet rotation still happened for at least one creature (mid-tone) entry.
+    assert any(orig[i:i + 3] != shiny[i:i + 3] for i in range(9, len(orig), 3))
 
 
 # ---------------------------------------------------------------------------
@@ -556,10 +616,24 @@ def test_difference_ratio_identical_is_zero():
     assert difference_ratio(frame1, frame1) == 0.0
 
 
+def _filled_creature(interior):
+    """A full-frame creature (distinct interior) with a thin uniform border.
+
+    quantize_to_reference now flattens the border to the key, so a *solid* image
+    would collapse entirely to index 0; a bordered fill keeps the interior as
+    creature content that quantizes on its own colour.
+    """
+    img = Image.new("RGB", (96, 96), (10, 10, 10))  # uniform border colour
+    ImageDraw.Draw(img).rectangle((1, 1, 94, 94), fill=interior)
+    return img
+
+
 def test_difference_ratio_all_different_is_high():
     ref = postprocess(_sprite_rgb())
-    a = quantize_to_reference(_rgb_image(96, 96, (0, 0, 0)), ref)
-    b = quantize_to_reference(_rgb_image(96, 96, (255, 255, 255)), ref)
+    # Two full-frame creatures whose interiors lock to different palette slots;
+    # only the thin border keys to index 0, so nearly every pixel differs.
+    a = quantize_to_reference(_filled_creature((20, 40, 200)), ref)
+    b = quantize_to_reference(_filled_creature((240, 60, 20)), ref)
     assert difference_ratio(a, b) > 0.9
 
 
@@ -641,10 +715,9 @@ def test_build_frame2_no_candidate_returns_squash():
 
 def test_build_frame2_near_identical_candidate_falls_back():
     frame1 = postprocess(_sprite_rgb())
-    # _sprite_rgb's dark (40, 40, 60) background nearest-maps to reserved black
-    # (index 1), not the key (index 0) frame1's background sits on, so the
-    # candidate differs from frame1 across the whole backdrop -> ratio above
-    # high -> rejected -> squash fallback.
+    # quantize_to_reference now flattens _sprite_rgb's dark (40, 40, 60) backdrop
+    # to the key (index 0) just like frame1's, so the same-creature candidate is
+    # ~identical to frame1 -> ratio below low -> rejected -> squash fallback.
     out = build_frame2(frame1, _sprite_rgb())
     assert list(out.get_flattened_data()) == list(procedural_squash(frame1).get_flattened_data())
 
@@ -658,10 +731,11 @@ def test_build_frame2_wildly_different_candidate_falls_back():
 def _key_background_sprite(body):
     """A _sprite_rgb whose dark backdrop is swapped for the transparency key.
 
-    quantize_to_reference does not flatten a candidate's background to the key,
-    so only a key-coloured backdrop nearest-maps to index 0 (matching frame 1's
-    key background). Then the sole difference from frame 1 is the recoloured
-    creature region, yielding an in-band diff ratio.
+    quantize_to_reference now flattens a candidate's background to the key, so a
+    dark backdrop would key to index 0 too; pre-keying the backdrop keeps this
+    helper explicit about matching frame 1's key background. Either way the sole
+    difference from frame 1 is the recoloured creature region, yielding an
+    in-band diff ratio.
     """
     img = _sprite_rgb(body=body)
     px = img.load()
