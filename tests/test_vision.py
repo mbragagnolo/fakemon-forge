@@ -46,7 +46,7 @@ def test_calls_correct_model(tmp_path):
     describe_image(str(img), client=client)
 
     call_kwargs = client.chat.complete.call_args.kwargs
-    assert call_kwargs["model"] == "pixtral-large-latest"
+    assert call_kwargs["model"] == "mistral-large-latest"
 
 
 def test_sends_image_as_base64_data_url_png(tmp_path):
