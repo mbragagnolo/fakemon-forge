@@ -41,6 +41,7 @@ def ctx(tmp_path, monkeypatch):
         patch("fakemon_forge.main.generate_sprite_img2img")        as m_sprite_i2i,
         patch("fakemon_forge.main.generate_frame2")                as m_frame2,
         patch("fakemon_forge.main.generate_shiny")                 as m_shiny,
+        patch("fakemon_forge.main.stitch_spritesheet")             as m_stitch,
         patch("fakemon_forge.main.write_output", return_value=[stage_dir]) as m_write,
         patch("fakemon_forge.main.export_ini")                     as m_export,
     ):
@@ -48,7 +49,7 @@ def ctx(tmp_path, monkeypatch):
             "mistral": m_mistral, "vision": m_vision, "gen": m_gen,
             "t2i": m_t2i, "i2i": m_i2i, "make_i2i": m_make_i2i,
             "sprite": m_sprite, "sprite_i2i": m_sprite_i2i,
-            "frame2": m_frame2, "shiny": m_shiny,
+            "frame2": m_frame2, "shiny": m_shiny, "stitch": m_stitch,
             "write": m_write, "export": m_export, "stage_dir": stage_dir,
         }
 
@@ -75,10 +76,12 @@ def ctx_line(tmp_path, monkeypatch):
         patch("fakemon_forge.main.generate_sprite_img2img"),
         patch("fakemon_forge.main.generate_frame2")           as m_frame2,
         patch("fakemon_forge.main.generate_shiny")            as m_shiny,
+        patch("fakemon_forge.main.stitch_spritesheet")        as m_stitch,
         patch("fakemon_forge.main.write_output", return_value=dirs),
         patch("fakemon_forge.main.export_ini"),
     ):
-        yield {"sprite": m_sprite, "frame2": m_frame2, "shiny": m_shiny, "dirs": dirs}
+        yield {"sprite": m_sprite, "frame2": m_frame2, "shiny": m_shiny,
+               "stitch": m_stitch, "dirs": dirs}
 
 
 # ---------------------------------------------------------------------------
@@ -353,3 +356,29 @@ def test_tier_pseudo_passed_to_llm(ctx):
 def test_tier_legendary_passed_to_llm(ctx):
     main(["--description", "fire lizard", "--tier", "legendary"])
     assert ctx["gen"].call_args.kwargs["tier"] == "legendary"
+
+
+# ---------------------------------------------------------------------------
+# Spritesheet stitching
+# ---------------------------------------------------------------------------
+
+def test_spritesheet_stitched_at_both_sizes(ctx):
+    main(["--description", "fire lizard"])
+    calls = ctx["stitch"].call_args_list
+    assert len(calls) == 2
+    assert calls[0].args == (ctx["stage_dir"], str(ctx["stage_dir"] / "spritesheet.png"))
+    assert calls[0].kwargs == {}
+    assert calls[1].args == (ctx["stage_dir"], str(ctx["stage_dir"] / "spritesheet_64.png"))
+    assert calls[1].kwargs == {"cell_size": 64}
+
+
+def test_spritesheet_stitched_per_stage_in_line_mode(ctx_line):
+    main(["--description", "fire lizard", "--mode", "line"])
+    assert ctx_line["stitch"].call_count == 6   # 2 sheets x 3 stages
+
+
+def test_spritesheet_failure_warns_but_does_not_exit(ctx, capsys):
+    ctx["stitch"].side_effect = RuntimeError("stitch crash")
+    main(["--description", "fire lizard"])   # must not raise
+    err = capsys.readouterr().err
+    assert "Warning" in err and "Flamburr" in err

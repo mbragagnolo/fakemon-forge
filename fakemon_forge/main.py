@@ -12,6 +12,7 @@ from fakemon_forge.sprites import (
     generate_sprite_img2img,
     generate_frame2,
     generate_shiny,
+    stitch_spritesheet,
     load_txt2img_pipeline,
     load_img2img_pipeline,
     make_img2img_pipeline,
@@ -122,6 +123,15 @@ def main(argv=None):
         except Exception as exc:
             print(
                 f"Warning: back shiny generation failed for {stage['name']}: {exc}",
+                file=sys.stderr,
+            )
+
+        try:
+            stitch_spritesheet(stage_dir, str(stage_dir / "spritesheet.png"))
+            stitch_spritesheet(stage_dir, str(stage_dir / "spritesheet_64.png"), cell_size=64)
+        except Exception as exc:
+            print(
+                f"Warning: spritesheet stitching failed for {stage['name']}: {exc}",
                 file=sys.stderr,
             )
 

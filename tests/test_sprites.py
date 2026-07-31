@@ -21,6 +21,7 @@ from fakemon_forge.sprites import (
     recenter_to_anchor,
     difference_ratio,
     build_frame2,
+    stitch_spritesheet,
     _background_index,
     _flatten_background_to_key,
     _quantize_gen3,
@@ -886,3 +887,90 @@ def test_quantize_gen3_does_not_mutate_input():
     _quantize_gen3(img)
     assert img.size == original_size
     assert list(img.get_flattened_data()) == original_data
+
+
+# ---------------------------------------------------------------------------
+# stitch_spritesheet()
+# ---------------------------------------------------------------------------
+
+_VIEW_COLORS = {
+    "sprite.png": (200, 80, 60),
+    "sprite_shiny.png": (60, 80, 200),
+    "sprite_back.png": (80, 200, 60),
+    "sprite_back_shiny.png": (200, 200, 60),
+    "sprite_frame2.png": (200, 60, 200),
+    "sprite_frame2_shiny.png": (60, 200, 200),
+}
+
+
+def _make_stage_dir(tmp_path, views=_VIEW_COLORS):
+    """Write solid-colour 96x96 P-mode stand-ins for each requested view."""
+    for name, color in views.items():
+        img = Image.new("RGB", (96, 96), color)
+        img.quantize(colors=2).save(str(tmp_path / name))
+    return tmp_path
+
+
+def _cell_color(sheet, col, row, cell=96):
+    return sheet.convert("RGB").getpixel((col * cell + cell // 2, row * cell + cell // 2))
+
+
+def test_spritesheet_is_384x192_rgb(tmp_path):
+    stage = _make_stage_dir(tmp_path)
+    out = tmp_path / "spritesheet.png"
+    stitch_spritesheet(str(stage), str(out))
+    sheet = Image.open(out)
+    assert sheet.size == (384, 192)
+    assert sheet.mode == "RGB"
+
+
+def test_spritesheet_cell_layout_matches_reference_sheets(tmp_path):
+    # Row 0: front, front-shiny, back, back-shiny; row 1: frame2, frame2-shiny.
+    stage = _make_stage_dir(tmp_path)
+    out = tmp_path / "spritesheet.png"
+    stitch_spritesheet(str(stage), str(out))
+    sheet = Image.open(out)
+    assert _cell_color(sheet, 0, 0) == _VIEW_COLORS["sprite.png"]
+    assert _cell_color(sheet, 1, 0) == _VIEW_COLORS["sprite_shiny.png"]
+    assert _cell_color(sheet, 2, 0) == _VIEW_COLORS["sprite_back.png"]
+    assert _cell_color(sheet, 3, 0) == _VIEW_COLORS["sprite_back_shiny.png"]
+    assert _cell_color(sheet, 0, 1) == _VIEW_COLORS["sprite_frame2.png"]
+    assert _cell_color(sheet, 1, 1) == _VIEW_COLORS["sprite_frame2_shiny.png"]
+
+
+def test_spritesheet_empty_cells_are_key(tmp_path):
+    stage = _make_stage_dir(tmp_path)
+    out = tmp_path / "spritesheet.png"
+    stitch_spritesheet(str(stage), str(out))
+    sheet = Image.open(out)
+    assert _cell_color(sheet, 2, 1) == _KEY_COLOR
+    assert _cell_color(sheet, 3, 1) == _KEY_COLOR
+
+
+def test_spritesheet_missing_view_leaves_cell_key(tmp_path):
+    views = {k: v for k, v in _VIEW_COLORS.items() if k != "sprite_frame2.png"}
+    stage = _make_stage_dir(tmp_path, views)
+    out = tmp_path / "spritesheet.png"
+    stitch_spritesheet(str(stage), str(out))   # must not raise
+    sheet = Image.open(out)
+    assert _cell_color(sheet, 0, 1) == _KEY_COLOR
+    assert _cell_color(sheet, 1, 1) == _VIEW_COLORS["sprite_frame2_shiny.png"]
+
+
+def test_spritesheet_64_variant_is_256x128(tmp_path):
+    stage = _make_stage_dir(tmp_path)
+    out = tmp_path / "spritesheet_64.png"
+    stitch_spritesheet(str(stage), str(out), cell_size=64)
+    sheet = Image.open(out)
+    assert sheet.size == (256, 128)
+    assert _cell_color(sheet, 0, 0, cell=64) == _VIEW_COLORS["sprite.png"]
+
+
+def test_spritesheet_64_downscale_introduces_no_new_colors(tmp_path):
+    # NEAREST downscale must only drop pixels, never blend new colours in.
+    stage = _make_stage_dir(tmp_path)
+    out = tmp_path / "spritesheet_64.png"
+    stitch_spritesheet(str(stage), str(out), cell_size=64)
+    sheet_colors = set(Image.open(out).convert("RGB").get_flattened_data())
+    allowed = set(_VIEW_COLORS.values()) | {_KEY_COLOR}
+    assert sheet_colors <= allowed

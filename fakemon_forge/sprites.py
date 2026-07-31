@@ -512,6 +512,42 @@ def generate_frame2(
     frame2.save(output_path)
 
 
+# Cell layout of the 4x2 stitched sheet, matching the hand-made reference
+# sheets in F:/Projects/Projet_Pokemon (Charmander 4.png, Blitin, Bluchis):
+# row 0 is normal/shiny column pairs of front then back, row 1 is frame 2.
+# The remaining two cells stay on the transparency key.
+_SHEET_LAYOUT = [
+    ("sprite.png", 0, 0),
+    ("sprite_shiny.png", 1, 0),
+    ("sprite_back.png", 2, 0),
+    ("sprite_back_shiny.png", 3, 0),
+    ("sprite_frame2.png", 0, 1),
+    ("sprite_frame2_shiny.png", 1, 1),
+]
+
+
+def stitch_spritesheet(stage_dir: str, output_path: str, *, cell_size: int = _SPRITE_SIZE) -> None:
+    """Stitch a stage's six sprite views into one 4x2 sheet.
+
+    The canvas (including the two unused cells) is filled with ``_KEY_COLOR``
+    so a ROM tool can key transparency off the whole sheet. A missing view
+    leaves its cell on the key rather than failing — mirroring how sprite
+    generation degrades per-view. Views are pasted at native size; a non-native
+    ``cell_size`` (e.g. 64 for GBA tooling) downscales with NEAREST, which
+    drops pixels but never blends new colours into the palette.
+    """
+    sheet = Image.new("RGB", (4 * cell_size, 2 * cell_size), _KEY_COLOR)
+    for name, col, row in _SHEET_LAYOUT:
+        path = Path(stage_dir) / name
+        if not path.exists():
+            continue
+        cell = Image.open(path).convert("RGB")
+        if cell.size != (cell_size, cell_size):
+            cell = cell.resize((cell_size, cell_size), Image.NEAREST)
+        sheet.paste(cell, (col * cell_size, row * cell_size))
+    sheet.save(output_path)
+
+
 def make_img2img_pipeline(txt2img_pipe):
     from diffusers import StableDiffusionImg2ImgPipeline
     return StableDiffusionImg2ImgPipeline(**txt2img_pipe.components)
