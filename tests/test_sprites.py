@@ -10,12 +10,17 @@ Pillow, and mistralai, e.g. the keep sandbox. Tests that trigger real
 import random
 import pytest
 from unittest.mock import MagicMock, patch
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from fakemon_forge.sprites import (
     postprocess,
     quantize_to_reference,
     build_prompt,
+    procedural_squash,
+    recenter_to_anchor,
+    difference_ratio,
+    build_frame2,
+    _background_index,
     load_txt2img_pipeline,
     load_img2img_pipeline,
     _BASE_MODEL_ID,
@@ -38,6 +43,35 @@ def _noisy_image(w=512, h=512):
         for _ in range(w * h)
     ])
     return img
+
+
+def _sprite_rgb(body=(200, 80, 60)):
+    """A 96x96 creature-ish RGB: a large background, a body, eyes, and feet.
+
+    Mostly background so a small squash lands inside the acceptance band, with
+    enough internal variation that squashing changes a moderate pixel count.
+    """
+    img = Image.new("RGB", (96, 96), (40, 40, 60))
+    d = ImageDraw.Draw(img)
+    d.ellipse((26, 28, 70, 84), fill=body)
+    # Horizontal shading bands give the body vertical texture, so a small
+    # vertical squash shifts real detail (as on a shaded Gen-3 sprite).
+    highlight = tuple(min(c + 40, 255) for c in body)
+    for y in range(30, 84, 4):
+        d.rectangle((28, y, 68, y + 1), fill=highlight)
+    d.ellipse((34, 40, 46, 52), fill=(240, 240, 240))
+    d.ellipse((50, 40, 62, 52), fill=(240, 240, 240))
+    d.rectangle((38, 74, 58, 84), fill=(80, 60, 40))
+    return img
+
+
+def _content_bbox(img, bg):
+    return img.point(lambda p: 255 if p != bg else 0).getbbox()
+
+
+def _anchor(bbox):
+    left, top, right, bottom = bbox
+    return ((left + right) / 2, bottom)
 
 
 # ---------------------------------------------------------------------------
@@ -304,3 +338,180 @@ def test_load_img2img_error_mentions_exception(capsys):
         with pytest.raises(SystemExit):
             load_img2img_pipeline()
     assert "missing weights" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# _background_index()
+# ---------------------------------------------------------------------------
+
+def test_background_index_is_most_common_index():
+    frame1 = postprocess(_sprite_rgb())
+    bg = _background_index(frame1)
+    counts = {i: c for c, i in frame1.getcolors()}
+    assert bg == max(counts, key=counts.get)
+
+
+# ---------------------------------------------------------------------------
+# procedural_squash()
+# ---------------------------------------------------------------------------
+
+def test_procedural_squash_is_96x96_palette_mode():
+    out = procedural_squash(postprocess(_sprite_rgb()))
+    assert out.size == (96, 96)
+    assert out.mode == "P"
+
+
+def test_procedural_squash_shares_frame1_palette():
+    frame1 = postprocess(_sprite_rgb())
+    assert procedural_squash(frame1).getpalette() == frame1.getpalette()
+
+
+def test_procedural_squash_differs_within_acceptance_band():
+    frame1 = postprocess(_sprite_rgb())
+    ratio = difference_ratio(procedural_squash(frame1), frame1)
+    assert 0.0 < ratio
+    assert 0.02 <= ratio <= 0.30
+
+
+def test_procedural_squash_rejects_non_palette_input():
+    with pytest.raises(ValueError, match="palette-mode"):
+        procedural_squash(_rgb_image(96, 96))
+
+
+def test_procedural_squash_does_not_mutate_input():
+    frame1 = postprocess(_sprite_rgb())
+    data = list(frame1.get_flattened_data())
+    palette = frame1.getpalette()
+    procedural_squash(frame1)
+    assert list(frame1.get_flattened_data()) == data
+    assert frame1.getpalette() == palette
+
+
+# ---------------------------------------------------------------------------
+# difference_ratio()
+# ---------------------------------------------------------------------------
+
+def test_difference_ratio_identical_is_zero():
+    frame1 = postprocess(_sprite_rgb())
+    assert difference_ratio(frame1, frame1) == 0.0
+
+
+def test_difference_ratio_all_different_is_high():
+    ref = postprocess(_sprite_rgb())
+    a = quantize_to_reference(_rgb_image(96, 96, (0, 0, 0)), ref)
+    b = quantize_to_reference(_rgb_image(96, 96, (255, 255, 255)), ref)
+    assert difference_ratio(a, b) > 0.9
+
+
+def test_difference_ratio_rejects_size_mismatch():
+    a = postprocess(_sprite_rgb())
+    b = a.resize((48, 48))
+    with pytest.raises(ValueError):
+        difference_ratio(a, b)
+
+
+# ---------------------------------------------------------------------------
+# recenter_to_anchor()
+# ---------------------------------------------------------------------------
+
+def test_recenter_aligns_shifted_candidate_to_frame1_anchor():
+    frame1 = postprocess(_sprite_rgb())
+    bg = _background_index(frame1)
+    # Build a shifted candidate that shares frame1's palette.
+    shifted = Image.new("P", (96, 96), bg)
+    shifted.putpalette(frame1.getpalette())
+    shifted.paste(frame1, (12, -9))
+
+    recentred = recenter_to_anchor(shifted, frame1)
+    target = _anchor(_content_bbox(frame1, bg))
+    got = _anchor(_content_bbox(recentred, bg))
+    assert abs(got[0] - target[0]) <= 1
+    assert abs(got[1] - target[1]) <= 1
+
+
+def test_recenter_shares_frame1_palette():
+    frame1 = postprocess(_sprite_rgb())
+    recentred = recenter_to_anchor(frame1, frame1)
+    assert recentred.mode == "P"
+    assert recentred.size == (96, 96)
+    assert recentred.getpalette() == frame1.getpalette()
+
+
+def test_recenter_all_background_candidate_does_not_crash():
+    frame1 = postprocess(_sprite_rgb())
+    bg = _background_index(frame1)
+    blank = Image.new("P", (96, 96), bg)
+    blank.putpalette(frame1.getpalette())
+    out = recenter_to_anchor(blank, frame1)
+    assert out.size == (96, 96)
+    assert out.getpalette() == frame1.getpalette()
+
+
+def test_recenter_rejects_non_palette_frame1():
+    frame1 = postprocess(_sprite_rgb())
+    with pytest.raises(ValueError, match="palette-mode"):
+        recenter_to_anchor(frame1, _rgb_image(96, 96))
+
+
+def test_recenter_does_not_mutate_inputs():
+    frame1 = postprocess(_sprite_rgb())
+    bg = _background_index(frame1)
+    shifted = Image.new("P", (96, 96), bg)
+    shifted.putpalette(frame1.getpalette())
+    shifted.paste(frame1, (12, -9))
+
+    frame1_data = list(frame1.get_flattened_data())
+    cand_data = list(shifted.get_flattened_data())
+    recenter_to_anchor(shifted, frame1)
+    assert list(frame1.get_flattened_data()) == frame1_data
+    assert list(shifted.get_flattened_data()) == cand_data
+
+
+# ---------------------------------------------------------------------------
+# build_frame2()
+# ---------------------------------------------------------------------------
+
+def test_build_frame2_no_candidate_returns_squash():
+    frame1 = postprocess(_sprite_rgb())
+    out = build_frame2(frame1)
+    assert out.getpalette() == frame1.getpalette()
+    assert list(out.get_flattened_data()) == list(procedural_squash(frame1).get_flattened_data())
+    assert difference_ratio(out, frame1) > 0.0
+
+
+def test_build_frame2_near_identical_candidate_falls_back():
+    frame1 = postprocess(_sprite_rgb())
+    # Feeding the original RGB reproduces frame1 after locking -> ratio < low.
+    out = build_frame2(frame1, _sprite_rgb())
+    assert list(out.get_flattened_data()) == list(procedural_squash(frame1).get_flattened_data())
+
+
+def test_build_frame2_wildly_different_candidate_falls_back():
+    frame1 = postprocess(_sprite_rgb())
+    out = build_frame2(frame1, _noisy_image(96, 96))
+    assert list(out.get_flattened_data()) == list(procedural_squash(frame1).get_flattened_data())
+
+
+def test_build_frame2_in_band_candidate_is_accepted():
+    frame1 = postprocess(_sprite_rgb())
+    # A moderately different creature: recoloured body -> in-band difference.
+    candidate = _sprite_rgb(body=(90, 160, 210))
+    out = build_frame2(frame1, candidate)
+    squash = list(procedural_squash(frame1).get_flattened_data())
+    assert list(out.get_flattened_data()) != squash
+    assert out.getpalette() == frame1.getpalette()
+    assert 0.02 <= difference_ratio(out, frame1) <= 0.30
+
+
+def test_build_frame2_rejects_non_palette_frame1():
+    with pytest.raises(ValueError, match="palette-mode"):
+        build_frame2(_rgb_image(96, 96))
+
+
+def test_build_frame2_always_shares_palette_96x96():
+    frame1 = postprocess(_sprite_rgb())
+    for cand in (None, _sprite_rgb(), _noisy_image(96, 96)):
+        out = build_frame2(frame1, cand)
+        assert out.mode == "P"
+        assert out.size == (96, 96)
+        assert out.getpalette() == frame1.getpalette()

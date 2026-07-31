@@ -96,6 +96,130 @@ def generate_shiny(sprite_path: str, name: str, output_path: str) -> None:
     shiny.save(output_path)
 
 
+def _background_index(frame1: Image.Image) -> int:
+    """Return frame 1's background palette index.
+
+    Default choice: the *most common* palette index (the flat backdrop behind
+    the creature dominates a sprite). Used both to fill the squash/recenter
+    canvas and to define "non-background" for bbox detection.
+    """
+    # getcolors() yields (count, index) pairs for a P-mode image.
+    count_index = max(frame1.getcolors(maxcolors=_SPRITE_SIZE * _SPRITE_SIZE))
+    return count_index[1]
+
+
+def _content_bbox(image: Image.Image, background: int):
+    """Bounding box of the non-background region, or ``None`` if all background."""
+    mask = image.point(lambda p: 255 if p != background else 0)
+    return mask.getbbox()
+
+
+def procedural_squash(frame1: Image.Image, amount_px: int = 2) -> Image.Image:
+    """Bottom-anchored vertical squash of ``frame1`` — the Gen-3 breathing frame.
+
+    Compresses frame 1's content to ``96 x (96 - amount_px)`` and pastes it at
+    the bottom, so the creature's feet stay planted while the top compresses.
+    This is the fallback frame 2 whenever an img2img candidate is rejected, so
+    it is built to be genuinely good and to land inside the acceptance band.
+
+    ``amount_px`` is a tunable eyeball placeholder (see the module spec); the
+    sensible squash range is ``1..95``. Operates entirely in P-space
+    (nearest-neighbour reuses existing indices) so the result shares frame 1's
+    exact palette without a re-quantize. Input is not mutated.
+    """
+    if frame1.mode != "P":
+        raise ValueError(f"Expected palette-mode frame1 image, got {frame1.mode}")
+    background = _background_index(frame1)
+    # NEAREST in P-space introduces no new colours (indices are reused verbatim).
+    squashed = frame1.resize((_SPRITE_SIZE, _SPRITE_SIZE - amount_px), Image.NEAREST)
+    canvas = Image.new("P", (_SPRITE_SIZE, _SPRITE_SIZE), background)
+    canvas.putpalette(frame1.getpalette())
+    # Paste at (0, amount_px): bottom row aligns with the canvas bottom and the
+    # top ``amount_px`` rows become background.
+    canvas.paste(squashed, (0, amount_px))
+    return canvas
+
+
+def recenter_to_anchor(candidate: Image.Image, frame1: Image.Image) -> Image.Image:
+    """Translate ``candidate`` so its content bbox anchors to frame 1's.
+
+    The anchor is the bottom-centre of the non-background bounding box, so the
+    two frames share a planted-feet position and the second frame does not
+    appear to teleport/jitter. ``candidate`` is expected to already share
+    frame 1's palette (in the ``build_frame2`` flow it has been palette-locked).
+    Returns a fresh 96x96 P-mode image sharing frame 1's exact palette; inputs
+    are not mutated.
+    """
+    if frame1.mode != "P":
+        raise ValueError(f"Expected palette-mode frame1 image, got {frame1.mode}")
+    background = _background_index(frame1)
+    canvas = Image.new("P", (_SPRITE_SIZE, _SPRITE_SIZE), background)
+    canvas.putpalette(frame1.getpalette())
+
+    frame1_bbox = _content_bbox(frame1, background)
+    candidate_bbox = _content_bbox(candidate, background)
+    if frame1_bbox is None or candidate_bbox is None:
+        # No bbox on one side -> no translation possible; return the candidate
+        # re-locked to frame 1's palette, untranslated.
+        out = candidate.copy()
+        out.putpalette(frame1.getpalette())
+        return out
+
+    # bbox is (left, top, right, bottom) with right/bottom exclusive.
+    anchor_x = (frame1_bbox[0] + frame1_bbox[2]) / 2
+    anchor_y = frame1_bbox[3]
+    content = candidate.crop(candidate_bbox)
+    content_w = candidate_bbox[2] - candidate_bbox[0]
+    content_h = candidate_bbox[3] - candidate_bbox[1]
+    paste_left = round(anchor_x - content_w / 2)
+    paste_top = round(anchor_y - content_h)
+    canvas.paste(content, (paste_left, paste_top))
+    return canvas
+
+
+def difference_ratio(a: Image.Image, b: Image.Image) -> float:
+    """Fraction (0.0-1.0) of pixels that differ between two same-size images.
+
+    For same-palette P-mode inputs this compares palette indices directly, so
+    ``difference_ratio(x, x) == 0.0`` and images differing everywhere give 1.0.
+    """
+    if a.size != b.size:
+        raise ValueError(f"Cannot compare different-size images: {a.size} vs {b.size}")
+    data_a = a.get_flattened_data()
+    data_b = b.get_flattened_data()
+    differing = sum(1 for x, y in zip(data_a, data_b) if x != y)
+    return differing / len(data_a)
+
+
+def build_frame2(
+    frame1: Image.Image,
+    candidate: Image.Image | None = None,
+    low: float = 0.02,
+    high: float = 0.30,
+) -> Image.Image:
+    """Turn frame 1 plus an optional candidate into a guaranteed-valid frame 2.
+
+    Accepts the candidate only when its palette-locked, recentred difference
+    from frame 1 lands inside ``[low, high]`` — below ``low`` is texture
+    shimmer (not motion), above ``high`` is identity drift / teleporting.
+    Otherwise (or with no candidate) falls back to ``procedural_squash``.
+    Always returns a valid 96x96 P-mode frame sharing frame 1's exact palette.
+
+    ``low`` / ``high`` are tunable eyeball placeholders (see the module spec);
+    a later ML slice or a human is expected to tune them.
+    """
+    if frame1.mode != "P":
+        raise ValueError(f"Expected palette-mode frame1 image, got {frame1.mode}")
+    if candidate is None:
+        return procedural_squash(frame1)
+    locked = quantize_to_reference(candidate, frame1)  # also resizes to 96x96
+    recentred = recenter_to_anchor(locked, frame1)
+    ratio = difference_ratio(recentred, frame1)
+    if low <= ratio <= high:
+        return recentred
+    return procedural_squash(frame1)
+
+
 def _make_generator(seed: int | None):
     import torch
     device = "cuda" if torch.cuda.is_available() else "cpu"
