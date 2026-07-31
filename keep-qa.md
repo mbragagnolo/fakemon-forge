@@ -1,0 +1,6 @@
+- [ ] Run a full generation (txt2img, e.g. `--description "fire lizard"`) on the host with the ML stack and confirm each stage dir contains `sprite_frame2.png` and `sprite_frame2_shiny.png` alongside the existing sprites.
+- [ ] Open `sprite_frame2.png` and confirm it's 96×96, `P`-mode, and visibly a slight animation variant of `sprite.png` (not identical, not wildly different).
+- [ ] Confirm `sprite_frame2.png` shares `sprite.png`'s exact 16-colour palette (same palette bytes) and that `sprite_frame2_shiny.png` matches `sprite_shiny.png`'s recolour scheme.
+- [ ] Run the img2img path (`--image <drawing>`) and confirm frame 2 files are produced there too.
+- [ ] Run line mode (`--mode line`) and confirm all 3 stages each emit their own frame 2 + frame-2 shiny.
+- [ ] Force a frame-2 failure (or feed a garbage init) and confirm a `Warning:` prints to stderr, the run does not exit, and the stage's other sprites + `.ini` are still written.
