@@ -116,6 +116,27 @@ def test_all_background_source_yields_all_teal(tmp_path):
     assert rgb.size == (32, 64)
 
 
+def test_creature_colour_close_to_teal_keeps_teal_at_index_0(tmp_path):
+    """A creature colour near (but beyond the key tolerance of) teal must not
+    displace teal from index 0; teal stays the background and the creature
+    survives as distinct colours (spec Edge cases: 'creature colour close to
+    teal')."""
+    img = Image.new("RGB", (96, 96), (40, 40, 60))
+    # 40 units of Euclidean distance from teal — beyond _KEY_TOLERANCE (30), so
+    # it reads as creature, not backfilled background.
+    ImageDraw.Draw(img).ellipse((20, 20, 76, 76), fill=(96, 152, 88))
+    src = tmp_path / "near_teal.png"
+    postprocess(img, size=96).save(str(src))
+    out = tmp_path / "sprite_small.png"
+    generate_icon(str(src), str(out))
+    icon = Image.open(str(out))
+    assert tuple(icon.getpalette()[0:3]) == _TEAL
+    colors = set(icon.convert("RGB").get_flattened_data())
+    assert _TEAL in colors  # teal still present as the background
+    assert any(c != _TEAL for c in colors)  # the near-teal creature survived
+    assert len(colors) <= 16
+
+
 # ---------------------------------------------------------------------------
 # Errors
 # ---------------------------------------------------------------------------
