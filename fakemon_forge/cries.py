@@ -22,6 +22,12 @@ import wave
 
 _SR = 10512  # sample rate (Hz) — matches Gen 3 cry playback rate
 _PEAK = 120  # target peak absolute deviation from 128 (reference cries peak ~120)
+# Duration is clamped to [_MIN_DUR, _MAX_DUR]. The low-register types with a
+# sub-1.0 duration multiplier (e.g. Fairy 0.75) can otherwise push a short
+# base draw below the spec's 0.35 s floor; _MIN_DUR keeps every cry in-bounds
+# with margin while staying strictly below any stage-2 duration (>= 0.405 s).
+_MIN_DUR = 0.40
+_MAX_DUR = 1.5
 
 # Type profile rows: register band (Hz), syllable-count weights (counts 1-4),
 # noise base, AM base, duration multiplier. Audition-validated defaults.
@@ -225,7 +231,7 @@ def generate_cry(line_name: str, stage: int, types: list, output_path: str) -> N
 
     base_dur = rng.uniform(0.45, 1.0)
     stage_stretch = 1.0 + 0.20 * (stage - 1)
-    total = min(base_dur * dur_mult * stage_stretch, 1.5)
+    total = max(_MIN_DUR, min(base_dur * dur_mult * stage_stretch, _MAX_DUR))
 
     gaps = sum(s["gap"] for s in motif)
     sound_time = max(0.2, total - gaps)

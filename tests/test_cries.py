@@ -7,7 +7,9 @@ everywhere, including the keep sandbox container. Do NOT mark them `ml`.
 import statistics
 import wave
 
-from fakemon_forge.cries import generate_cry
+import pytest
+
+from fakemon_forge.cries import _PROFILES, generate_cry
 
 _SR = 10512
 
@@ -98,6 +100,19 @@ def test_stage_pitch_drops(tmp_path):
         return statistics.median(rates) if rates else 0.0
 
     assert zcr_median(3) < zcr_median(1)
+
+
+@pytest.mark.parametrize("primary", sorted(_PROFILES) + ["Cosmic"])
+def test_duration_bounds_every_type(tmp_path, primary):
+    # The spec guarantees duration in [0.35, 1.55] for *every* cry. Low-band
+    # types with a sub-1.0 duration multiplier (e.g. Fairy 0.75) are the risky
+    # ones; "N117" is a seed that drove Fairy below 0.35 s before the floor.
+    for name in ("N117", "N111", "Florabud"):
+        out = tmp_path / f"{primary}_{name}.wav"
+        generate_cry(name, 1, [primary], str(out))
+        params, _ = _read_wav(out)
+        duration = params.nframes / _SR
+        assert 0.35 <= duration <= 1.55, (primary, name, duration)
 
 
 def test_empty_types(tmp_path):
