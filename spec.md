@@ -1,320 +1,265 @@
-# Spec: Lock the back sprite to the shared front-frame palette + cross-view shiny consistency
+# Spec: `cries.py` — procedural GBA-style `cry.wav` synthesis
 
 ## Summary
 
-`fakemon-forge` already produces, per stage, a front sprite `sprite.png` and a
-second front-animation frame `sprite_frame2.png` that **share one exact
-16-colour palette** (frame 2 is palette-locked to frame 1 via
-`quantize_to_reference` / `build_frame2` in `fakemon_forge/sprites.py`), plus
-shiny variants. The **back sprite** (`sprite_back.png`) is the last view still
-carrying its **own adaptive palette**: it is produced by
-`generate_sprite_img2img`, whose final step is `postprocess(candidate)` — an
-*adaptive* 16-colour `quantize` that builds a fresh palette every call.
+`fakemon-forge` generates a Fakemon line (name, types, stats, Pokédex entry,
+sprites) from a description or reference image. This slice adds a **standalone,
+fully-tested library module** `fakemon_forge/cries.py` that synthesizes a
+Gen 3-style creature **cry** as a `cry.wav` for one Fakemon stage — procedurally,
+with **no ML, no GPU, standard library only** (`math`, `random`, `hashlib`,
+`wave`, and optionally `struct`/`array`).
 
-This slice (4/4 of #1) brings the back sprite into the **same shared palette**
-as the two front frames, completing the authentic Gen-3 model of *one palette
-for the whole sprite set, one rotated palette for the whole shiny set*. It has
-two parts:
+The module exposes a single public function:
 
-1. **`sprites.py`** — give the back-sprite generation path a way to re-quantize
-   its img2img result against a reference `P`-mode image's exact palette
-   (frame 1) instead of an adaptive palette, by adding an optional
-   `reference_path` parameter to `generate_sprite_img2img`. When
-   `reference_path` is given, the raw img2img candidate is locked with the
-   existing `quantize_to_reference(candidate, reference)` rather than
-   `postprocess`. When it is omitted, behaviour is byte-for-byte unchanged
-   (adaptive `postprocess`), so the front-sprite img2img path and all existing
-   tests are untouched.
-2. **`main.py`** — pass `sprite.png` (frame 1, the just-written front sprite) as
-   the back sprite's `reference_path`, so the back sprite locks to frame 1's
-   palette regardless of which image seeded the img2img (the user's drawing in
-   the img2img path, `sprite.png` in the txt2img path).
+```python
+def generate_cry(line_name: str, stage: int, types: list[str], output_path: str) -> None
+```
 
-Because the back sprite then shares frame 1's exact palette, and
-`generate_shiny` is name-keyed and **rotates only the palette** (preserving
-achromatic entries), `sprite_back_shiny.png` — already derived via
-`generate_shiny(back_path, …)` — automatically uses the **same rotated palette**
-as `sprite_shiny.png` and `sprite_frame2_shiny.png`. All three views' shinies
-become consistent for free; no shiny-path change is required.
+It writes a WAV file to `output_path`: **mono, 8-bit unsigned PCM, 10512 Hz**,
+duration in **0.35–1.55 s**, peak-normalized so the loudest sample deviates from
+128 by ≈120 (reference Gen 3 cries peak at 120 in u8 scale). The cry is a
+deterministic function of `(line_name, stage, types)`: identical arguments
+produce a **byte-identical** WAV every call, and a whole evolution line (sharing
+`line_name`, which is stage 1's name) shares one seeded "voice" and motif, with
+per-stage transforms making later stages longer and lower-pitched.
+
+This is Slice 1/2 of #22. A **later** slice will wire `generate_cry` into the
+per-stage generation loop in `main.py`.
 
 ### Explicitly out of scope
 
-- **`.ini` / writer changes** — verified unnecessary (as in the prior slices).
-  `export_ini` emits ROM pointer fields, `writer.py` writes only
-  `stats.json` / `entry.md`; neither references sprite filenames.
-- **The img2img call itself** — the pipeline invocation (`_run_img2img`),
-  `strength=0.65`, and `extra_tags=["backside"]` are unchanged. Only the
-  post-generation quantization step gains a reference-locked branch.
-- **Recentering / animation-band logic** — the back sprite is a *different view*,
-  not an animation frame of the front, so `build_frame2` /
-  `recenter_to_anchor` / the acceptance band do **not** apply to it. Only the
-  palette is shared; geometry is whatever img2img produced.
-- **Colour-fidelity guarantees** — the back sprite's colours may degrade when
-  they land far from frame 1's 16 colours. Per the issue this is the authentic
-  Gen-3 constraint and is accepted, not mitigated.
+- **No changes to `main.py`.** Wiring the cry into the generation loop is the
+  next slice; this module must stand alone.
+- **No changes to `pyproject.toml` dependencies** or any other module. Stdlib
+  only; no new packages.
+- No ML, no GPU, no `torch`/`diffusers`, no network, no time/OS entropy.
+- No playback, format conversion (only `.wav`), or ROM packaging.
 
 ## Inputs
 
-### Changed: `generate_sprite_img2img(prompt, types, image_path, output_path, *, pipeline, extra_tags=None, seed=None, strength=0.8, reference_path=None)`
+`generate_cry(line_name, stage, types, output_path)`:
 
-All existing parameters are unchanged. One new keyword-only parameter is added
-at the end (so existing positional/keyword calls are unaffected):
+- **`line_name: str`** — stage 1's name, shared across the whole evolution line.
+  It is the **sole seed source**: `hashlib.sha256(line_name.encode())` seeds a
+  local `random.Random` instance so the whole line shares one voice + motif.
+  (Assumption: encode with default UTF-8; empty string is a valid seed and must
+  not crash.)
+- **`stage: int`** — evolution stage, `>= 1`. Stage 1 applies no stage transform;
+  stages `> 1` apply the corpus-derived stage transform (longer, lower, harder).
+  Single-form mons are treated as `stage == 1`. Any `stage >= 1` is valid; the
+  final duration is always capped at 1.5 s.
+- **`types: list[str]`** — the stage's types. **`types[0]`** (the primary type)
+  selects the type profile; an empty list, a missing/unknown primary type falls
+  back to the default profile row. Secondary types **may** optionally influence
+  timbre, but only deterministically. Type-name matching is exact and
+  case-sensitive against the profile keys below (matching how `sprites.py`'s
+  `_TYPE_TAGS` keys off exact capitalized names like `"Fire"`, `"Fairy"`).
+- **`output_path: str`** — filesystem path to write the WAV to. (Assumption: the
+  caller/tests pass a full path including filename, e.g. `tmp_path / "cry.wav"`;
+  the task text says "writes a `cry.wav` to `output_path`". The function writes
+  exactly to `output_path` and does not create parent directories or resolve a
+  subpath — callers pass the final file path, mirroring how `sprites.py` writers
+  take an `output_path` and call `.save(output_path)` directly.)
 
-- `reference_path: str | None = None` (keyword-only) — path to a `P`-mode
-  reference image whose exact 16-colour palette the generated sprite must adopt.
-  When `None` (the default, and every current call except the new back-sprite
-  one), the sprite is quantized adaptively via `postprocess` exactly as today.
-  When set, the raw img2img candidate is locked to that palette via
-  `quantize_to_reference`. **[picked]** name/shape — see Assumptions.
-
-### `main.py` per-stage back-sprite call
-
-No new CLI arguments. Inside the existing
-`for stage, stage_dir in zip(stages, stage_dirs)` loop, the existing back-sprite
-block gains one keyword argument:
-
-- `reference_path = sprite_path` — i.e. `str(stage_dir / "sprite.png")`, the
-  front sprite written earlier in the same loop iteration. This is **always**
-  `sprite.png` (frame 1), independent of `init_image` (which is the user's
-  `args.image` in the img2img path, or `sprite_path` in the txt2img path).
+Return value: **`None`**. The function's effect is the written file.
 
 ## Outputs
 
-- **`generate_sprite_img2img` with `reference_path` set** → returns `None`; side
-  effect is writing a 96×96 `P`-mode PNG at `output_path` whose palette is
-  byte-for-byte equal to the reference image's palette (guaranteed by
-  `quantize_to_reference`).
-- **`generate_sprite_img2img` with `reference_path=None`** → unchanged: a 96×96
-  `P`-mode PNG with an adaptive ≤16-colour palette (via `postprocess`).
-- **`main`** per stage — the same set of files as today
-  (`sprite.png`, `sprite_frame2.png`, `sprite_frame2_shiny.png`,
-  `sprite_back.png`, `sprite_shiny.png`, `sprite_back_shiny.png`), but now:
-  - `sprite_back.png` shares `sprite.png`'s exact 16-colour palette (was: its
-    own adaptive palette).
-  - `sprite_back_shiny.png` uses the same rotated palette as `sprite_shiny.png`
-    and `sprite_frame2_shiny.png` (automatic consequence; no code change in the
-    shiny blocks).
+A single WAV file at `output_path` with these guaranteed properties (all
+assertable by reading it back with the `wave` module):
+
+- **Channels**: `getnchannels() == 1` (mono).
+- **Sample width**: `getsampwidth() == 1` (8-bit).
+- **Sample encoding**: unsigned PCM; every sample byte is a valid u8 in `[0, 255]`
+  (the `wave` module's contract for 8-bit).
+- **Frame rate**: `getframerate() == 10512` Hz.
+- **Duration**: `getnframes() / 10512` lands in **`[0.35, 1.55]`** seconds. (The
+  synthesis targets 0.35–1.5 s pre-cap; the 1.55 upper bound is the test
+  tolerance band.)
+- **Peak level**: the maximum absolute deviation of any sample from 128 is
+  **≈120** (target `120/127` of full scale), asserted within a small tolerance
+  (±3) to absorb u8 integer-rounding.
+- **Determinism**: two calls with identical `(line_name, stage, types)` produce
+  **byte-identical** files.
 
 ## Behavior
 
-### `generate_sprite_img2img(...)` in `sprites.py`
+All randomness comes from one `random.Random` seeded from
+`sha256(line_name.encode())`; the global `random` module state is never touched,
+and no time/OS entropy is used. Given that, the synthesis follows the validated
+model below. **All numeric table values are audition-validated defaults / tunable
+starting points, not contracts** — they may be tweaked by ear, but the tests in
+this spec must still pass.
 
-1. Run the img2img pipeline exactly as today via the existing internal helper
-   `_run_img2img(prompt, types, image_path, pipeline=…, extra_tags=…, seed=…,
-   strength=…)`, obtaining the raw RGB candidate (`result.images[0]`). This step
-   is unchanged.
-2. Quantize the candidate:
-   - If `reference_path is None`: `sprite = postprocess(candidate)` (adaptive
-     palette) — unchanged from today.
-   - Else: open the reference as a `P`-mode image
-     (`Image.open(reference_path)` — the saved front sprite is already `P`-mode;
-     do **not** convert) and `sprite = quantize_to_reference(candidate,
-     reference)`. `quantize_to_reference` already performs the same
-     resize-to-96×96 + colour/contrast enhance pre-steps as `postprocess`, then
-     `.quantize(palette=reference)`, so both branches feed identical input to
-     quantization and differ only in adaptive-vs-fixed palette.
-3. `sprite.save(output_path)` (PNG inferred from extension) — unchanged.
+### 1. Seed
+Derive a seed integer from `hashlib.sha256(line_name.encode())` and construct a
+local `rng = random.Random(seed)`. Every subsequent random draw (voice, motif,
+envelope) uses `rng`.
 
-The choice is a single branch on `reference_path`; `_run_img2img`,
-`postprocess`, `quantize_to_reference`, and the module constants are reused
-rather than duplicated.
+### 2. Type profile
+Select the profile row from the primary type `types[0]`; fall back to the
+**default row** when `types` is empty or `types[0]` is unrecognized. Each row
+provides: register band (Hz), syllable-count weights (for counts 1–4), noise
+base, AM base, and duration multiplier.
 
-### `main.py` wiring
+| Type | Band (Hz) | Syll. weights | Noise | AM | Dur mult |
+|---|---|---|---|---|---|
+| Grass | 130–420 | 3,3,1,0 | 0.10 | 0.45 | 1.0 |
+| Dragon | 100–300 | 4,2,0,0 | 0.16 | 0.50 | 1.0 |
+| Fighting | 140–380 | 2,3,2,0 | 0.12 | 0.45 | 1.0 |
+| Rock | 110–320 | 3,2,1,0 | 0.18 | 0.50 | 1.0 |
+| Ground | 110–340 | 3,2,1,0 | 0.14 | 0.45 | 1.0 |
+| Normal | 450–1800 | 1,3,3,1 | 0.03 | 0.30 | 0.85 |
+| Fairy | 900–2400 | 1,2,3,2 | 0.02 | 0.30 | 0.75 |
+| Flying | 700–2200 | 1,3,2,1 | 0.04 | 0.35 | 0.80 |
+| Electric | 220–700 | 2,3,1,0 | 0.10 | 0.60 | 0.90 |
+| Bug | 260–800 | 2,2,2,1 | 0.08 | 0.65 | 0.90 |
+| Psychic | 350–1100 | 3,2,1,0 | 0.03 | 0.50 | 1.25 |
+| Ghost | 300–900 | 3,2,0,0 | 0.05 | 0.55 | 1.10 |
+| Poison | 500–1500 | 3,2,1,0 | 0.15 | 0.50 | 1.05 |
+| Water | 250–850 | 2,3,1,0 | 0.03 | 0.35 | 1.35 |
+| Ice | 400–1300 | 2,3,1,0 | 0.04 | 0.35 | 1.20 |
+| Fire | 100–320 | 3,2,1,0 | 0.25 | 0.40 | 1.0 |
+| Steel | 180–550 | 2,2,2,0 | 0.14 | 0.55 | 1.0 |
+| Dark | 120–360 | 3,2,1,0 | 0.12 | 0.50 | 1.0 |
+| **(default)** | **300–900** | **2,3,1,0** | **0.08** | **0.40** | **1.0** |
 
-The existing back-sprite block becomes:
+### 3. Voice (per line, from `rng` within the primary type's profile)
+- **Register**: log-uniform within the type's Hz band.
+- **Sound source**: one of `pwm` (duty 0.12–0.5), `saw`, `triangle`,
+  `fm` (ratio ∈ {1.5, 2.0, 2.77, 3.51}, index 0.8–3.0),
+  `ring` (detune 1.002–1.03).
+- **Noise**: type noise base × 0.5–1.6; color either white or sample-hold
+  (gritty digital) at ~SR/900 or ~SR/300 update rates.
+- **Articulation**: AM rate 18–90 Hz (depth type-scaled off the AM base);
+  vibrato 4.5–11 Hz; trill 11–22 Hz.
 
-```
-back_path = str(stage_dir / "sprite_back.png")
-try:
-    init_image = args.image if args.image else sprite_path
-    generate_sprite_img2img(
-        stage["sprite_prompt"], stage["types"], init_image, back_path,
-        pipeline=img2img_pipeline, extra_tags=["backside"], seed=seed,
-        strength=0.65, reference_path=sprite_path,
-    )
-except Exception as exc:
-    print(
-        f"Warning: back sprite generation failed for {stage['name']}: {exc}",
-        file=sys.stderr,
-    )
-```
+### 4. Motif (per line)
+1–4 syllables (count drawn using the profile's syllable weights). Each syllable:
+- an interval from the scale set {1.0, 1.19, 1.34, 1.5, 1.78, 2.0, 0.84, 0.67};
+- a contour: fall / rise / bend / flat+vibrato / trill;
+- a length weight (last syllable × 1.6);
+- inter-syllable gaps 15–70 ms;
+- contour depth 0.25–0.6;
+- per-syllable envelope: fast attack (~6% of the syllable), slight decay.
 
-Only `reference_path=sprite_path` is added. The block still reaches this code
-only after the front-sprite block succeeded (that block `continue`s on failure),
-so `sprite_path` names an existing `P`-mode `sprite.png`. The back-shiny block
-(`generate_shiny(back_path, stage["name"], back_shiny_path)`) is **unchanged** —
-it now inherits the shared palette automatically.
+### 5. Stage transform (applied for `stage > 1`; no-op at `stage == 1`)
+- **Duration** × `(1 + 0.20 * (stage - 1))`, then the final duration is capped at
+  1.5 s.
+- **Pitch** × `0.90 ** (stage - 1)` (each stage lower than the last).
+- **Hardening** `+0.25 * (stage - 1)`: mix in an octave-up rough partial and/or
+  raise the FM index so the attack is brighter/harsher per stage.
 
-## Edge cases
+### 6. Global envelope and normalization
+- Base duration 0.45–1.0 s (drawn from `rng`) × type duration multiplier ×
+  stage stretch, then capped at 1.5 s.
+- Linear fade over the **final 10%** of samples.
+- **Peak-normalize** so the loudest sample sits at `120/127` of full u8 scale
+  (peak absolute deviation from 128 ≈ 120).
 
-- **Front sprite generation failed** → the front-sprite `except` `continue`s to
-  the next stage; the back-sprite block (and its `reference_path`) never runs
-  for that stage, so there is never a missing/absent reference.
-- **img2img returns colours far from frame 1's palette** →
-  `quantize_to_reference` maps each pixel to the nearest of frame 1's 16 colours;
-  the back sprite may look slightly off-palette / posterized. **Accepted** — this
-  is the authentic Gen-3 shared-palette constraint, not a bug.
-- **Back sprite content differs from the front** (it is a rear view) → only the
-  palette is shared, not geometry; no recentering/animation-band logic is applied
-  (that is `build_frame2`'s job for frame 2, not for the back view).
-- **Cross-view shiny consistency** → `sprite.png`, `sprite_frame2.png`, and
-  `sprite_back.png` now share one palette; `generate_shiny` rotates only the
-  palette keyed on `name`, so `sprite_shiny.png`, `sprite_frame2_shiny.png`, and
-  `sprite_back_shiny.png` share one rotated palette automatically.
-- **Line mode (3 stages)** → the back-sprite block is inside the per-stage loop;
-  each stage locks its own back sprite to its own `sprite.png`, and each stage's
-  three shinies stay mutually consistent within that stage.
-- **`reference_path=None` callers** (the front-sprite img2img call, and any other
-  existing caller) → behaviour is identical to today (adaptive `postprocess`).
+### 7. Write
+Emit mono / 8-bit unsigned / 10512 Hz PCM via the `wave` module to `output_path`.
+
+## Edge cases (must not crash)
+
+- **Unknown / missing primary type** → default profile row; valid WAV.
+- **`types == []`** → default profile row; valid WAV; never crashes.
+- **Single-form mons** → treated as `stage == 1` (stage transform is a no-op).
+- **Any `stage >= 1`** is valid; even large stage values keep duration capped at
+  1.5 s, so the frame count never exceeds the 1.55 s test bound.
+- **Empty `line_name`** → still a valid seed via `sha256(b"")`; must not crash.
+  (Assumption: the module does not special-case or reject empty names.)
 
 ## Errors
 
-- `generate_sprite_img2img` surfaces exceptions to its caller (it does not
-  swallow them); `main` wraps the back-sprite call in the existing try/except and
-  warns `Warning: back sprite generation failed for {name}: {exc}` — unchanged
-  wording and structure.
-- `quantize_to_reference` raises `ValueError` ("palette-mode reference image") if
-  the reference is not `P`-mode. Because `main` always passes the already-saved
-  `P`-mode `sprite.png`, this only fires on misuse and would be caught by the
-  back-sprite `except`.
-- A missing `reference_path` file (e.g. `sprite.png` never written) would raise
-  in `Image.open`; this cannot happen after a successful front-sprite block, and
-  if it somehow did it is caught by the back-sprite `except` (warn-and-continue).
-- No new `sys.exit` paths; pipeline-load failure paths are unchanged.
+- The module raises no custom exceptions and validates no inputs beyond what the
+  synthesis naturally requires; it is written so the documented edge cases do not
+  raise. (Assumption: matching the project's writer/sprite modules, which do not
+  add input-validation layers for the happy path.)
+- I/O errors from `wave.open(output_path, "wb")` (e.g. a non-existent parent
+  directory or an unwritable path) propagate naturally as the underlying
+  `OSError`; the module does not catch or wrap them. Tests always write into a
+  pytest `tmp_path`, so this path is not exercised. (Assumption.)
+- `stage < 1` is documented as out of contract (the spec states `stage >= 1` is
+  valid). The function is not required to guard against it, and tests will not
+  pass `stage < 1`. (Assumption.)
 
 ## Constraints & dependencies
 
-- The change lives in `fakemon_forge/sprites.py` (`generate_sprite_img2img`) and
-  `fakemon_forge/main.py` (one added kwarg). It reuses the existing
-  `quantize_to_reference`, `_run_img2img`, `postprocess`, and module constants;
-  nothing is hard-coded or duplicated.
-- `generate_sprite_img2img` performs a function-local `import torch` (via
-  `_run_img2img` → `_make_generator`), so **any test that calls it is an `ml`
-  test** and belongs in `tests/test_sprites_ml.py` (or carries
-  `@pytest.mark.ml`), per `CLAUDE.md`'s test-slicing rule. The pure
-  palette-lock/shiny assertions that go in `tests/test_sprites.py` must therefore
-  exercise `quantize_to_reference` / `generate_shiny` **directly**, not through
-  `generate_sprite_img2img`.
-- `main.py` changes touch only the back-sprite call (one kwarg); no import
-  changes, no new CLI args, no signature change to `main`. Because
-  `test_main.py` mocks the sprite functions, the `main` wiring is testable
-  without torch.
-- **Backward compatibility:** the new parameter defaults to `None`, so all
-  current `generate_sprite_img2img` calls and their `ml` tests (96×96, `P`-mode,
-  PNG, single pipeline call, `strength`/`image`/`prompt_embeds` passthrough)
-  must continue to pass unchanged. Only the new back-sprite call passes
-  `reference_path`.
-- Frame 1 (`sprite.png`) is the canonical palette source for the whole set
-  (front frame 1, front frame 2, and back all lock to it). The front sprite
-  itself is never reference-locked (it *defines* the palette).
+- **Standard library only**: `math`, `random`, `hashlib`, `wave`, optionally
+  `struct` / `array`. No new third-party dependencies, no changes to
+  `pyproject.toml`.
+- **No ML / GPU**: no `torch`, `diffusers`, `transformers`, or any import that
+  triggers them. Because the module is pure stdlib, its tests are **regular
+  (non-`ml`) tests** and run everywhere, including the keep sandbox container.
+- **Determinism**: seeded solely from `line_name` via `sha256` → a local
+  `random.Random`; the global `random` state and all time/OS entropy are
+  untouched. Same inputs → byte-identical output.
+- **Fixed WAV format**: mono, 8-bit unsigned PCM, 10512 Hz.
+- **Test file placement**: add `tests/test_cries.py` as a **regular** test file
+  (imports no ML code, so **not** `@pytest.mark.ml` and **not** in
+  `test_sprites_ml.py`, per `CLAUDE.md`'s test-slicing rules). It imports
+  `fakemon_forge.cries`, writes WAVs into a pytest `tmp_path` (never into the
+  repo tree), and reads them back with the `wave` module. `pytest` runs from the
+  repo root (flat package layout).
 
-## Tests
+### Tests to add (`tests/test_cries.py`)
 
-### light (`tests/test_sprites.py`, torch-free)
+Reading each WAV back with `wave`, assert:
 
-These exercise the shared-palette lock and shiny consistency **without** calling
-`generate_sprite_img2img` (which would trigger `import torch`). Follow the
-existing `postprocess` / `quantize_to_reference` / helper patterns.
-
-- **Back-sprite palette lock**: given a back RGB image and a `P`-mode reference
-  frame (build via `postprocess(_rgb_image())` / `postprocess(_noisy_image())`),
-  `quantize_to_reference(back_rgb, reference)` yields a `P`-mode 96×96 image
-  whose `getpalette()` equals the reference's exactly. (This is the pure core of
-  the back-sprite lock; `quantize_to_reference` is already well-covered, so this
-  test frames it as the back-sprite scenario and asserts palette equality.)
-- **Cross-view shiny consistency**: build three `P`-mode images that share one
-  palette (stand-ins for frame 1 / frame 2 / back — e.g. quantize three
-  different RGB inputs against one reference so all three share its palette),
-  save each, run `generate_shiny(path, name, out_path)` on each with the **same
-  `name`**, reload the three outputs, and assert their three `getpalette()`
-  results are **identical** to one another. (Optionally also assert each shiny
-  palette differs from the shared original, i.e. rotation happened.)
-
-### ml (`tests/test_sprites_ml.py`, auto-skipped without torch)
-
-Follow the existing `_fake_img2img_pipeline` / `_stub_encode_prompt` patterns;
-build the reference as a real `P`-mode 96×96 file (e.g. via `_frame1_file` /
-`postprocess(_rgb_image())`, as sprites are saved).
-
-- `generate_sprite_img2img(..., reference_path=<P-mode frame path>)` with a mock
-  img2img pipeline writes an output file that is **`P`-mode** and whose
-  `getpalette()` **equals the reference's** (proves the back sprite adopts the
-  shared palette rather than an adaptive one).
-- The saved reference-locked sprite is still 96×96 and PNG.
-- **Regression**: `generate_sprite_img2img` **without** `reference_path`
-  continues to produce a `P`-mode 96×96 PNG via adaptive `postprocess` (existing
-  tests suffice; add one asserting the two branches diverge only in palette if
-  desired — e.g. locked output's palette equals the reference while the
-  unlocked output's need not).
-- The pipeline is still invoked **exactly once** and with the unchanged
-  `strength` / `image` / `prompt_embeds` / `extra_tags` passthrough when
-  `reference_path` is supplied (the reference only affects post-quantization).
-
-### light (`tests/test_main.py`, no torch — sprite fns mocked)
-
-- The back-sprite `generate_sprite_img2img` call receives
-  `reference_path == str(stage_dir / "sprite.png")` (frame 1), in **both** the
-  txt2img path and the img2img path. In the img2img path, assert the back call's
-  positional `image_path` (init) is `args.image` while its `reference_path` is
-  `sprite.png` — i.e. the reference is frame 1 even though the init image is the
-  user's drawing.
-- The existing back-sprite assertions still hold:
-  `extra_tags == ["backside"]`, `strength == 0.65`, and the img2img-path call
-  count (front + back). Distinguish the front call (`reference_path` absent/`None`)
-  from the back call (`reference_path == sprite.png`).
-- The back-shiny wiring is unchanged (`generate_shiny(back_path, name,
-  back_shiny_path)`); the existing shiny-count assertions
-  (`test_generate_shiny_called_three_times_per_stage`,
-  `test_line_mode_frame2_called_three_times`) remain valid, since no shiny call
-  was added or removed — only the back sprite's palette changed.
+1. **Format**: `getnchannels() == 1`, `getsampwidth() == 1`,
+   `getframerate() == 10512`; `getnframes() / 10512` in `[0.35, 1.55]`; every
+   byte a valid u8 in `[0, 255]`; peak absolute deviation from 128 ≈ 120 within
+   ±3.
+2. **Determinism**: two `generate_cry` calls with identical args → byte-identical
+   files.
+3. **Line motif / stage growth**: same `line_name` at stages 1, 2, 3 → durations
+   **strictly increasing**.
+4. **Type register**: a low-band type (e.g. `Fire`) vs a high-band type
+   (e.g. `Fairy`) land in their respective registers — measured via
+   **zero-crossing rate** (ZCR) over the sustained portion (higher band → higher
+   ZCR).
+5. **Stage pitch**: for the same line, stage 3's ZCR median is **below** stage
+   1's (lower pitch per stage).
+6. **Edge cases**: an empty `types` list and an unknown type name each produce a
+   valid WAV without raising.
 
 ## Assumptions
 
-Items marked **[picked]** are defaults chosen here (not confirmed by existing
-code/tests/docs); **[confirmed]** items are grounded in the codebase.
+Each item below is a default chosen for this headless spec, **not** confirmed by
+existing code, tests, or docs — except where it restates the task's stated
+approach.
 
-- **[picked]** The lock is added as an optional `reference_path: str = None`
-  keyword parameter on the **existing** `generate_sprite_img2img`, rather than a
-  new dedicated `generate_back_sprite` function. Rationale: it is the minimal,
-  lowest-risk change (existing `reference_path=None` callers and their tests are
-  untouched), keeps the img2img call in one place, and matches how the front
-  frames were locked (via `quantize_to_reference`). The issue explicitly permits
-  either approach. Note: an unused `generate_back_sprite` (txt2img-based) already
-  exists in `sprites.py` but is **not** the back-sprite path `main` uses (`main`
-  calls `generate_sprite_img2img` for the back sprite); it is left untouched to
-  avoid scope creep. **[confirmed]** that `generate_back_sprite` is currently
-  unused by `main.py`.
-- **[picked]** The parameter is a **path** (`reference_path`) rather than a
-  pre-loaded `Image`, matching how `main` already threads file paths
-  (`front_sprite_path`, `image_path`) and letting the function own the
-  `Image.open`. The issue allowed `reference_path`/`reference`; path chosen for
-  consistency.
-- **[picked]** The parameter is placed **last** in the keyword-only signature and
-  defaults to `None`, preserving every existing call site and test.
-- **[picked]** When `reference_path` is set, the reference is opened without a
-  mode conversion (the saved front sprite is already `P`-mode); a non-`P`-mode
-  reference is left to raise via `quantize_to_reference` (caught by `main`'s
-  back-sprite `except`).
-- **[confirmed]** Frame 1 (`sprite.png`) is the canonical palette source: it is
-  generated first in the loop and is saved `P`-mode by `postprocess`'s
-  `.quantize`; front frame 2 already locks to it, and this slice locks the back
-  to it too.
-- **[confirmed]** The reference is always `sprite_path` (frame 1), independent of
-  the img2img init image — in the img2img path the init is the user's drawing
-  (`args.image`) while the palette reference must still be frame 1.
-- **[confirmed]** `quantize_to_reference` already mirrors `postprocess`'s
-  resize + colour/contrast pre-steps, so switching only the palette (adaptive →
-  fixed reference) is the sole behavioural difference between the branches; it
-  does not mutate its inputs.
-- **[confirmed]** `generate_shiny` rotates only the palette keyed on `name` and
-  preserves achromatic entries, so three views sharing one palette yield three
-  identical rotated shiny palettes — `sprite_back_shiny.png` is consistent with
-  `sprite_shiny.png` / `sprite_frame2_shiny.png` with **no** change to the shiny
-  blocks (the back shiny is already `generate_shiny(back_path, …)`).
-- **[confirmed]** `export_ini` / `writer.py` need no changes — they reference no
-  sprite files (ROM pointer fields / `stats.json` + `entry.md`).
-- **[confirmed]** Anything calling `generate_sprite_img2img` triggers a real
-  `import torch` (via `_run_img2img` → `_make_generator`) and is therefore an
-  `ml` test; the pure palette/shiny assertions in `test_sprites.py` must call
-  `quantize_to_reference` / `generate_shiny` directly, and the `main`-level
-  wiring is torch-free because `test_main.py` mocks the sprite functions.
+- **[Restates task]** Seed source is `sha256(line_name.encode())` fed into a
+  local `random.Random`; the global `random` module is never touched.
+- **[Restates task]** The default profile row uses the spec's `(unknown)`
+  values: band 300–900 Hz, syllable weights 2,3,1,0, noise 0.08, AM 0.40, dur
+  mult 1.0.
+- **[Restates task]** Profile selection keys off `types[0]`; any secondary-type
+  timbre influence is optional and left to implementer discretion so long as it
+  stays deterministic.
+- **[Default]** Type-name matching is exact and case-sensitive against the
+  capitalized profile keys (`"Fire"`, `"Fairy"`, …), consistent with
+  `sprites.py`'s `_TYPE_TAGS`. A differently-cased or unknown name falls to the
+  default row.
+- **[Default]** Peak-normalization target 120 is validated within ±3 to absorb
+  u8 integer-rounding.
+- **[Default]** `output_path` is the full destination path (including filename);
+  the function writes exactly there and does not create parent directories or
+  append a `cry.wav` subpath — callers pass the final path, matching the
+  `sprites.py`/`writer.py` `output_path` convention.
+- **[Default]** Empty `line_name` is a valid seed (`sha256(b"")`) and does not
+  crash; it is not special-cased.
+- **[Default]** No input validation / custom exceptions beyond what synthesis
+  requires; the documented edge cases are handled so they don't raise, and
+  underlying `OSError`s from `wave.open` propagate unwrapped.
+- **[Default]** `stage < 1` is out of contract (spec says `stage >= 1`); not
+  guarded and not tested.
+- **[Default]** The numeric synthesis tables are audition-validated tunable
+  defaults; the implementer may adjust them by ear provided the tests above still
+  pass. Concrete draw distributions within the stated ranges (e.g. exact
+  weighting math, which source/contour is chosen) are implementation detail so
+  long as output stays deterministic and within all asserted bounds.
+- **[Default, scoping]** This is a self-contained single-slice module; no other
+  file is touched. The `main.py` wiring is explicitly deferred to slice 2/2 of
+  #22.
