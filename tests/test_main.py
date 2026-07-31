@@ -3,7 +3,7 @@ import pytest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from fakemon_forge.main import main
+from fakemon_forge.main import main, _CHIBI_TAGS
 
 # ---------------------------------------------------------------------------
 # Shared stage data
@@ -123,8 +123,12 @@ def test_txt2img_path_uses_txt2img_pipeline(ctx):
 def test_txt2img_path_calls_generate_sprite(ctx):
     main(["--description", "fire lizard"])
     ctx["sprite"].assert_called_once()
-    ctx["sprite_i2i"].assert_called_once()   # back sprite only
-    assert ctx["sprite_i2i"].call_args.kwargs["extra_tags"] == ["backside"]
+    # txt2img path now has 2 img2img calls per stage: back + chibi.
+    calls = ctx["sprite_i2i"].call_args_list
+    back = [c for c in calls if c.kwargs.get("extra_tags") == ["backside"]]
+    chibi = [c for c in calls if c.kwargs.get("extra_tags") == _CHIBI_TAGS]
+    assert len(back) == 1
+    assert len(chibi) == 1
 
 
 def test_txt2img_sprite_called_with_user_description(ctx):
@@ -155,7 +159,7 @@ def test_img2img_path_calls_generate_sprite_img2img(ctx, tmp_path):
     img = tmp_path / "drawing.png"
     img.write_bytes(b"\x89PNG\r\n")
     main(["--image", str(img), "--description", "fire lizard"])
-    assert ctx["sprite_i2i"].call_count == 2   # front + back sprite
+    assert ctx["sprite_i2i"].call_count == 3   # front + chibi + back sprite
     ctx["sprite"].assert_not_called()
 
 
@@ -180,7 +184,8 @@ def test_img2img_vision_image_path_passed(ctx, tmp_path):
 def test_txt2img_back_sprite_reference_is_frame1(ctx):
     """The back-sprite call locks to frame 1's palette (sprite.png)."""
     main(["--description", "fire lizard"])
-    back_call = ctx["sprite_i2i"].call_args   # only one img2img call in txt2img path
+    calls = ctx["sprite_i2i"].call_args_list
+    back_call = next(c for c in calls if c.kwargs.get("extra_tags") == ["backside"])
     assert back_call.kwargs["reference_path"] == str(ctx["stage_dir"] / "sprite.png")
 
 
@@ -192,14 +197,16 @@ def test_img2img_back_sprite_inits_from_front_sprite(ctx, tmp_path):
     img.write_bytes(b"\x89PNG\r\n")
     main(["--image", str(img), "--description", "fire lizard"])
 
-    # Two img2img calls: the front (no reference_path) and the back (locked).
+    # Three img2img calls: front, chibi, and back. The chibi call also has
+    # reference_path=None (like the front), so distinguish by extra_tags.
     calls = ctx["sprite_i2i"].call_args_list
-    assert len(calls) == 2
-    front = [c for c in calls if c.kwargs.get("reference_path") is None]
-    back = [c for c in calls if c.kwargs.get("reference_path") is not None]
+    assert len(calls) == 3
+    front = [c for c in calls if c.kwargs.get("extra_tags") is None]
+    back = [c for c in calls if c.kwargs.get("extra_tags") == ["backside"]]
     assert len(front) == 1 and len(back) == 1
 
     assert front[0].args[2] == str(img)   # front still seeds from the drawing
+    assert front[0].kwargs.get("reference_path") is None
     back_call = back[0]
     assert back_call.args[2] == str(ctx["stage_dir"] / "sprite.png")   # init = front sprite
     assert back_call.kwargs["reference_path"] == str(ctx["stage_dir"] / "sprite.png")
@@ -368,10 +375,55 @@ def test_tier_legendary_passed_to_llm(ctx):
 def test_icon_generated_once_per_stage(ctx):
     main(["--description", "fire lizard"])
     ctx["icon"].assert_called_once()
+    # Happy path: the icon is now derived from the chibi render, not sprite.png.
+    assert ctx["icon"].call_args.args == (
+        str(ctx["stage_dir"] / "sprite_chibi.png"),
+        str(ctx["stage_dir"] / "sprite_small.png"),
+    )
+
+
+def test_chibi_render_feeds_the_icon(ctx):
+    """Happy path: a chibi img2img render is produced from sprite.png and its
+    output feeds generate_icon."""
+    main(["--description", "fire lizard"])
+
+    calls = ctx["sprite_i2i"].call_args_list
+    chibi = [c for c in calls if c.kwargs.get("extra_tags") == _CHIBI_TAGS]
+    assert len(chibi) == 1
+    chibi_call = chibi[0]
+    assert chibi_call.args[2] == str(ctx["stage_dir"] / "sprite.png")        # init image
+    assert chibi_call.args[3] == str(ctx["stage_dir"] / "sprite_chibi.png")  # output
+    assert chibi_call.kwargs.get("reference_path") is None                   # own palette
+    assert "seed" in chibi_call.kwargs
+
+    ctx["icon"].assert_called_once()
+    assert ctx["icon"].call_args.args == (
+        str(ctx["stage_dir"] / "sprite_chibi.png"),
+        str(ctx["stage_dir"] / "sprite_small.png"),
+    )
+
+
+def test_chibi_render_failure_falls_back_to_plain_downscale(ctx, capsys):
+    """If the chibi img2img render raises, the icon is built from sprite.png
+    (plain downscale), silently, and the stage keeps going."""
+    def _side_effect(*args, **kwargs):
+        # Fail only the chibi render (output path ends in sprite_chibi.png).
+        if args[3].endswith("sprite_chibi.png"):
+            raise RuntimeError("chibi crash")
+        return MagicMock()
+
+    ctx["sprite_i2i"].side_effect = _side_effect
+    main(["--description", "fire lizard"])   # must not raise
+
+    ctx["icon"].assert_called_once()
     assert ctx["icon"].call_args.args == (
         str(ctx["stage_dir"] / "sprite.png"),
         str(ctx["stage_dir"] / "sprite_small.png"),
     )
+    # A failed enhancement is silent — no icon warning printed.
+    assert "icon generation failed" not in capsys.readouterr().err
+    # The stage does not abort: the spritesheet is still stitched.
+    ctx["stitch"].assert_called_once()
 
 
 def test_icon_generated_three_times_in_line_mode(ctx_line):

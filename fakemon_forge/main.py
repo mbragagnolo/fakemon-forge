@@ -22,6 +22,12 @@ from fakemon_forge.writer import write_output
 from fakemon_forge.export_ini import export_ini
 
 
+# Chibi caricature tags for the party-menu icon's img2img pass. Prototype
+# tunable: needs a GPU spike to confirm the LoRA actually produces caricature
+# proportions (big head / small body) from img2img before committing to these.
+_CHIBI_TAGS = ["chibi", "big head", "small body"]
+
+
 def main(argv=None):
     args = parse_args(argv)
     validate_args(args)
@@ -73,9 +79,24 @@ def main(argv=None):
             )
             continue
 
-        icon_path = str(stage_dir / "sprite_small.png")
+        small_path = str(stage_dir / "sprite_small.png")
+        chibi_path = str(stage_dir / "sprite_chibi.png")
         try:
-            generate_icon(sprite_path, icon_path)
+            try:
+                # Chibi caricature enhancement: render a big-head/small-body
+                # variant of the front sprite, then downscale THAT into the
+                # party-menu icon so it reads like a Gen-3 caricature.
+                generate_sprite_img2img(
+                    stage["sprite_prompt"], stage["types"], sprite_path, chibi_path,
+                    pipeline=img2img_pipeline, extra_tags=_CHIBI_TAGS, seed=seed,
+                )
+            except Exception:
+                # Enhancement is optional: fall back to the plain downscale of
+                # sprite.png (exactly today's behavior). No warning.
+                icon_source = sprite_path
+            else:
+                icon_source = chibi_path
+            generate_icon(icon_source, small_path)
         except Exception as exc:
             print(
                 f"Warning: icon generation failed for {stage['name']}: {exc}",
