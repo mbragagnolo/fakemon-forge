@@ -35,6 +35,16 @@ from fakemon_forge.sprites import (
     _LORA_SCALE,
 )
 
+
+def _pp96(img):
+    """postprocess at 96px: keeps bulk tests fast; the 768 default has its own test."""
+    return postprocess(img, size=96)
+
+
+def _qg96(img):
+    return _quantize_gen3(img, size=96)
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -113,12 +123,17 @@ def test_build_prompt_unknown_type_is_skipped():
 # postprocess()
 # ---------------------------------------------------------------------------
 
-def test_postprocess_resizes_to_96x96():
-    assert postprocess(_rgb_image()).size == (96, 96)
+def test_postprocess_default_size_is_native_768():
+    # No downscale on the default path: individual sprites keep SD's full detail.
+    assert postprocess(_rgb_image()).size == (768, 768)
+
+
+def test_postprocess_size_param_resizes_to_96x96():
+    assert _pp96(_rgb_image()).size == (96, 96)
 
 
 def test_postprocess_output_is_palette_mode():
-    assert postprocess(_rgb_image()).mode == "P"
+    assert _pp96(_rgb_image()).mode == "P"
 
 
 def test_postprocess_obeys_gen3_contract():
@@ -126,7 +141,7 @@ def test_postprocess_obeys_gen3_contract():
     # Gen-3 palette contract. Feed a background-bearing sprite (not the fully
     # random _noisy_image, which hits the gradient-border fallback) so the
     # "background -> index 0" assertion is meaningful.
-    out = postprocess(_noisy_border_sprite())
+    out = _pp96(_noisy_border_sprite())
     pal = out.getpalette()
     # Reserved head of the palette: key at index 0, then black and white.
     assert pal[0:3] == [200, 200, 168]
@@ -152,7 +167,7 @@ def test_postprocess_obeys_gen3_contract():
 def test_postprocess_does_not_mutate_input():
     img = _rgb_image()
     original_size = img.size
-    postprocess(img)
+    _pp96(img)
     assert img.size == original_size
 
 
@@ -161,33 +176,33 @@ def test_postprocess_does_not_mutate_input():
 # ---------------------------------------------------------------------------
 
 def test_quantize_to_reference_output_is_palette_96x96():
-    ref = postprocess(_noisy_image())
+    ref = _pp96(_noisy_image())
     out = quantize_to_reference(_rgb_image(), ref)
     assert out.mode == "P"
     assert out.size == (96, 96)
 
 
 def test_quantize_to_reference_reuses_reference_palette():
-    ref = postprocess(_noisy_image())
+    ref = _pp96(_noisy_image())
     out = quantize_to_reference(_rgb_image(), ref)
     assert out.getpalette() == ref.getpalette()
 
 
 def test_quantize_to_reference_at_most_16_colors():
-    ref = postprocess(_noisy_image())
+    ref = _pp96(_noisy_image())
     out = quantize_to_reference(_noisy_image(), ref)
     assert len(set(out.get_flattened_data())) <= 16
 
 
 def test_quantize_to_reference_shares_palette_across_inputs():
-    ref = postprocess(_noisy_image())
+    ref = _pp96(_noisy_image())
     out_a = quantize_to_reference(_rgb_image(color=(200, 100, 50)), ref)
     out_b = quantize_to_reference(_rgb_image(color=(20, 180, 220)), ref)
     assert out_a.getpalette() == out_b.getpalette() == ref.getpalette()
 
 
 def test_quantize_to_reference_does_not_mutate_inputs():
-    ref = postprocess(_noisy_image())
+    ref = _pp96(_noisy_image())
     ref_size, ref_mode, ref_palette = ref.size, ref.mode, ref.getpalette()
     img = _rgb_image()
     img_size, img_mode = img.size, img.mode
@@ -205,7 +220,7 @@ def test_quantize_to_reference_noisy_background_maps_to_index_0():
     # A candidate with a noisy near-white background must have its whole
     # background flattened to the key and nearest-map to index 0 (the key
     # slot) — NOT to the reserved white slot.
-    reference = postprocess(_sprite_rgb())
+    reference = _pp96(_sprite_rgb())
     assert reference.getpalette()[0:3] == [200, 200, 168]  # key at index 0
     out = quantize_to_reference(_noisy_border_sprite(), reference)
     assert out.getpalette() == reference.getpalette()
@@ -220,7 +235,7 @@ def test_quantize_to_reference_noisy_background_maps_to_index_0():
 
 
 def test_quantize_to_reference_preserves_reserved_slots_through_lock():
-    reference = postprocess(_sprite_rgb())
+    reference = _pp96(_sprite_rgb())
     out = quantize_to_reference(_noisy_border_sprite(), reference)
     pal = out.getpalette()
     assert pal[0:3] == [200, 200, 168]  # key at index 0
@@ -235,7 +250,7 @@ def test_quantize_to_reference_preserves_reserved_slots_through_lock():
 def test_back_sprite_locks_to_reference_frame_palette():
     """A back RGB candidate quantized against frame 1's P-mode palette adopts it
     exactly — the pure core of the shared-palette back-sprite lock."""
-    reference = postprocess(_sprite_rgb())
+    reference = _pp96(_sprite_rgb())
     back_rgb = _sprite_rgb(body=(90, 160, 210))
     locked = quantize_to_reference(back_rgb, reference)
     assert locked.mode == "P"
@@ -251,7 +266,7 @@ def test_cross_view_shinies_share_one_rotated_palette(tmp_path):
     """Three views sharing one palette yield three identical shiny palettes
     when generate_shiny runs with the same name (achromatic-preserving, palette
     rotation only)."""
-    reference = postprocess(_sprite_rgb())
+    reference = _pp96(_sprite_rgb())
     # Stand-ins for frame1 / frame2 / back: three different RGB inputs quantized
     # against one reference, so all three share its exact palette.
     frame1 = quantize_to_reference(_sprite_rgb(), reference)
@@ -279,7 +294,7 @@ def test_cross_view_shinies_share_one_rotated_palette(tmp_path):
 
 def test_generate_shiny_pins_chromatic_key_at_index_0(tmp_path):
     """The key (200,200,168) is chromatic (lum ~196) but must never rotate."""
-    sprite = postprocess(_sprite_rgb())
+    sprite = _pp96(_sprite_rgb())
     assert sprite.getpalette()[0:3] == [200, 200, 168]
     src = tmp_path / "sprite.png"
     out = tmp_path / "sprite_shiny.png"
@@ -289,7 +304,7 @@ def test_generate_shiny_pins_chromatic_key_at_index_0(tmp_path):
 
 
 def test_generate_shiny_pins_white_black_but_rotates_creature(tmp_path):
-    sprite = postprocess(_sprite_rgb())
+    sprite = _pp96(_sprite_rgb())
     src = tmp_path / "sprite.png"
     out = tmp_path / "sprite_shiny.png"
     sprite.save(str(src))
@@ -566,7 +581,7 @@ def test_load_img2img_error_mentions_exception(capsys):
 # ---------------------------------------------------------------------------
 
 def test_background_index_is_most_common_index():
-    frame1 = postprocess(_sprite_rgb())
+    frame1 = _pp96(_sprite_rgb())
     bg = _background_index(frame1)
     counts = {i: c for c, i in frame1.getcolors()}
     assert bg == max(counts, key=counts.get)
@@ -577,18 +592,18 @@ def test_background_index_is_most_common_index():
 # ---------------------------------------------------------------------------
 
 def test_procedural_squash_is_96x96_palette_mode():
-    out = procedural_squash(postprocess(_sprite_rgb()))
+    out = procedural_squash(_pp96(_sprite_rgb()))
     assert out.size == (96, 96)
     assert out.mode == "P"
 
 
 def test_procedural_squash_shares_frame1_palette():
-    frame1 = postprocess(_sprite_rgb())
+    frame1 = _pp96(_sprite_rgb())
     assert procedural_squash(frame1).getpalette() == frame1.getpalette()
 
 
 def test_procedural_squash_differs_within_acceptance_band():
-    frame1 = postprocess(_sprite_rgb())
+    frame1 = _pp96(_sprite_rgb())
     ratio = difference_ratio(procedural_squash(frame1), frame1)
     assert 0.0 < ratio
     assert 0.02 <= ratio <= 0.30
@@ -600,7 +615,7 @@ def test_procedural_squash_rejects_non_palette_input():
 
 
 def test_procedural_squash_does_not_mutate_input():
-    frame1 = postprocess(_sprite_rgb())
+    frame1 = _pp96(_sprite_rgb())
     data = list(frame1.get_flattened_data())
     palette = frame1.getpalette()
     procedural_squash(frame1)
@@ -613,7 +628,7 @@ def test_procedural_squash_does_not_mutate_input():
 # ---------------------------------------------------------------------------
 
 def test_difference_ratio_identical_is_zero():
-    frame1 = postprocess(_sprite_rgb())
+    frame1 = _pp96(_sprite_rgb())
     assert difference_ratio(frame1, frame1) == 0.0
 
 
@@ -630,7 +645,7 @@ def _filled_creature(interior):
 
 
 def test_difference_ratio_all_different_is_high():
-    ref = postprocess(_sprite_rgb())
+    ref = _pp96(_sprite_rgb())
     # Two full-frame creatures whose interiors lock to different palette slots;
     # only the thin border keys to index 0, so nearly every pixel differs.
     a = quantize_to_reference(_filled_creature((20, 40, 200)), ref)
@@ -639,7 +654,7 @@ def test_difference_ratio_all_different_is_high():
 
 
 def test_difference_ratio_rejects_size_mismatch():
-    a = postprocess(_sprite_rgb())
+    a = _pp96(_sprite_rgb())
     b = a.resize((48, 48))
     with pytest.raises(ValueError):
         difference_ratio(a, b)
@@ -650,7 +665,7 @@ def test_difference_ratio_rejects_size_mismatch():
 # ---------------------------------------------------------------------------
 
 def test_recenter_aligns_shifted_candidate_to_frame1_anchor():
-    frame1 = postprocess(_sprite_rgb())
+    frame1 = _pp96(_sprite_rgb())
     bg = _background_index(frame1)
     # Build a shifted candidate that shares frame1's palette.
     shifted = Image.new("P", (96, 96), bg)
@@ -665,7 +680,7 @@ def test_recenter_aligns_shifted_candidate_to_frame1_anchor():
 
 
 def test_recenter_shares_frame1_palette():
-    frame1 = postprocess(_sprite_rgb())
+    frame1 = _pp96(_sprite_rgb())
     recentred = recenter_to_anchor(frame1, frame1)
     assert recentred.mode == "P"
     assert recentred.size == (96, 96)
@@ -673,7 +688,7 @@ def test_recenter_shares_frame1_palette():
 
 
 def test_recenter_all_background_candidate_does_not_crash():
-    frame1 = postprocess(_sprite_rgb())
+    frame1 = _pp96(_sprite_rgb())
     bg = _background_index(frame1)
     blank = Image.new("P", (96, 96), bg)
     blank.putpalette(frame1.getpalette())
@@ -683,13 +698,13 @@ def test_recenter_all_background_candidate_does_not_crash():
 
 
 def test_recenter_rejects_non_palette_frame1():
-    frame1 = postprocess(_sprite_rgb())
+    frame1 = _pp96(_sprite_rgb())
     with pytest.raises(ValueError, match="palette-mode"):
         recenter_to_anchor(frame1, _rgb_image(96, 96))
 
 
 def test_recenter_does_not_mutate_inputs():
-    frame1 = postprocess(_sprite_rgb())
+    frame1 = _pp96(_sprite_rgb())
     bg = _background_index(frame1)
     shifted = Image.new("P", (96, 96), bg)
     shifted.putpalette(frame1.getpalette())
@@ -707,7 +722,7 @@ def test_recenter_does_not_mutate_inputs():
 # ---------------------------------------------------------------------------
 
 def test_build_frame2_no_candidate_returns_squash():
-    frame1 = postprocess(_sprite_rgb())
+    frame1 = _pp96(_sprite_rgb())
     out = build_frame2(frame1)
     assert out.getpalette() == frame1.getpalette()
     assert list(out.get_flattened_data()) == list(procedural_squash(frame1).get_flattened_data())
@@ -715,7 +730,7 @@ def test_build_frame2_no_candidate_returns_squash():
 
 
 def test_build_frame2_near_identical_candidate_falls_back():
-    frame1 = postprocess(_sprite_rgb())
+    frame1 = _pp96(_sprite_rgb())
     # quantize_to_reference now flattens _sprite_rgb's dark (40, 40, 60) backdrop
     # to the key (index 0) just like frame1's, so the same-creature candidate is
     # ~identical to frame1 -> ratio below low -> rejected -> squash fallback.
@@ -724,7 +739,7 @@ def test_build_frame2_near_identical_candidate_falls_back():
 
 
 def test_build_frame2_wildly_different_candidate_falls_back():
-    frame1 = postprocess(_sprite_rgb())
+    frame1 = _pp96(_sprite_rgb())
     out = build_frame2(frame1, _noisy_image(96, 96))
     assert list(out.get_flattened_data()) == list(procedural_squash(frame1).get_flattened_data())
 
@@ -748,7 +763,7 @@ def _key_background_sprite(body):
 
 
 def test_build_frame2_in_band_candidate_is_accepted():
-    frame1 = postprocess(_sprite_rgb())
+    frame1 = _pp96(_sprite_rgb())
     # A moderately different creature with a key background (so its backdrop
     # locks to index 0 like frame 1's) -> only the recoloured body differs ->
     # in-band difference.
@@ -766,7 +781,7 @@ def test_build_frame2_rejects_non_palette_frame1():
 
 
 def test_build_frame2_always_shares_palette_96x96():
-    frame1 = postprocess(_sprite_rgb())
+    frame1 = _pp96(_sprite_rgb())
     for cand in (None, _sprite_rgb(), _noisy_image(96, 96)):
         out = build_frame2(frame1, cand)
         assert out.mode == "P"
@@ -775,7 +790,7 @@ def test_build_frame2_always_shares_palette_96x96():
 
 
 # ---------------------------------------------------------------------------
-# _quantize_gen3()
+# _qg96()
 # ---------------------------------------------------------------------------
 
 def _multicolor_creature():
@@ -796,25 +811,25 @@ def _used_colors(out):
 
 
 def test_quantize_gen3_output_is_palette_96x96():
-    out = _quantize_gen3(_sprite_rgb())
+    out = _qg96(_sprite_rgb())
     assert out.mode == "P"
     assert out.size == (96, 96)
 
 
 def test_quantize_gen3_key_at_index_0():
-    out = _quantize_gen3(_sprite_rgb())
+    out = _qg96(_sprite_rgb())
     assert out.getpalette()[0:3] == [200, 200, 168]
 
 
 def test_quantize_gen3_reserves_black_and_white_at_fixed_slots():
-    out = _quantize_gen3(_sprite_rgb())
+    out = _qg96(_sprite_rgb())
     pal = out.getpalette()
     assert pal[3:6] == [0, 0, 0]
     assert pal[6:9] == [255, 255, 255]
 
 
 def test_quantize_gen3_creature_colour_budget():
-    out = _quantize_gen3(_multicolor_creature())
+    out = _qg96(_multicolor_creature())
     used = _used_colors(out)
     reserved = {_KEY_COLOR, (0, 0, 0), (255, 255, 255)}
     creature = used - reserved
@@ -823,7 +838,7 @@ def test_quantize_gen3_creature_colour_budget():
 
 
 def test_quantize_gen3_background_maps_to_index_0():
-    out = _quantize_gen3(_noisy_border_sprite())
+    out = _qg96(_noisy_border_sprite())
     px = out.load()
     w, h = out.size
     for x in range(w):
@@ -835,7 +850,7 @@ def test_quantize_gen3_background_maps_to_index_0():
 
 
 def test_quantize_gen3_enclosed_pocket_maps_to_index_0():
-    out = _quantize_gen3(_ring_sprite())
+    out = _qg96(_ring_sprite())
     px = out.load()
     for point in ((48, 48), (46, 48), (48, 46)):
         assert px[point] == 0
@@ -844,7 +859,7 @@ def test_quantize_gen3_enclosed_pocket_maps_to_index_0():
 def test_quantize_gen3_reserves_black_white_even_when_creature_uses_neither():
     img = Image.new("RGB", (96, 96), (255, 255, 255))
     ImageDraw.Draw(img).ellipse((30, 30, 66, 66), fill=(120, 90, 150))
-    out = _quantize_gen3(img)
+    out = _qg96(img)
     pal = out.getpalette()
     assert pal[3:6] == [0, 0, 0]
     assert pal[6:9] == [255, 255, 255]
@@ -858,7 +873,7 @@ def test_quantize_gen3_nudges_creature_colour_off_key():
     img = Image.new("RGB", (96, 96), (255, 255, 255))
     # Body deliberately near the key (dist 10 < _KEY_COLLISION_DISTANCE).
     ImageDraw.Draw(img).ellipse((30, 30, 66, 66), fill=(200, 200, 178))
-    out = _quantize_gen3(img)
+    out = _qg96(img)
     pal = out.getpalette()
     indices = set(out.get_flattened_data())
     assert any(i != 0 for i in indices)  # the creature is visible, not swallowed
@@ -871,7 +886,7 @@ def test_quantize_gen3_nudges_creature_colour_off_key():
 
 def test_quantize_gen3_all_background_does_not_crash():
     img = Image.new("RGB", (96, 96), (255, 255, 255))
-    out = _quantize_gen3(img)
+    out = _qg96(img)
     assert out.mode == "P"
     assert set(out.get_flattened_data()) == {0}
     pal = out.getpalette()
@@ -884,7 +899,7 @@ def test_quantize_gen3_does_not_mutate_input():
     img = _sprite_rgb()
     original_data = list(img.get_flattened_data())
     original_size = img.size
-    _quantize_gen3(img)
+    _qg96(img)
     assert img.size == original_size
     assert list(img.get_flattened_data()) == original_data
 
@@ -911,16 +926,18 @@ def _make_stage_dir(tmp_path, views=_VIEW_COLORS):
     return tmp_path
 
 
-def _cell_color(sheet, col, row, cell=96):
+def _cell_color(sheet, col, row, cell=64):
     return sheet.convert("RGB").getpixel((col * cell + cell // 2, row * cell + cell // 2))
 
 
-def test_spritesheet_is_384x192_rgb(tmp_path):
+def test_spritesheet_default_is_256x128_rgb(tmp_path):
+    # The sheet is the GBA deliverable: 64px cells by default, one single
+    # downscale from the native-size views.
     stage = _make_stage_dir(tmp_path)
     out = tmp_path / "spritesheet.png"
     stitch_spritesheet(str(stage), str(out))
     sheet = Image.open(out)
-    assert sheet.size == (384, 192)
+    assert sheet.size == (256, 128)
     assert sheet.mode == "RGB"
 
 
@@ -957,20 +974,20 @@ def test_spritesheet_missing_view_leaves_cell_key(tmp_path):
     assert _cell_color(sheet, 1, 1) == _VIEW_COLORS["sprite_frame2_shiny.png"]
 
 
-def test_spritesheet_64_variant_is_256x128(tmp_path):
+def test_spritesheet_cell_size_override(tmp_path):
     stage = _make_stage_dir(tmp_path)
-    out = tmp_path / "spritesheet_64.png"
-    stitch_spritesheet(str(stage), str(out), cell_size=64)
+    out = tmp_path / "sheet96.png"
+    stitch_spritesheet(str(stage), str(out), cell_size=96)
     sheet = Image.open(out)
-    assert sheet.size == (256, 128)
-    assert _cell_color(sheet, 0, 0, cell=64) == _VIEW_COLORS["sprite.png"]
+    assert sheet.size == (384, 192)
+    assert _cell_color(sheet, 0, 0, cell=96) == _VIEW_COLORS["sprite.png"]
 
 
-def test_spritesheet_64_downscale_introduces_no_new_colors(tmp_path):
+def test_spritesheet_downscale_introduces_no_new_colors(tmp_path):
     # NEAREST downscale must only drop pixels, never blend new colours in.
     stage = _make_stage_dir(tmp_path)
-    out = tmp_path / "spritesheet_64.png"
-    stitch_spritesheet(str(stage), str(out), cell_size=64)
+    out = tmp_path / "spritesheet.png"
+    stitch_spritesheet(str(stage), str(out))
     sheet_colors = set(Image.open(out).convert("RGB").get_flattened_data())
     allowed = set(_VIEW_COLORS.values()) | {_KEY_COLOR}
     assert sheet_colors <= allowed

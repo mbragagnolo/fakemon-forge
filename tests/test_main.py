@@ -362,19 +362,17 @@ def test_tier_legendary_passed_to_llm(ctx):
 # Spritesheet stitching
 # ---------------------------------------------------------------------------
 
-def test_spritesheet_stitched_at_both_sizes(ctx):
+def test_spritesheet_stitched_once_at_default_cell_size(ctx):
     main(["--description", "fire lizard"])
     calls = ctx["stitch"].call_args_list
-    assert len(calls) == 2
+    assert len(calls) == 1   # one sheet: the 64-cell GBA deliverable
     assert calls[0].args == (ctx["stage_dir"], str(ctx["stage_dir"] / "spritesheet.png"))
     assert calls[0].kwargs == {}
-    assert calls[1].args == (ctx["stage_dir"], str(ctx["stage_dir"] / "spritesheet_64.png"))
-    assert calls[1].kwargs == {"cell_size": 64}
 
 
 def test_spritesheet_stitched_per_stage_in_line_mode(ctx_line):
     main(["--description", "fire lizard", "--mode", "line"])
-    assert ctx_line["stitch"].call_count == 6   # 2 sheets x 3 stages
+    assert ctx_line["stitch"].call_count == 3   # one sheet per stage
 
 
 def test_spritesheet_failure_warns_but_does_not_exit(ctx, capsys):

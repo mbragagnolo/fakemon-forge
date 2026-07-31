@@ -59,14 +59,14 @@ def _rgb_image(w=512, h=512, color=(200, 100, 50)):
 
 
 def _frame1_file(tmp_path, name="sprite.png"):
-    """Write a real P-mode 96x96 front sprite, as main saves it."""
+    """Write a real P-mode front sprite fixture (96px for test speed)."""
     from PIL import ImageDraw
     img = Image.new("RGB", (96, 96), (40, 40, 60))
     d = ImageDraw.Draw(img)
     d.ellipse((26, 28, 70, 84), fill=(200, 80, 60))
     d.ellipse((34, 40, 46, 52), fill=(240, 240, 240))
     d.rectangle((38, 74, 58, 84), fill=(80, 60, 40))
-    frame1 = postprocess(img)
+    frame1 = postprocess(img, size=96)
     path = tmp_path / name
     frame1.save(str(path))
     return path
@@ -139,11 +139,11 @@ def test_generate_sprite_creates_file(tmp_path):
     assert out.exists()
 
 
-def test_saved_sprite_is_96x96(tmp_path):
+def test_saved_sprite_is_native_768(tmp_path):
     pipe = _fake_pipeline(_rgb_image())
     out = tmp_path / "sprite.png"
     generate_sprite("fire lizard", [], str(out), pipeline=pipe)
-    assert Image.open(out).size == (96, 96)
+    assert Image.open(out).size == (768, 768)
 
 
 def test_saved_sprite_is_png(tmp_path):
@@ -203,13 +203,13 @@ def test_img2img_creates_file(tmp_path):
     assert out.exists()
 
 
-def test_img2img_saved_sprite_is_96x96(tmp_path):
+def test_img2img_saved_sprite_is_native_768(tmp_path):
     init_img = tmp_path / "drawing.png"
     _rgb_image(100, 100).save(str(init_img))
     pipe = _fake_img2img_pipeline(_rgb_image())
     out = tmp_path / "sprite.png"
     generate_sprite_img2img("fire lizard", [], str(init_img), str(out), pipeline=pipe)
-    assert Image.open(out).size == (96, 96)
+    assert Image.open(out).size == (768, 768)
 
 
 def test_img2img_saved_sprite_is_png(tmp_path):
@@ -287,7 +287,7 @@ def test_img2img_reference_path_adopts_reference_palette(tmp_path):
     assert saved.getpalette() == Image.open(str(ref)).getpalette()
 
 
-def test_img2img_reference_path_saved_is_96x96_png(tmp_path):
+def test_img2img_reference_path_saved_matches_reference_size(tmp_path):
     ref = _frame1_file(tmp_path)
     init_img = tmp_path / "drawing.png"
     _rgb_image(100, 100).save(str(init_img))
@@ -298,7 +298,7 @@ def test_img2img_reference_path_saved_is_96x96_png(tmp_path):
         reference_path=str(ref),
     )
     saved = Image.open(str(out))
-    assert saved.size == (96, 96)
+    assert saved.size == Image.open(str(ref)).size   # locked output adopts reference size
     assert saved.format == "PNG"
 
 
@@ -334,7 +334,7 @@ def test_img2img_without_reference_path_uses_adaptive_palette(tmp_path):
     generate_sprite_img2img("fire lizard", [], str(init_img), str(out), pipeline=pipe)
     saved = Image.open(str(out))
     assert saved.mode == "P"
-    assert saved.size == (96, 96)
+    assert saved.size == (768, 768)
 
 
 # ---------------------------------------------------------------------------
@@ -349,12 +349,12 @@ def test_frame2_creates_file(tmp_path):
     assert out.exists()
 
 
-def test_frame2_saved_is_96x96(tmp_path):
+def test_frame2_saved_matches_front_size(tmp_path):
     front = _frame1_file(tmp_path)
     pipe = _fake_img2img_pipeline(_rgb_image(96, 96, color=(90, 160, 210)))
     out = tmp_path / "sprite_frame2.png"
     generate_frame2("fire lizard", [], str(front), str(out), pipeline=pipe)
-    assert Image.open(out).size == (96, 96)
+    assert Image.open(out).size == Image.open(str(front)).size
 
 
 def test_frame2_saved_is_png(tmp_path):

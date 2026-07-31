@@ -128,7 +128,6 @@ def main(argv=None):
 
         try:
             stitch_spritesheet(stage_dir, str(stage_dir / "spritesheet.png"))
-            stitch_spritesheet(stage_dir, str(stage_dir / "spritesheet_64.png"), cell_size=64)
         except Exception as exc:
             print(
                 f"Warning: spritesheet stitching failed for {stage['name']}: {exc}",

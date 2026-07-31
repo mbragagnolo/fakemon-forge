@@ -11,7 +11,7 @@ _LORA_SCALE = 0.7
 _GEN_SIZE = 768
 _NUM_STEPS = 30
 _CFG_SCALE = 7
-_SPRITE_SIZE = 96
+_SPRITE_SIZE = 768  # native SD render size — individual sprites keep full detail
 _PALETTE_COLORS = 16
 _KEY_COLOR = (200, 200, 168)  # Gen-3 transparency key colour (RGB).
 # Tunable eyeball placeholder (see the module spec, cf. procedural_squash's
@@ -56,17 +56,18 @@ def _encode_prompt(prompt: str, pipeline):
     return compel(prompt)
 
 
-def postprocess(image: Image.Image) -> Image.Image:
-    """Turn a raw SD RGB image into a 96x96 ``P``-mode Gen-3-contract sprite.
+def postprocess(image: Image.Image, size: int | None = None) -> Image.Image:
+    """Turn a raw SD RGB image into a ``P``-mode Gen-3-contract sprite.
 
     Delegates to ``_quantize_gen3`` — the single source of truth for the Gen-3
     palette contract (``_KEY_COLOR`` at index 0, reserved black/white, at most
     ``_MAX_CREATURE_COLORS`` creature colours, background pixels on index 0).
-    ``_quantize_gen3`` already performs the resize + colour/contrast enhance
-    pre-steps internally (before flattening the background to the key), so they
-    are not repeated here.
+    ``size`` defaults to ``_SPRITE_SIZE`` (the native SD render size, so the
+    default path performs no downscale at all). ``_quantize_gen3`` already
+    performs the resize + colour/contrast enhance pre-steps internally (before
+    flattening the background to the key), so they are not repeated here.
     """
-    return _quantize_gen3(image)
+    return _quantize_gen3(image, size)
 
 
 def quantize_to_reference(image: Image.Image, reference: Image.Image) -> Image.Image:
@@ -87,8 +88,9 @@ def quantize_to_reference(image: Image.Image, reference: Image.Image) -> Image.I
     if reference.mode != "P":
         raise ValueError(f"Expected palette-mode reference image, got {reference.mode}")
     # Enhance BEFORE flattening (mirroring ``_quantize_gen3``) so the enhance
-    # can't shift the key off its byte-exact value.
-    image = image.resize((_SPRITE_SIZE, _SPRITE_SIZE), Image.NEAREST)
+    # can't shift the key off its byte-exact value. The reference defines the
+    # target size, so locked views always match the view they lock to.
+    image = image.resize(reference.size, Image.NEAREST)
     image = ImageEnhance.Color(image).enhance(1.1)
     image = ImageEnhance.Contrast(image).enhance(1.1)
     if image.mode != "RGB":
@@ -198,8 +200,8 @@ def _nudge_off_key(color: tuple[int, int, int]) -> tuple[int, int, int]:
     )
 
 
-def _quantize_gen3(image: Image.Image) -> Image.Image:
-    """Return a 96x96 ``P``-mode image obeying the Gen-3 palette contract.
+def _quantize_gen3(image: Image.Image, size: int | None = None) -> Image.Image:
+    """Return a ``size`` x ``size`` ``P``-mode image obeying the Gen-3 palette contract.
 
     Palette layout: ``_KEY_COLOR`` at index 0, reserved black and white at
     indices 1 and 2 (always present, even if the creature uses neither), then up
@@ -212,7 +214,8 @@ def _quantize_gen3(image: Image.Image) -> Image.Image:
     """
     # Resize + enhance for parity with ``postprocess``, done BEFORE flattening so
     # the enhance can't shift the key off its byte-exact value.
-    enhanced = image.resize((_SPRITE_SIZE, _SPRITE_SIZE), Image.NEAREST)
+    target = size or _SPRITE_SIZE
+    enhanced = image.resize((target, target), Image.NEAREST)
     enhanced = ImageEnhance.Color(enhanced).enhance(1.1)
     enhanced = ImageEnhance.Contrast(enhanced).enhance(1.1)
 
@@ -293,7 +296,7 @@ def _background_index(frame1: Image.Image) -> int:
     canvas and to define "non-background" for bbox detection.
     """
     # getcolors() yields (count, index) pairs for a P-mode image.
-    count_index = max(frame1.getcolors(maxcolors=_SPRITE_SIZE * _SPRITE_SIZE))
+    count_index = max(frame1.getcolors(maxcolors=frame1.size[0] * frame1.size[1]))
     return count_index[1]
 
 
@@ -303,25 +306,29 @@ def _content_bbox(image: Image.Image, background: int):
     return mask.getbbox()
 
 
-def procedural_squash(frame1: Image.Image, amount_px: int = 2) -> Image.Image:
+def procedural_squash(frame1: Image.Image, amount_px: int | None = None) -> Image.Image:
     """Bottom-anchored vertical squash of ``frame1`` — the Gen-3 breathing frame.
 
-    Compresses frame 1's content to ``96 x (96 - amount_px)`` and pastes it at
+    Compresses frame 1's content by ``amount_px`` rows and pastes it at
     the bottom, so the creature's feet stay planted while the top compresses.
     This is the fallback frame 2 whenever an img2img candidate is rejected, so
     it is built to be genuinely good and to land inside the acceptance band.
 
-    ``amount_px`` is a tunable eyeball placeholder (see the module spec); the
-    sensible squash range is ``1..95``. Operates entirely in P-space
-    (nearest-neighbour reuses existing indices) so the result shares frame 1's
-    exact palette without a re-quantize. Input is not mutated.
+    ``amount_px`` defaults to ``height // 48`` (2px on a 96px sprite, 16px at
+    the native 768) so the squash reads the same at any sprite size; it is a
+    tunable eyeball placeholder (see the module spec). Operates entirely in
+    P-space (nearest-neighbour reuses existing indices) so the result shares
+    frame 1's exact palette without a re-quantize. Input is not mutated.
     """
     if frame1.mode != "P":
         raise ValueError(f"Expected palette-mode frame1 image, got {frame1.mode}")
+    w, h = frame1.size
+    if amount_px is None:
+        amount_px = max(1, h // 48)
     background = _background_index(frame1)
     # NEAREST in P-space introduces no new colours (indices are reused verbatim).
-    squashed = frame1.resize((_SPRITE_SIZE, _SPRITE_SIZE - amount_px), Image.NEAREST)
-    canvas = Image.new("P", (_SPRITE_SIZE, _SPRITE_SIZE), background)
+    squashed = frame1.resize((w, h - amount_px), Image.NEAREST)
+    canvas = Image.new("P", (w, h), background)
     canvas.putpalette(frame1.getpalette())
     # Paste at (0, amount_px): bottom row aligns with the canvas bottom and the
     # top ``amount_px`` rows become background.
@@ -336,13 +343,13 @@ def recenter_to_anchor(candidate: Image.Image, frame1: Image.Image) -> Image.Ima
     two frames share a planted-feet position and the second frame does not
     appear to teleport/jitter. ``candidate`` is expected to already share
     frame 1's palette (in the ``build_frame2`` flow it has been palette-locked).
-    Returns a fresh 96x96 P-mode image sharing frame 1's exact palette; inputs
-    are not mutated.
+    Returns a fresh P-mode image of frame 1's size sharing its exact palette;
+    inputs are not mutated.
     """
     if frame1.mode != "P":
         raise ValueError(f"Expected palette-mode frame1 image, got {frame1.mode}")
     background = _background_index(frame1)
-    canvas = Image.new("P", (_SPRITE_SIZE, _SPRITE_SIZE), background)
+    canvas = Image.new("P", frame1.size, background)
     canvas.putpalette(frame1.getpalette())
 
     frame1_bbox = _content_bbox(frame1, background)
@@ -392,7 +399,7 @@ def build_frame2(
     from frame 1 lands inside ``[low, high]`` — below ``low`` is texture
     shimmer (not motion), above ``high`` is identity drift / teleporting.
     Otherwise (or with no candidate) falls back to ``procedural_squash``.
-    Always returns a valid 96x96 P-mode frame sharing frame 1's exact palette.
+    Always returns a valid P-mode frame of frame 1's size sharing its palette.
 
     ``low`` / ``high`` are tunable eyeball placeholders (see the module spec);
     a later ML slice or a human is expected to tune them.
@@ -401,7 +408,7 @@ def build_frame2(
         raise ValueError(f"Expected palette-mode frame1 image, got {frame1.mode}")
     if candidate is None:
         return procedural_squash(frame1)
-    locked = quantize_to_reference(candidate, frame1)  # also resizes to 96x96
+    locked = quantize_to_reference(candidate, frame1)  # also resizes to frame1's size
     recentred = recenter_to_anchor(locked, frame1)
     ratio = difference_ratio(recentred, frame1)
     if low <= ratio <= high:
@@ -470,7 +477,7 @@ def generate_sprite_img2img(
     extra_tags: list[str] | None = None, seed: int | None = None, strength: float = 0.8,
     reference_path: str | None = None,
 ) -> None:
-    """Generate a sprite via img2img and save it as a 96x96 P-mode PNG.
+    """Generate a sprite via img2img and save it as a P-mode PNG.
 
     When ``reference_path`` is given, the raw candidate is locked to that
     reference image's exact 16-colour palette via ``quantize_to_reference`` — so
@@ -526,15 +533,17 @@ _SHEET_LAYOUT = [
 ]
 
 
-def stitch_spritesheet(stage_dir: str, output_path: str, *, cell_size: int = _SPRITE_SIZE) -> None:
-    """Stitch a stage's six sprite views into one 4x2 sheet.
+def stitch_spritesheet(stage_dir: str, output_path: str, *, cell_size: int = 64) -> None:
+    """Stitch a stage's six sprite views into one 4x2 sheet of GBA-sized cells.
 
     The canvas (including the two unused cells) is filled with ``_KEY_COLOR``
     so a ROM tool can key transparency off the whole sheet. A missing view
     leaves its cell on the key rather than failing — mirroring how sprite
-    generation degrades per-view. Views are pasted at native size; a non-native
-    ``cell_size`` (e.g. 64 for GBA tooling) downscales with NEAREST, which
-    drops pixels but never blends new colours into the palette.
+    generation degrades per-view. The individual views are kept at the native
+    SD render size (``_SPRITE_SIZE``), so the default 64px cell is a **single**
+    NEAREST downscale (768/64 = an exact /12) — one resample from full detail,
+    never a chain — and NEAREST drops pixels without blending new colours into
+    the palette.
     """
     sheet = Image.new("RGB", (4 * cell_size, 2 * cell_size), _KEY_COLOR)
     for name, col, row in _SHEET_LAYOUT:
