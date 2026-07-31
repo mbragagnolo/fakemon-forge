@@ -75,14 +75,25 @@ def quantize_to_reference(image: Image.Image, reference: Image.Image) -> Image.I
     Unlike ``postprocess``, which builds a fresh 16-colour palette every call,
     this reuses ``reference``'s exact palette so a whole sprite set (front frames
     plus back sprite) can share one 16-colour palette. The pre-steps (resize +
-    colour/contrast enhance) match ``postprocess`` so either path yields the same
-    input to quantization. Inputs are not mutated.
+    colour/contrast enhance, then flatten background to the key) match
+    ``_quantize_gen3`` so either path yields the same input to quantization.
+    Inputs are not mutated.
+
+    Flattening the background to ``_KEY_COLOR`` before quantizing is what keeps a
+    noisy near-white candidate background on **index 0** (the key) instead of
+    nearest-mapping into the reserved white slot: after the flatten every
+    background pixel is byte-exactly the reference's index-0 key entry.
     """
     if reference.mode != "P":
         raise ValueError(f"Expected palette-mode reference image, got {reference.mode}")
+    # Enhance BEFORE flattening (mirroring ``_quantize_gen3``) so the enhance
+    # can't shift the key off its byte-exact value.
     image = image.resize((_SPRITE_SIZE, _SPRITE_SIZE), Image.NEAREST)
     image = ImageEnhance.Color(image).enhance(1.1)
     image = ImageEnhance.Contrast(image).enhance(1.1)
+    if image.mode != "RGB":
+        image = image.convert("RGB")  # _flatten_background_to_key assumes RGB
+    image = _flatten_background_to_key(image)
     return image.quantize(palette=reference)
 
 
@@ -238,8 +249,13 @@ def _is_achromatic(r: int, g: int, b: int) -> bool:
 def generate_shiny(sprite_path: str, name: str, output_path: str) -> None:
     """Derive a shiny palette from an existing sprite by hue-rotating mid-tone colors.
 
-    Black (lum < 40) and white (lum > 215) entries are preserved exactly.
-    The hue shift is seeded from the Pokémon's name so each one is unique.
+    The Gen-3 contract's reserved entries are pinned unconditionally, never left
+    to the achromatic threshold: the transparency key at **index 0** (the key
+    ``(200, 200, 168)`` is chromatic — lum ~196 — so the threshold would rotate
+    it), plus any ``(255, 255, 255)`` (white) or ``(0, 0, 0)`` (black) entry.
+    All other (creature) entries are hue-rotated by a shift seeded from the
+    Pokémon's name so each one is unique. ``_is_achromatic`` still preserves any
+    remaining very-bright/very-dark creature entries.
     """
     img = Image.open(sprite_path)
     if img.mode != "P":
@@ -251,7 +267,12 @@ def generate_shiny(sprite_path: str, name: str, output_path: str) -> None:
     new_palette = []
     for i in range(0, len(flat), 3):
         r, g, b = flat[i], flat[i + 1], flat[i + 2]
-        if _is_achromatic(r, g, b):
+        # Pin key (index 0), white, and black unconditionally — by explicit
+        # match, independent of _is_achromatic — so the chromatic key is
+        # provably never rotated.
+        if i == 0 or (r, g, b) == (255, 255, 255) or (r, g, b) == (0, 0, 0):
+            new_palette.extend([r, g, b])
+        elif _is_achromatic(r, g, b):
             new_palette.extend([r, g, b])
         else:
             h, s, v = colorsys.rgb_to_hsv(r / 255, g / 255, b / 255)
