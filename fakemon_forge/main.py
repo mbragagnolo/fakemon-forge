@@ -73,9 +73,10 @@ def main(argv=None):
 
         back_path = str(stage_dir / "sprite_back.png")
         try:
-            init_image = args.image if args.image else sprite_path
+            # Always chain the back view from the generated front sprite — a
+            # user drawing is a front view and holds no backside information.
             generate_sprite_img2img(
-                stage["sprite_prompt"], stage["types"], init_image, back_path,
+                stage["sprite_prompt"], stage["types"], sprite_path, back_path,
                 pipeline=img2img_pipeline, extra_tags=["backside"], seed=seed,
                 strength=0.65, reference_path=sprite_path,
             )

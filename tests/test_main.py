@@ -178,9 +178,10 @@ def test_txt2img_back_sprite_reference_is_frame1(ctx):
     assert back_call.kwargs["reference_path"] == str(ctx["stage_dir"] / "sprite.png")
 
 
-def test_img2img_back_sprite_reference_is_frame1_not_init_image(ctx, tmp_path):
-    """In the img2img path the back sprite's init image is the user's drawing,
-    but its palette reference is still frame 1 (sprite.png)."""
+def test_img2img_back_sprite_inits_from_front_sprite(ctx, tmp_path):
+    """In the img2img path the back sprite inits from the generated front
+    sprite — not the user's drawing, which holds no backside information
+    (regression: #10). Palette reference stays frame 1 (sprite.png)."""
     img = tmp_path / "drawing.png"
     img.write_bytes(b"\x89PNG\r\n")
     main(["--image", str(img), "--description", "fire lizard"])
@@ -192,8 +193,9 @@ def test_img2img_back_sprite_reference_is_frame1_not_init_image(ctx, tmp_path):
     back = [c for c in calls if c.kwargs.get("reference_path") is not None]
     assert len(front) == 1 and len(back) == 1
 
+    assert front[0].args[2] == str(img)   # front still seeds from the drawing
     back_call = back[0]
-    assert back_call.args[2] == str(img)   # init image = user's drawing
+    assert back_call.args[2] == str(ctx["stage_dir"] / "sprite.png")   # init = front sprite
     assert back_call.kwargs["reference_path"] == str(ctx["stage_dir"] / "sprite.png")
     assert back_call.kwargs["extra_tags"] == ["backside"]
     assert back_call.kwargs["strength"] == 0.65
