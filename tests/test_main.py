@@ -36,15 +36,18 @@ def ctx(tmp_path, monkeypatch):
         patch("fakemon_forge.main.generate_fakemon", return_value=[_STAGE_1])     as m_gen,
         patch("fakemon_forge.main.load_txt2img_pipeline", return_value=MagicMock()) as m_t2i,
         patch("fakemon_forge.main.load_img2img_pipeline", return_value=MagicMock()) as m_i2i,
+        patch("fakemon_forge.main.make_img2img_pipeline", return_value=MagicMock()) as m_make_i2i,
         patch("fakemon_forge.main.generate_sprite")                as m_sprite,
         patch("fakemon_forge.main.generate_sprite_img2img")        as m_sprite_i2i,
+        patch("fakemon_forge.main.generate_shiny")                 as m_shiny,
         patch("fakemon_forge.main.write_output", return_value=[stage_dir]) as m_write,
+        patch("fakemon_forge.main.export_ini")                     as m_export,
     ):
         yield {
             "mistral": m_mistral, "vision": m_vision, "gen": m_gen,
-            "t2i": m_t2i, "i2i": m_i2i,
-            "sprite": m_sprite, "sprite_i2i": m_sprite_i2i,
-            "write": m_write, "stage_dir": stage_dir,
+            "t2i": m_t2i, "i2i": m_i2i, "make_i2i": m_make_i2i,
+            "sprite": m_sprite, "sprite_i2i": m_sprite_i2i, "shiny": m_shiny,
+            "write": m_write, "export": m_export, "stage_dir": stage_dir,
         }
 
 
@@ -65,9 +68,12 @@ def ctx_line(tmp_path, monkeypatch):
         patch("fakemon_forge.main.generate_fakemon", return_value=[_STAGE_1, _STAGE_2, _STAGE_3]),
         patch("fakemon_forge.main.load_txt2img_pipeline", return_value=MagicMock()),
         patch("fakemon_forge.main.load_img2img_pipeline", return_value=MagicMock()),
+        patch("fakemon_forge.main.make_img2img_pipeline", return_value=MagicMock()),
         patch("fakemon_forge.main.generate_sprite")           as m_sprite,
         patch("fakemon_forge.main.generate_sprite_img2img"),
+        patch("fakemon_forge.main.generate_shiny"),
         patch("fakemon_forge.main.write_output", return_value=dirs),
+        patch("fakemon_forge.main.export_ini"),
     ):
         yield {"sprite": m_sprite, "dirs": dirs}
 
@@ -108,7 +114,8 @@ def test_txt2img_path_uses_txt2img_pipeline(ctx):
 def test_txt2img_path_calls_generate_sprite(ctx):
     main(["--description", "fire lizard"])
     ctx["sprite"].assert_called_once()
-    ctx["sprite_i2i"].assert_not_called()
+    ctx["sprite_i2i"].assert_called_once()   # back sprite only
+    assert ctx["sprite_i2i"].call_args.kwargs["extra_tags"] == ["backside"]
 
 
 def test_txt2img_sprite_called_with_user_description(ctx):
@@ -139,7 +146,7 @@ def test_img2img_path_calls_generate_sprite_img2img(ctx, tmp_path):
     img = tmp_path / "drawing.png"
     img.write_bytes(b"\x89PNG\r\n")
     main(["--image", str(img), "--description", "fire lizard"])
-    ctx["sprite_i2i"].assert_called_once()
+    assert ctx["sprite_i2i"].call_count == 2   # front + back sprite
     ctx["sprite"].assert_not_called()
 
 

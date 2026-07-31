@@ -1,55 +1,29 @@
+"""Sprite tests that run without the real ML stack installed.
+
+Everything here either exercises pure-PIL/string code (build_prompt,
+postprocess) or fakes torch/diffusers wholesale via sys.modules injection
+(the load_* tests) — so this file runs in environments with only pytest,
+Pillow, and mistralai, e.g. the keep sandbox. Tests that trigger real
+`import torch` calls live in test_sprites_ml.py.
+"""
+
 import random
-import sys
 import pytest
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 from PIL import Image
 
 from fakemon_forge.sprites import (
-    generate_sprite,
-    generate_sprite_img2img,
     postprocess,
     build_prompt,
     load_txt2img_pipeline,
     load_img2img_pipeline,
-    _encode_prompt,
     _BASE_MODEL_ID,
-    _LORA_PATH,
-    _NUM_STEPS,
-    _CFG_SCALE,
     _LORA_SCALE,
 )
 
 # ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
-
-@pytest.fixture(autouse=True)
-def _stub_encode_prompt():
-    """Patch _encode_prompt for all sprite tests so compel isn't required."""
-    with patch("fakemon_forge.sprites._encode_prompt", return_value=MagicMock()):
-        yield
-
-
-# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-def _fake_pipeline(image: Image.Image):
-    result = MagicMock()
-    result.images = [image]
-    pipe = MagicMock()
-    pipe.return_value = result
-    return pipe
-
-
-def _fake_img2img_pipeline(image: Image.Image):
-    result = MagicMock()
-    result.images = [image]
-    pipe = MagicMock()
-    pipe.return_value = result
-    return pipe
-
 
 def _rgb_image(w=512, h=512, color=(200, 100, 50)):
     return Image.new("RGB", (w, h), color=color)
@@ -69,8 +43,8 @@ def _noisy_image(w=512, h=512):
 # build_prompt()
 # ---------------------------------------------------------------------------
 
-def test_build_prompt_no_types_returns_prompt_unchanged():
-    assert build_prompt("spiky wolf", []) == "spiky wolf"
+def test_build_prompt_no_types_prepends_only_style_tag():
+    assert build_prompt("spiky wolf", []) == "gen3 spiky wolf"
 
 
 def test_build_prompt_single_type_prepends_tag():
@@ -88,63 +62,8 @@ def test_build_prompt_two_types_prepends_both_tags():
 
 def test_build_prompt_unknown_type_is_skipped():
     result = build_prompt("mystery blob", ["Shadow"])
-    assert result == "mystery blob"
-
-
-# ---------------------------------------------------------------------------
-# _encode_prompt() / prompt_embeds passthrough
-# ---------------------------------------------------------------------------
-
-def test_encode_prompt_called_with_built_prompt_and_pipeline(tmp_path):
-    pipe = _fake_pipeline(_rgb_image())
-    out = tmp_path / "sprite.png"
-    fake_embeds = MagicMock()
-    with patch("fakemon_forge.sprites._encode_prompt", return_value=fake_embeds) as mock_enc:
-        generate_sprite("spiky ice wolf", [], str(out), pipeline=pipe)
-    mock_enc.assert_called_once_with("spiky ice wolf", pipe)
-
-
-def test_encode_prompt_result_passed_as_prompt_embeds(tmp_path):
-    pipe = _fake_pipeline(_rgb_image())
-    out = tmp_path / "sprite.png"
-    fake_embeds = MagicMock()
-    with patch("fakemon_forge.sprites._encode_prompt", return_value=fake_embeds):
-        generate_sprite("fire lizard", [], str(out), pipeline=pipe)
-    assert pipe.call_args.kwargs["prompt_embeds"] is fake_embeds
-    assert "prompt" not in pipe.call_args.kwargs
-
-
-def test_type_tags_included_in_encoded_prompt(tmp_path):
-    pipe = _fake_pipeline(_rgb_image())
-    out = tmp_path / "sprite.png"
-    with patch("fakemon_forge.sprites._encode_prompt", return_value=MagicMock()) as mock_enc:
-        generate_sprite("fire lizard", ["Fire", "Flying"], str(out), pipeline=pipe)
-    encoded_prompt = mock_enc.call_args.args[0]
-    assert "firetype" in encoded_prompt
-    assert "flyingtype" in encoded_prompt
-
-
-def test_img2img_encode_prompt_called(tmp_path):
-    init_img = tmp_path / "drawing.png"
-    _rgb_image(100, 100).save(str(init_img))
-    pipe = _fake_img2img_pipeline(_rgb_image())
-    out = tmp_path / "sprite.png"
-    fake_embeds = MagicMock()
-    with patch("fakemon_forge.sprites._encode_prompt", return_value=fake_embeds) as mock_enc:
-        generate_sprite_img2img("spiky ice wolf", [], str(init_img), str(out), pipeline=pipe)
-    mock_enc.assert_called_once_with("spiky ice wolf", pipe)
-
-
-def test_img2img_encode_prompt_result_passed_as_prompt_embeds(tmp_path):
-    init_img = tmp_path / "drawing.png"
-    _rgb_image(100, 100).save(str(init_img))
-    pipe = _fake_img2img_pipeline(_rgb_image())
-    out = tmp_path / "sprite.png"
-    fake_embeds = MagicMock()
-    with patch("fakemon_forge.sprites._encode_prompt", return_value=fake_embeds):
-        generate_sprite_img2img("fire lizard", [], str(init_img), str(out), pipeline=pipe)
-    assert pipe.call_args.kwargs["prompt_embeds"] is fake_embeds
-    assert "prompt" not in pipe.call_args.kwargs
+    assert "shadowtype" not in result
+    assert result == "gen3 mystery blob"
 
 
 # ---------------------------------------------------------------------------
@@ -168,68 +87,6 @@ def test_postprocess_does_not_mutate_input():
     original_size = img.size
     postprocess(img)
     assert img.size == original_size
-
-
-# ---------------------------------------------------------------------------
-# generate_sprite()
-# ---------------------------------------------------------------------------
-
-def test_generate_sprite_creates_file(tmp_path):
-    pipe = _fake_pipeline(_rgb_image())
-    out = tmp_path / "sprite.png"
-    generate_sprite("fire lizard", [], str(out), pipeline=pipe)
-    assert out.exists()
-
-
-def test_saved_sprite_is_96x96(tmp_path):
-    pipe = _fake_pipeline(_rgb_image())
-    out = tmp_path / "sprite.png"
-    generate_sprite("fire lizard", [], str(out), pipeline=pipe)
-    assert Image.open(out).size == (96, 96)
-
-
-def test_saved_sprite_is_png(tmp_path):
-    pipe = _fake_pipeline(_rgb_image())
-    out = tmp_path / "sprite.png"
-    generate_sprite("fire lizard", [], str(out), pipeline=pipe)
-    assert Image.open(out).format == "PNG"
-
-
-def test_saved_sprite_has_palette_mode(tmp_path):
-    pipe = _fake_pipeline(_rgb_image())
-    out = tmp_path / "sprite.png"
-    generate_sprite("fire lizard", [], str(out), pipeline=pipe)
-    assert Image.open(out).mode == "P"
-
-
-def test_pipeline_called_with_768x768(tmp_path):
-    pipe = _fake_pipeline(_rgb_image())
-    out = tmp_path / "sprite.png"
-    generate_sprite("fire lizard", [], str(out), pipeline=pipe)
-    kwargs = pipe.call_args.kwargs
-    assert kwargs["width"] == 768
-    assert kwargs["height"] == 768
-
-
-def test_pipeline_called_with_num_inference_steps(tmp_path):
-    pipe = _fake_pipeline(_rgb_image())
-    out = tmp_path / "sprite.png"
-    generate_sprite("fire lizard", [], str(out), pipeline=pipe)
-    assert pipe.call_args.kwargs["num_inference_steps"] == _NUM_STEPS
-
-
-def test_pipeline_called_with_guidance_scale(tmp_path):
-    pipe = _fake_pipeline(_rgb_image())
-    out = tmp_path / "sprite.png"
-    generate_sprite("fire lizard", [], str(out), pipeline=pipe)
-    assert pipe.call_args.kwargs["guidance_scale"] == _CFG_SCALE
-
-
-def test_pipeline_called_exactly_once(tmp_path):
-    pipe = _fake_pipeline(_rgb_image())
-    out = tmp_path / "sprite.png"
-    generate_sprite("fire lizard", [], str(out), pipeline=pipe)
-    assert pipe.call_count == 1
 
 
 # ---------------------------------------------------------------------------
@@ -334,82 +191,6 @@ def test_load_moves_pipeline_to_cpu_when_no_cuda():
     with patch.dict("sys.modules", mods):
         load_txt2img_pipeline()
     mock_pipe_cls.from_pretrained.return_value.to.assert_called_once_with("cpu")
-
-
-# ---------------------------------------------------------------------------
-# generate_sprite_img2img()
-# ---------------------------------------------------------------------------
-
-def test_img2img_creates_file(tmp_path):
-    init_img = tmp_path / "drawing.png"
-    _rgb_image(100, 100).save(str(init_img))
-    pipe = _fake_img2img_pipeline(_rgb_image())
-    out = tmp_path / "sprite.png"
-    generate_sprite_img2img("fire lizard", [], str(init_img), str(out), pipeline=pipe)
-    assert out.exists()
-
-
-def test_img2img_saved_sprite_is_96x96(tmp_path):
-    init_img = tmp_path / "drawing.png"
-    _rgb_image(100, 100).save(str(init_img))
-    pipe = _fake_img2img_pipeline(_rgb_image())
-    out = tmp_path / "sprite.png"
-    generate_sprite_img2img("fire lizard", [], str(init_img), str(out), pipeline=pipe)
-    assert Image.open(out).size == (96, 96)
-
-
-def test_img2img_saved_sprite_is_png(tmp_path):
-    init_img = tmp_path / "drawing.png"
-    _rgb_image(100, 100).save(str(init_img))
-    pipe = _fake_img2img_pipeline(_rgb_image())
-    out = tmp_path / "sprite.png"
-    generate_sprite_img2img("fire lizard", [], str(init_img), str(out), pipeline=pipe)
-    assert Image.open(out).format == "PNG"
-
-
-def test_img2img_saved_sprite_has_palette_mode(tmp_path):
-    init_img = tmp_path / "drawing.png"
-    _rgb_image(100, 100).save(str(init_img))
-    pipe = _fake_img2img_pipeline(_rgb_image())
-    out = tmp_path / "sprite.png"
-    generate_sprite_img2img("fire lizard", [], str(init_img), str(out), pipeline=pipe)
-    assert Image.open(out).mode == "P"
-
-
-def test_img2img_conditioning_image_passed_to_pipeline(tmp_path):
-    init_img = tmp_path / "drawing.png"
-    _rgb_image(100, 100).save(str(init_img))
-    pipe = _fake_img2img_pipeline(_rgb_image())
-    out = tmp_path / "sprite.png"
-    generate_sprite_img2img("fire lizard", [], str(init_img), str(out), pipeline=pipe)
-    assert "image" in pipe.call_args.kwargs
-
-
-def test_img2img_conditioning_image_is_768x768(tmp_path):
-    init_img = tmp_path / "drawing.png"
-    _rgb_image(100, 100).save(str(init_img))
-    pipe = _fake_img2img_pipeline(_rgb_image())
-    out = tmp_path / "sprite.png"
-    generate_sprite_img2img("fire lizard", [], str(init_img), str(out), pipeline=pipe)
-    assert pipe.call_args.kwargs["image"].size == (768, 768)
-
-
-def test_img2img_conditioning_image_is_rgb(tmp_path):
-    init_img = tmp_path / "drawing.png"
-    Image.new("RGBA", (100, 100)).save(str(init_img))
-    pipe = _fake_img2img_pipeline(_rgb_image())
-    out = tmp_path / "sprite.png"
-    generate_sprite_img2img("fire lizard", [], str(init_img), str(out), pipeline=pipe)
-    assert pipe.call_args.kwargs["image"].mode == "RGB"
-
-
-def test_img2img_pipeline_called_exactly_once(tmp_path):
-    init_img = tmp_path / "drawing.png"
-    _rgb_image(100, 100).save(str(init_img))
-    pipe = _fake_img2img_pipeline(_rgb_image())
-    out = tmp_path / "sprite.png"
-    generate_sprite_img2img("fire lizard", [], str(init_img), str(out), pipeline=pipe)
-    assert pipe.call_count == 1
 
 
 # ---------------------------------------------------------------------------

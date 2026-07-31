@@ -21,3 +21,6 @@ fakemon-forge = "fakemon_forge.main:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "ml: needs the real torch/diffusers stack importable (auto-skipped when torch is missing)",
+]
