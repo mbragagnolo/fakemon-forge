@@ -39,6 +39,7 @@ def ctx(tmp_path, monkeypatch):
         patch("fakemon_forge.main.make_img2img_pipeline", return_value=MagicMock()) as m_make_i2i,
         patch("fakemon_forge.main.generate_sprite")                as m_sprite,
         patch("fakemon_forge.main.generate_sprite_img2img")        as m_sprite_i2i,
+        patch("fakemon_forge.main.generate_frame2")                as m_frame2,
         patch("fakemon_forge.main.generate_shiny")                 as m_shiny,
         patch("fakemon_forge.main.write_output", return_value=[stage_dir]) as m_write,
         patch("fakemon_forge.main.export_ini")                     as m_export,
@@ -46,7 +47,8 @@ def ctx(tmp_path, monkeypatch):
         yield {
             "mistral": m_mistral, "vision": m_vision, "gen": m_gen,
             "t2i": m_t2i, "i2i": m_i2i, "make_i2i": m_make_i2i,
-            "sprite": m_sprite, "sprite_i2i": m_sprite_i2i, "shiny": m_shiny,
+            "sprite": m_sprite, "sprite_i2i": m_sprite_i2i,
+            "frame2": m_frame2, "shiny": m_shiny,
             "write": m_write, "export": m_export, "stage_dir": stage_dir,
         }
 
@@ -71,11 +73,12 @@ def ctx_line(tmp_path, monkeypatch):
         patch("fakemon_forge.main.make_img2img_pipeline", return_value=MagicMock()),
         patch("fakemon_forge.main.generate_sprite")           as m_sprite,
         patch("fakemon_forge.main.generate_sprite_img2img"),
-        patch("fakemon_forge.main.generate_shiny"),
+        patch("fakemon_forge.main.generate_frame2")           as m_frame2,
+        patch("fakemon_forge.main.generate_shiny")            as m_shiny,
         patch("fakemon_forge.main.write_output", return_value=dirs),
         patch("fakemon_forge.main.export_ini"),
     ):
-        yield {"sprite": m_sprite, "dirs": dirs}
+        yield {"sprite": m_sprite, "frame2": m_frame2, "shiny": m_shiny, "dirs": dirs}
 
 
 # ---------------------------------------------------------------------------
@@ -195,6 +198,76 @@ def test_mode_passed_to_llm(ctx):
 def test_line_mode_calls_sprite_three_times(ctx_line):
     main(["--description", "fire lizard", "--mode", "line"])
     assert ctx_line["sprite"].call_count == 3
+
+
+# ---------------------------------------------------------------------------
+# Frame 2 (two-frame front animation)
+# ---------------------------------------------------------------------------
+
+def test_txt2img_frame2_written_per_stage(ctx):
+    main(["--description", "fire lizard"])
+    ctx["frame2"].assert_called_once()
+    kwargs = ctx["frame2"].call_args.kwargs
+    args = ctx["frame2"].call_args.args
+    assert args[3] == str(ctx["stage_dir"] / "sprite_frame2.png")   # output_path
+    assert args[2] == str(ctx["stage_dir"] / "sprite.png")          # front sprite
+
+
+def test_txt2img_frame2_uses_img2img_pipeline_and_seed(ctx):
+    main(["--description", "fire lizard"])
+    kwargs = ctx["frame2"].call_args.kwargs
+    assert kwargs["pipeline"] is not None
+    assert "seed" in kwargs
+
+
+def test_img2img_frame2_written_per_stage(ctx, tmp_path):
+    img = tmp_path / "drawing.png"
+    img.write_bytes(b"\x89PNG\r\n")
+    main(["--image", str(img), "--description", "fire lizard"])
+    ctx["frame2"].assert_called_once()
+    args = ctx["frame2"].call_args.args
+    assert args[3] == str(ctx["stage_dir"] / "sprite_frame2.png")
+    assert args[2] == str(ctx["stage_dir"] / "sprite.png")
+
+
+def test_frame2_shiny_written_per_stage(ctx):
+    main(["--description", "fire lizard"])
+    shiny_calls = ctx["shiny"].call_args_list
+    frame2_shiny = [
+        c for c in shiny_calls
+        if c.args[2] == str(ctx["stage_dir"] / "sprite_frame2_shiny.png")
+    ]
+    assert len(frame2_shiny) == 1
+    # reads sprite_frame2.png, keyed on stage name
+    assert frame2_shiny[0].args[0] == str(ctx["stage_dir"] / "sprite_frame2.png")
+    assert frame2_shiny[0].args[1] == "Flamburr"
+
+
+def test_generate_shiny_called_three_times_per_stage(ctx):
+    """front + back + frame2 shinies."""
+    main(["--description", "fire lizard"])
+    assert ctx["shiny"].call_count == 3
+
+
+def test_line_mode_frame2_called_three_times(ctx_line):
+    main(["--description", "fire lizard", "--mode", "line"])
+    assert ctx_line["frame2"].call_count == 3
+    assert ctx_line["shiny"].call_count == 9   # 3 shinies x 3 stages
+
+
+def test_frame2_failure_warns_but_does_not_exit(ctx, capsys):
+    ctx["frame2"].side_effect = RuntimeError("frame2 crash")
+    main(["--description", "fire lizard"])   # must not raise
+    err = capsys.readouterr().err
+    assert "Warning" in err
+    assert "Flamburr" in err
+    # a frame-2 failure must NOT skip the rest of the stage: the front shiny
+    # (a later block in the same stage) still runs.
+    front_shiny = [
+        c for c in ctx["shiny"].call_args_list
+        if c.args[2] == str(ctx["stage_dir"] / "sprite_shiny.png")
+    ]
+    assert len(front_shiny) == 1
 
 
 # ---------------------------------------------------------------------------

@@ -10,6 +10,7 @@ from fakemon_forge.generator import generate_fakemon
 from fakemon_forge.sprites import (
     generate_sprite,
     generate_sprite_img2img,
+    generate_frame2,
     generate_shiny,
     load_txt2img_pipeline,
     load_img2img_pipeline,
@@ -81,6 +82,27 @@ def main(argv=None):
         except Exception as exc:
             print(
                 f"Warning: back sprite generation failed for {stage['name']}: {exc}",
+                file=sys.stderr,
+            )
+
+        frame2_path = str(stage_dir / "sprite_frame2.png")
+        try:
+            generate_frame2(
+                stage["sprite_prompt"], stage["types"], sprite_path, frame2_path,
+                pipeline=img2img_pipeline, seed=seed,
+            )
+        except Exception as exc:
+            print(
+                f"Warning: frame 2 generation failed for {stage['name']}: {exc}",
+                file=sys.stderr,
+            )
+
+        frame2_shiny_path = str(stage_dir / "sprite_frame2_shiny.png")
+        try:
+            generate_shiny(frame2_path, stage["name"], frame2_shiny_path)
+        except Exception as exc:
+            print(
+                f"Warning: frame 2 shiny generation failed for {stage['name']}: {exc}",
                 file=sys.stderr,
             )
 

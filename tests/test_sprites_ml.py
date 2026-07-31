@@ -14,6 +14,9 @@ from fakemon_forge.sprites import (
     build_prompt,
     generate_sprite,
     generate_sprite_img2img,
+    generate_frame2,
+    postprocess,
+    procedural_squash,
     _NUM_STEPS,
     _CFG_SCALE,
 )
@@ -53,6 +56,20 @@ def _fake_img2img_pipeline(image: Image.Image):
 
 def _rgb_image(w=512, h=512, color=(200, 100, 50)):
     return Image.new("RGB", (w, h), color=color)
+
+
+def _frame1_file(tmp_path, name="sprite.png"):
+    """Write a real P-mode 96x96 front sprite, as main saves it."""
+    from PIL import ImageDraw
+    img = Image.new("RGB", (96, 96), (40, 40, 60))
+    d = ImageDraw.Draw(img)
+    d.ellipse((26, 28, 70, 84), fill=(200, 80, 60))
+    d.ellipse((34, 40, 46, 52), fill=(240, 240, 240))
+    d.rectangle((38, 74, 58, 84), fill=(80, 60, 40))
+    frame1 = postprocess(img)
+    path = tmp_path / name
+    frame1.save(str(path))
+    return path
 
 
 # ---------------------------------------------------------------------------
@@ -247,3 +264,109 @@ def test_img2img_pipeline_called_exactly_once(tmp_path):
     out = tmp_path / "sprite.png"
     generate_sprite_img2img("fire lizard", [], str(init_img), str(out), pipeline=pipe)
     assert pipe.call_count == 1
+
+
+# ---------------------------------------------------------------------------
+# generate_frame2()
+# ---------------------------------------------------------------------------
+
+def test_frame2_creates_file(tmp_path):
+    front = _frame1_file(tmp_path)
+    pipe = _fake_img2img_pipeline(_rgb_image(96, 96, color=(90, 160, 210)))
+    out = tmp_path / "sprite_frame2.png"
+    generate_frame2("fire lizard", [], str(front), str(out), pipeline=pipe)
+    assert out.exists()
+
+
+def test_frame2_saved_is_96x96(tmp_path):
+    front = _frame1_file(tmp_path)
+    pipe = _fake_img2img_pipeline(_rgb_image(96, 96, color=(90, 160, 210)))
+    out = tmp_path / "sprite_frame2.png"
+    generate_frame2("fire lizard", [], str(front), str(out), pipeline=pipe)
+    assert Image.open(out).size == (96, 96)
+
+
+def test_frame2_saved_is_png(tmp_path):
+    front = _frame1_file(tmp_path)
+    pipe = _fake_img2img_pipeline(_rgb_image(96, 96, color=(90, 160, 210)))
+    out = tmp_path / "sprite_frame2.png"
+    generate_frame2("fire lizard", [], str(front), str(out), pipeline=pipe)
+    assert Image.open(out).format == "PNG"
+
+
+def test_frame2_saved_is_palette_mode(tmp_path):
+    front = _frame1_file(tmp_path)
+    pipe = _fake_img2img_pipeline(_rgb_image(96, 96, color=(90, 160, 210)))
+    out = tmp_path / "sprite_frame2.png"
+    generate_frame2("fire lizard", [], str(front), str(out), pipeline=pipe)
+    assert Image.open(out).mode == "P"
+
+
+def test_frame2_shares_frame1_palette(tmp_path):
+    """build_frame2 guarantees the frame shares frame 1's exact palette
+    (proves the raw candidate is not double-quantized to a fresh palette)."""
+    front = _frame1_file(tmp_path)
+    pipe = _fake_img2img_pipeline(_rgb_image(96, 96, color=(90, 160, 210)))
+    out = tmp_path / "sprite_frame2.png"
+    generate_frame2("fire lizard", [], str(front), str(out), pipeline=pipe)
+    assert Image.open(out).getpalette() == Image.open(front).getpalette()
+
+
+def test_frame2_pipeline_called_with_low_strength(tmp_path):
+    front = _frame1_file(tmp_path)
+    pipe = _fake_img2img_pipeline(_rgb_image(96, 96, color=(90, 160, 210)))
+    out = tmp_path / "sprite_frame2.png"
+    generate_frame2("fire lizard", [], str(front), str(out), pipeline=pipe)
+    assert pipe.call_args.kwargs["strength"] == 0.35
+
+
+def test_frame2_default_extra_tags_include_open_mouth(tmp_path):
+    front = _frame1_file(tmp_path)
+    pipe = _fake_img2img_pipeline(_rgb_image(96, 96, color=(90, 160, 210)))
+    out = tmp_path / "sprite_frame2.png"
+    with patch("fakemon_forge.sprites._encode_prompt", return_value=MagicMock()) as mock_enc:
+        generate_frame2("fire lizard", [], str(front), str(out), pipeline=pipe)
+    assert "open mouth" in mock_enc.call_args.args[0]
+
+
+def test_frame2_honours_caller_supplied_extra_tags(tmp_path):
+    front = _frame1_file(tmp_path)
+    pipe = _fake_img2img_pipeline(_rgb_image(96, 96, color=(90, 160, 210)))
+    out = tmp_path / "sprite_frame2.png"
+    with patch("fakemon_forge.sprites._encode_prompt", return_value=MagicMock()) as mock_enc:
+        generate_frame2(
+            "fire lizard", [], str(front), str(out), pipeline=pipe,
+            extra_tags=["closed eyes"],
+        )
+    encoded = mock_enc.call_args.args[0]
+    assert "closed eyes" in encoded
+    assert "open mouth" not in encoded
+
+
+def test_frame2_seed_path_exercised(tmp_path):
+    front = _frame1_file(tmp_path)
+    pipe = _fake_img2img_pipeline(_rgb_image(96, 96, color=(90, 160, 210)))
+    out = tmp_path / "sprite_frame2.png"
+    generate_frame2("fire lizard", [], str(front), str(out), pipeline=pipe, seed=1234)
+    assert pipe.call_args.kwargs["generator"] is not None
+
+
+def test_frame2_pipeline_called_once(tmp_path):
+    front = _frame1_file(tmp_path)
+    pipe = _fake_img2img_pipeline(_rgb_image(96, 96, color=(90, 160, 210)))
+    out = tmp_path / "sprite_frame2.png"
+    generate_frame2("fire lizard", [], str(front), str(out), pipeline=pipe)
+    assert pipe.call_count == 1
+
+
+def test_frame2_falls_back_to_squash_on_garbage_candidate(tmp_path):
+    """An off-band candidate -> build_frame2 uses procedural_squash(frame1)."""
+    front = _frame1_file(tmp_path)
+    # A near-identical candidate (same colours as frame 1) is below the band.
+    front_rgb = Image.open(str(front)).convert("RGB")
+    pipe = _fake_img2img_pipeline(front_rgb)
+    out = tmp_path / "sprite_frame2.png"
+    generate_frame2("fire lizard", [], str(front), str(out), pipeline=pipe)
+    frame1 = Image.open(str(front))
+    expected = procedural_squash(frame1)
+    assert list(Image.open(out).get_flattened_data()) == list(expected.get_flattened_data())
