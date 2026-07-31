@@ -447,6 +447,26 @@ def test_recenter_all_background_candidate_does_not_crash():
     assert out.getpalette() == frame1.getpalette()
 
 
+def test_recenter_rejects_non_palette_frame1():
+    frame1 = postprocess(_sprite_rgb())
+    with pytest.raises(ValueError, match="palette-mode"):
+        recenter_to_anchor(frame1, _rgb_image(96, 96))
+
+
+def test_recenter_does_not_mutate_inputs():
+    frame1 = postprocess(_sprite_rgb())
+    bg = _background_index(frame1)
+    shifted = Image.new("P", (96, 96), bg)
+    shifted.putpalette(frame1.getpalette())
+    shifted.paste(frame1, (12, -9))
+
+    frame1_data = list(frame1.get_flattened_data())
+    cand_data = list(shifted.get_flattened_data())
+    recenter_to_anchor(shifted, frame1)
+    assert list(frame1.get_flattened_data()) == frame1_data
+    assert list(shifted.get_flattened_data()) == cand_data
+
+
 # ---------------------------------------------------------------------------
 # build_frame2()
 # ---------------------------------------------------------------------------
