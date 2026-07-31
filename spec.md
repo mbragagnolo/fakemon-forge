@@ -1,279 +1,320 @@
-# Spec: Pin key/white/black in shiny + align reference-lock background to index 0
+# Spec: Lock the back sprite to the shared front-frame palette + cross-view shiny consistency
 
 ## Summary
 
-`fakemon-forge` renders each stage as **six views**: front frame 1, front
-frame 2, back, and a shiny of each. Prior slices gave the front sprite an
-authentic Gen-3 palette contract, produced by `_quantize_gen3` /
-`postprocess` in `fakemon_forge/sprites.py`:
+`fakemon-forge` already produces, per stage, a front sprite `sprite.png` and a
+second front-animation frame `sprite_frame2.png` that **share one exact
+16-colour palette** (frame 2 is palette-locked to frame 1 via
+`quantize_to_reference` / `build_frame2` in `fakemon_forge/sprites.py`), plus
+shiny variants. The **back sprite** (`sprite_back.png`) is the last view still
+carrying its **own adaptive palette**: it is produced by
+`generate_sprite_img2img`, whose final step is `postprocess(candidate)` — an
+*adaptive* 16-colour `quantize` that builds a fresh palette every call.
 
-```
-index 0 : transparency key (200, 200, 168)   ← _KEY_COLOR
-index 1 : black (0, 0, 0)                     ← always reserved
-index 2 : white (255, 255, 255)               ← always reserved
-indices 3.. : <= 13 creature colours          ← _MAX_CREATURE_COLORS
-```
+This slice (4/4 of #1) brings the back sprite into the **same shared palette**
+as the two front frames, completing the authentic Gen-3 model of *one palette
+for the whole sprite set, one rotated palette for the whole shiny set*. It has
+two parts:
 
-Two functions still violate that contract, so the non-front views drift off it:
+1. **`sprites.py`** — give the back-sprite generation path a way to re-quantize
+   its img2img result against a reference `P`-mode image's exact palette
+   (frame 1) instead of an adaptive palette, by adding an optional
+   `reference_path` parameter to `generate_sprite_img2img`. When
+   `reference_path` is given, the raw img2img candidate is locked with the
+   existing `quantize_to_reference(candidate, reference)` rather than
+   `postprocess`. When it is omitted, behaviour is byte-for-byte unchanged
+   (adaptive `postprocess`), so the front-sprite img2img path and all existing
+   tests are untouched.
+2. **`main.py`** — pass `sprite.png` (frame 1, the just-written front sprite) as
+   the back sprite's `reference_path`, so the back sprite locks to frame 1's
+   palette regardless of which image seeded the img2img (the user's drawing in
+   the img2img path, `sprite.png` in the txt2img path).
 
-1. **`quantize_to_reference(image, reference)`** locks frame 2 and the back
-   sprite to frame 1's palette by nearest-colour mapping (`quantize(palette=
-   reference)`). But frame 2 / back come off SD with **noisy near-white
-   backgrounds**; nearest-colour maps those near-white pixels to the reserved
-   **white** slot `(255,255,255)` instead of the **key at index 0**. That
-   punches the background into a creature-white slot and breaks transparency
-   keying, because keying is done by palette **index 0**, not by colour.
-2. **`generate_shiny(sprite_path, name, output_path)`** builds a shiny palette
-   by hue-rotating **chromatic** entries and preserving **achromatic** ones
-   (`_is_achromatic`: luminance `< 40` or `> 215`). The key `(200,200,168)` has
-   luminance ≈ 196.4 → **chromatic** (a desaturated green), so it is currently
-   hue-rotated — changing the transparency key on shinies. White is achromatic
-   (preserved today) and black is achromatic too, but per the contract the key,
-   white, and black must be pinned **explicitly**, never left to a luminance
-   threshold that could reclassify them.
-
-This slice makes all six views honour the contract, with no change required
-outside `sprites.py` (and its torch-free tests). `main.py` already threads
-`reference_path=sprite.png` for the back sprite and calls `generate_shiny` per
-view — that wiring is confirmed correct and stays untouched.
+Because the back sprite then shares frame 1's exact palette, and
+`generate_shiny` is name-keyed and **rotates only the palette** (preserving
+achromatic entries), `sprite_back_shiny.png` — already derived via
+`generate_shiny(back_path, …)` — automatically uses the **same rotated palette**
+as `sprite_shiny.png` and `sprite_frame2_shiny.png`. All three views' shinies
+become consistent for free; no shiny-path change is required.
 
 ### Explicitly out of scope
 
-- No change to `postprocess` / `_quantize_gen3` (they already produce the
-  contract correctly) or to any constant (`_KEY_COLOR`, `_MAX_CREATURE_COLORS`,
-  tolerances).
-- No change to `main.py`, `build_frame2`, `procedural_squash`,
-  `recenter_to_anchor`, `generate_sprite_img2img`, or any ML/pipeline code.
-- No new public functions, parameters, or signatures. Both edited functions
-  keep their exact current signatures.
-- Not touching the achromatic hue-rotation heuristic itself for *creature*
-  entries — only ensuring key/white/black are pinned regardless of it.
+- **`.ini` / writer changes** — verified unnecessary (as in the prior slices).
+  `export_ini` emits ROM pointer fields, `writer.py` writes only
+  `stats.json` / `entry.md`; neither references sprite filenames.
+- **The img2img call itself** — the pipeline invocation (`_run_img2img`),
+  `strength=0.65`, and `extra_tags=["backside"]` are unchanged. Only the
+  post-generation quantization step gains a reference-locked branch.
+- **Recentering / animation-band logic** — the back sprite is a *different view*,
+  not an animation frame of the front, so `build_frame2` /
+  `recenter_to_anchor` / the acceptance band do **not** apply to it. Only the
+  palette is shared; geometry is whatever img2img produced.
+- **Colour-fidelity guarantees** — the back sprite's colours may degrade when
+  they land far from frame 1's 16 colours. Per the issue this is the authentic
+  Gen-3 constraint and is accepted, not mitigated.
 
 ## Inputs
 
-### `quantize_to_reference(image, reference)`
-- `image`: a PIL image (the raw img2img candidate for frame 2 / back). In
-  practice RGB, but any mode PIL can `resize`/enhance/`quantize`; near-white
-  noisy background is the case that matters.
-- `reference`: a PIL **P-mode** image whose palette is the shared Gen-3-contract
-  palette (frame 1's), i.e. `_KEY_COLOR` at index 0, black at index 1, white at
-  index 2, then creature colours.
+### Changed: `generate_sprite_img2img(prompt, types, image_path, output_path, *, pipeline, extra_tags=None, seed=None, strength=0.8, reference_path=None)`
 
-### `generate_shiny(sprite_path, name, output_path)`
-- `sprite_path`: filesystem path to an existing **P-mode** sprite PNG whose
-  palette obeys the contract (index 0 = `_KEY_COLOR`; a `(0,0,0)` and a
-  `(255,255,255)` entry reserved).
-- `name`: the Pokémon name; seeds a deterministic per-name hue shift.
-- `output_path`: filesystem path to write the shiny PNG.
+All existing parameters are unchanged. One new keyword-only parameter is added
+at the end (so existing positional/keyword calls are unaffected):
+
+- `reference_path: str | None = None` (keyword-only) — path to a `P`-mode
+  reference image whose exact 16-colour palette the generated sprite must adopt.
+  When `None` (the default, and every current call except the new back-sprite
+  one), the sprite is quantized adaptively via `postprocess` exactly as today.
+  When set, the raw img2img candidate is locked to that palette via
+  `quantize_to_reference`. **[picked]** name/shape — see Assumptions.
+
+### `main.py` per-stage back-sprite call
+
+No new CLI arguments. Inside the existing
+`for stage, stage_dir in zip(stages, stage_dirs)` loop, the existing back-sprite
+block gains one keyword argument:
+
+- `reference_path = sprite_path` — i.e. `str(stage_dir / "sprite.png")`, the
+  front sprite written earlier in the same loop iteration. This is **always**
+  `sprite.png` (frame 1), independent of `init_image` (which is the user's
+  `args.image` in the img2img path, or `sprite_path` in the txt2img path).
 
 ## Outputs
 
-### `quantize_to_reference`
-Returns a **new** P-mode, 96×96 image sharing `reference`'s palette **exactly**
-(`out.getpalette() == reference.getpalette()`). Every background pixel of the
-input resolves to **index 0** (the key), not to the white slot. Reserved
-black/white slots remain in place (they are already in the reference palette and
-nearest-colour mapping keeps them). Neither `image` nor `reference` is mutated.
-
-### `generate_shiny`
-Writes a P-mode shiny PNG to `output_path` whose palette is the input palette
-with **creature** entries hue-rotated by the name-seeded shift and the
-**key (index 0), white `(255,255,255)`, and black `(0,0,0)` entries copied
-through unchanged**. Pixel index data is unchanged (only the palette is
-rewritten), so the shiny is the same shape as the normal. Returns `None`.
+- **`generate_sprite_img2img` with `reference_path` set** → returns `None`; side
+  effect is writing a 96×96 `P`-mode PNG at `output_path` whose palette is
+  byte-for-byte equal to the reference image's palette (guaranteed by
+  `quantize_to_reference`).
+- **`generate_sprite_img2img` with `reference_path=None`** → unchanged: a 96×96
+  `P`-mode PNG with an adaptive ≤16-colour palette (via `postprocess`).
+- **`main`** per stage — the same set of files as today
+  (`sprite.png`, `sprite_frame2.png`, `sprite_frame2_shiny.png`,
+  `sprite_back.png`, `sprite_shiny.png`, `sprite_back_shiny.png`), but now:
+  - `sprite_back.png` shares `sprite.png`'s exact 16-colour palette (was: its
+    own adaptive palette).
+  - `sprite_back_shiny.png` uses the same rotated palette as `sprite_shiny.png`
+    and `sprite_frame2_shiny.png` (automatic consequence; no code change in the
+    shiny blocks).
 
 ## Behavior
 
-### `quantize_to_reference` (background alignment)
-1. Reject a non-P `reference` with the existing `ValueError` (unchanged; see
-   Errors).
-2. Resize `image` to 96×96 with `Image.NEAREST` and apply the same
-   `ImageEnhance.Color(1.1)` then `ImageEnhance.Contrast(1.1)` pre-steps as
-   today, matching `postprocess` / `_quantize_gen3` so either path feeds the
-   same input to quantization. (Enhance runs **before** flattening so it can't
-   shift the key off its byte-exact value — mirroring `_quantize_gen3`.)
-3. **New step:** flatten the (enhanced, RGB) background to the key with the
-   existing `_flatten_background_to_key`, so every background pixel becomes
-   exactly `_KEY_COLOR` `(200,200,168)`. `_flatten_background_to_key` assumes
-   RGB input, so ensure the enhanced image is RGB before the call (it already
-   is on the real img2img path; convert defensively if needed).
-4. `quantize(palette=reference, ...)` against the reference. Now every
-   background pixel is at distance 0 from the reference's index-0 key entry, so
-   it nearest-maps to **index 0**, not white. Creature pixels near pure
-   white/black still snap to the reserved slots as before.
-5. Return the resulting P-mode 96×96 image; do not mutate inputs (operate on
-   copies, as the current code does via `resize` returning a new image).
+### `generate_sprite_img2img(...)` in `sprites.py`
 
-Reuse the front-sprite helper `_flatten_background_to_key` rather than a
-bespoke border-map, so front, frame 2, and back all key the background
-identically (same detection, same tolerance, same gradient-border fallback and
-stderr warning).
+1. Run the img2img pipeline exactly as today via the existing internal helper
+   `_run_img2img(prompt, types, image_path, pipeline=…, extra_tags=…, seed=…,
+   strength=…)`, obtaining the raw RGB candidate (`result.images[0]`). This step
+   is unchanged.
+2. Quantize the candidate:
+   - If `reference_path is None`: `sprite = postprocess(candidate)` (adaptive
+     palette) — unchanged from today.
+   - Else: open the reference as a `P`-mode image
+     (`Image.open(reference_path)` — the saved front sprite is already `P`-mode;
+     do **not** convert) and `sprite = quantize_to_reference(candidate,
+     reference)`. `quantize_to_reference` already performs the same
+     resize-to-96×96 + colour/contrast enhance pre-steps as `postprocess`, then
+     `.quantize(palette=reference)`, so both branches feed identical input to
+     quantization and differ only in adaptive-vs-fixed palette.
+3. `sprite.save(output_path)` (PNG inferred from extension) — unchanged.
 
-### `generate_shiny` (pin key/white/black)
-1. Open `sprite_path`; reject non-P with the existing `ValueError` (unchanged).
-2. Compute the name-seeded `hue_shift` exactly as today
-   (`md5(name) % 300 + 30 → /360`), so cross-view consistency and determinism
-   are preserved.
-3. Walk the palette in `(r,g,b)` triples. For each entry, **pin** it (copy
-   `[r,g,b]` through unchanged) when **any** of:
-   - it is **index 0** (the transparency key `_KEY_COLOR`), OR
-   - `(r,g,b) == (255,255,255)` (white), OR
-   - `(r,g,b) == (0,0,0)` (black).
-   Otherwise, hue-rotate it by `hue_shift` in HSV (as today). This pinning is
-   by explicit match, **independent of `_is_achromatic`**, so the chromatic key
-   is provably never rotated. The `_is_achromatic` check may remain to also
-   preserve other very-bright/very-dark creature entries, or be superseded —
-   either is acceptable as long as key/white/black are provably pinned.
-4. `putpalette` the new palette onto a copy and save to `output_path`.
+The choice is a single branch on `reference_path`; `_run_img2img`,
+`postprocess`, `quantize_to_reference`, and the module constants are reused
+rather than duplicated.
 
-Note the key is pinned by **index 0** specifically (not by colour match against
-`_KEY_COLOR`), matching the contract that index 0 is the key slot; white/black
-are pinned by exact colour match since their reserved indices (1, 2) are also
-their colours.
+### `main.py` wiring
+
+The existing back-sprite block becomes:
+
+```
+back_path = str(stage_dir / "sprite_back.png")
+try:
+    init_image = args.image if args.image else sprite_path
+    generate_sprite_img2img(
+        stage["sprite_prompt"], stage["types"], init_image, back_path,
+        pipeline=img2img_pipeline, extra_tags=["backside"], seed=seed,
+        strength=0.65, reference_path=sprite_path,
+    )
+except Exception as exc:
+    print(
+        f"Warning: back sprite generation failed for {stage['name']}: {exc}",
+        file=sys.stderr,
+    )
+```
+
+Only `reference_path=sprite_path` is added. The block still reaches this code
+only after the front-sprite block succeeded (that block `continue`s on failure),
+so `sprite_path` names an existing `P`-mode `sprite.png`. The back-shiny block
+(`generate_shiny(back_path, stage["name"], back_shiny_path)`) is **unchanged** —
+it now inherits the shared palette automatically.
 
 ## Edge cases
 
-- **Noisy near-white background** (the motivating case): after
-  `_flatten_background_to_key` every background pixel is exactly `_KEY_COLOR`
-  and maps to index 0. This is the behaviour the new test asserts.
-- **Gradient/vignette border in the candidate:** `_flatten_background_to_key`
-  already handles this by keying only the dominant border colour and emitting a
-  stderr warning without raising; `quantize_to_reference` inherits that
-  behaviour for free.
-- **All-background candidate:** flattens fully to the key → every pixel maps to
-  index 0; output palette is still the reference's.
-- **Creature colour legitimately near white/black:** still snaps to the
-  reserved white/black slots via nearest-colour, unchanged.
-- **Shiny where a creature entry happens to equal `_KEY_COLOR` at an index
-  other than 0:** only index 0 is pinned as the key; a creature entry that
-  coincidentally equals the key colour at another index is treated as a
-  creature entry (rotated). Under the contract `_nudge_off_key` keeps creature
-  colours off the key, so this is not expected to arise; the spec pins by
-  index 0 for the key deliberately.
-- **Shiny palette shorter/longer than 256 or with unused tail entries:** iterate
-  over whatever `getpalette()` returns (as today, `[R,G,B]×N`); pinning/rotation
-  applies per triple. Unused entries are harmless.
-- **Cross-view consistency:** three views sharing one contract palette, run
-  through `generate_shiny` with the same `name`, must yield three **identical**
-  rotated palettes whose index 0 / white / black equal the normals'. Preserved
-  because the shift is name-seeded and the pinned slots are identical across
-  views.
+- **Front sprite generation failed** → the front-sprite `except` `continue`s to
+  the next stage; the back-sprite block (and its `reference_path`) never runs
+  for that stage, so there is never a missing/absent reference.
+- **img2img returns colours far from frame 1's palette** →
+  `quantize_to_reference` maps each pixel to the nearest of frame 1's 16 colours;
+  the back sprite may look slightly off-palette / posterized. **Accepted** — this
+  is the authentic Gen-3 shared-palette constraint, not a bug.
+- **Back sprite content differs from the front** (it is a rear view) → only the
+  palette is shared, not geometry; no recentering/animation-band logic is applied
+  (that is `build_frame2`'s job for frame 2, not for the back view).
+- **Cross-view shiny consistency** → `sprite.png`, `sprite_frame2.png`, and
+  `sprite_back.png` now share one palette; `generate_shiny` rotates only the
+  palette keyed on `name`, so `sprite_shiny.png`, `sprite_frame2_shiny.png`, and
+  `sprite_back_shiny.png` share one rotated palette automatically.
+- **Line mode (3 stages)** → the back-sprite block is inside the per-stage loop;
+  each stage locks its own back sprite to its own `sprite.png`, and each stage's
+  three shinies stay mutually consistent within that stage.
+- **`reference_path=None` callers** (the front-sprite img2img call, and any other
+  existing caller) → behaviour is identical to today (adaptive `postprocess`).
 
 ## Errors
 
-- `quantize_to_reference`: `ValueError(f"Expected palette-mode reference image,
-  got {reference.mode}")` when `reference.mode != "P"` — unchanged, still
-  matches `"palette-mode"`.
-- `generate_shiny`: `ValueError(f"Expected palette-mode image, got {img.mode}")`
-  when the opened image is not P — unchanged.
-- No new error conditions introduced. `_flatten_background_to_key` never raises
-  (it warns and returns best-effort on non-uniform borders).
+- `generate_sprite_img2img` surfaces exceptions to its caller (it does not
+  swallow them); `main` wraps the back-sprite call in the existing try/except and
+  warns `Warning: back sprite generation failed for {name}: {exc}` — unchanged
+  wording and structure.
+- `quantize_to_reference` raises `ValueError` ("palette-mode reference image") if
+  the reference is not `P`-mode. Because `main` always passes the already-saved
+  `P`-mode `sprite.png`, this only fires on misuse and would be caught by the
+  back-sprite `except`.
+- A missing `reference_path` file (e.g. `sprite.png` never written) would raise
+  in `Image.open`; this cannot happen after a successful front-sprite block, and
+  if it somehow did it is caught by the back-sprite `except` (warn-and-continue).
+- No new `sys.exit` paths; pipeline-load failure paths are unchanged.
 
 ## Constraints & dependencies
 
-- Pure **PIL** (`Image`, `ImageEnhance`, `ImageDraw` via the helper) and
-  stdlib (`colorsys`, `hashlib`). No torch/diffusers touched, so tests live in
-  `tests/test_sprites.py` and run in the keep sandbox (pytest + Pillow, no
-  torch). Per `CLAUDE.md`, only real-`import torch` code goes in
-  `test_sprites_ml.py`; these functions qualify for the torch-free file.
-- Keep the existing invariants both functions already carry: P-mode 96×96
-  output sharing the reference palette exactly (`quantize_to_reference`);
-  P-mode requirement and no-mutation for both; deterministic name-seeded shift
-  (`generate_shiny`).
-- Output must remain deterministic (median-cut/nearest arithmetic; no RNG).
-- Existing passing tests must stay green, notably:
-  `test_quantize_to_reference_*` (palette reuse, 96×96, ≤16 colours, no
-  mutation, non-P rejection), the `build_frame2` acceptance-band tests (which
-  depend on `quantize_to_reference` behaviour — see risk note), and
-  `test_cross_view_shinies_share_one_rotated_palette`.
+- The change lives in `fakemon_forge/sprites.py` (`generate_sprite_img2img`) and
+  `fakemon_forge/main.py` (one added kwarg). It reuses the existing
+  `quantize_to_reference`, `_run_img2img`, `postprocess`, and module constants;
+  nothing is hard-coded or duplicated.
+- `generate_sprite_img2img` performs a function-local `import torch` (via
+  `_run_img2img` → `_make_generator`), so **any test that calls it is an `ml`
+  test** and belongs in `tests/test_sprites_ml.py` (or carries
+  `@pytest.mark.ml`), per `CLAUDE.md`'s test-slicing rule. The pure
+  palette-lock/shiny assertions that go in `tests/test_sprites.py` must therefore
+  exercise `quantize_to_reference` / `generate_shiny` **directly**, not through
+  `generate_sprite_img2img`.
+- `main.py` changes touch only the back-sprite call (one kwarg); no import
+  changes, no new CLI args, no signature change to `main`. Because
+  `test_main.py` mocks the sprite functions, the `main` wiring is testable
+  without torch.
+- **Backward compatibility:** the new parameter defaults to `None`, so all
+  current `generate_sprite_img2img` calls and their `ml` tests (96×96, `P`-mode,
+  PNG, single pipeline call, `strength`/`image`/`prompt_embeds` passthrough)
+  must continue to pass unchanged. Only the new back-sprite call passes
+  `reference_path`.
+- Frame 1 (`sprite.png`) is the canonical palette source for the whole set
+  (front frame 1, front frame 2, and back all lock to it). The front sprite
+  itself is never reference-locked (it *defines* the palette).
 
-### Risk note — `build_frame2` acceptance-band tests
+## Tests
 
-`build_frame2` calls `quantize_to_reference(candidate, frame1)` and accepts the
-candidate only when its diff from frame 1 is in `[0.02, 0.30]`. Several existing
-tests craft candidates around the *old* behaviour (background **not** flattened,
-so a dark backdrop maps to reserved black and a key backdrop maps to index 0):
+### light (`tests/test_sprites.py`, torch-free)
 
-- `test_build_frame2_near_identical_candidate_falls_back` — relies on
-  `_sprite_rgb`'s dark `(40,40,60)` backdrop mapping to reserved black so the
-  whole backdrop differs from frame 1's key background → ratio above `high` →
-  squash fallback. After this change the background is flattened to the key
-  first; the dark backdrop is the **border** and will be detected/keyed by
-  `_flatten_background_to_key`, mapping it to index 0 like frame 1 — the
-  backdrop would then **match** frame 1, lowering the ratio.
-- `test_build_frame2_in_band_candidate_is_accepted` and the
-  `_key_background_sprite` helper deliberately swap the dark backdrop for the
-  key precisely because "`quantize_to_reference` does not flatten a candidate's
-  background to the key" — an assumption this slice **inverts**.
+These exercise the shared-palette lock and shiny consistency **without** calling
+`generate_sprite_img2img` (which would trigger `import torch`). Follow the
+existing `postprocess` / `quantize_to_reference` / helper patterns.
 
-The implementation must re-verify these `build_frame2` tests after the change
-and, if the flatten step shifts their diff ratios out of the expected band,
-update those tests (and/or the `_key_background_sprite` helper docstring) to
-reflect the new, correct behaviour — flattening the candidate background to the
-key is the intended outcome. Adjusting these tests is in scope for this slice;
-changing `build_frame2`'s logic or thresholds is **not**. This is called out so
-the implementer treats a red `build_frame2` test as an expected consequence to
-reconcile, not a regression to avoid.
+- **Back-sprite palette lock**: given a back RGB image and a `P`-mode reference
+  frame (build via `postprocess(_rgb_image())` / `postprocess(_noisy_image())`),
+  `quantize_to_reference(back_rgb, reference)` yields a `P`-mode 96×96 image
+  whose `getpalette()` equals the reference's exactly. (This is the pure core of
+  the back-sprite lock; `quantize_to_reference` is already well-covered, so this
+  test frames it as the back-sprite scenario and asserts palette equality.)
+- **Cross-view shiny consistency**: build three `P`-mode images that share one
+  palette (stand-ins for frame 1 / frame 2 / back — e.g. quantize three
+  different RGB inputs against one reference so all three share its palette),
+  save each, run `generate_shiny(path, name, out_path)` on each with the **same
+  `name`**, reload the three outputs, and assert their three `getpalette()`
+  results are **identical** to one another. (Optionally also assert each shiny
+  palette differs from the shared original, i.e. rotation happened.)
 
-## Tests (torch-free, `tests/test_sprites.py`)
+### ml (`tests/test_sprites_ml.py`, auto-skipped without torch)
 
-Add:
-1. **Reference-lock background→index 0.** Build a reference via
-   `postprocess(...)` (key at index 0). Feed `quantize_to_reference` an RGB
-   candidate with a **noisy near-white background** and a distinct creature
-   (e.g. `_noisy_border_sprite()` upscaled, or a new helper). Assert every
-   background/border pixel of the output is index **0** (not the white slot's
-   index), and `out.getpalette() == reference.getpalette()`.
-2. **Reserved slots preserved through the lock.** The locked output's palette
-   still has `_KEY_COLOR` at index 0, `(0,0,0)` and `(255,255,255)` at their
-   reserved positions.
-3. **Shiny pins the key.** Take a P-mode sprite whose index 0 is `_KEY_COLOR`,
-   run `generate_shiny`; assert the output palette's index 0 is still exactly
-   `[200,200,168]` (the chromatic key is NOT rotated).
-4. **Shiny pins white and black.** Assert `(255,255,255)` and `(0,0,0)` entries
-   are unchanged in the shiny palette, while at least one creature (mid-tone)
-   entry **did** change (rotation still happens).
-5. Keep `test_cross_view_shinies_share_one_rotated_palette` passing (three views
-   → three identical rotated shiny palettes; index 0 / white / black equal the
-   normals').
+Follow the existing `_fake_img2img_pipeline` / `_stub_encode_prompt` patterns;
+build the reference as a real `P`-mode 96×96 file (e.g. via `_frame1_file` /
+`postprocess(_rgb_image())`, as sprites are saved).
 
-Run `pytest` from the repo root (flat package). ~21 `ml` tests skip in the
-sandbox without torch — expected and correct; do **not** install torch.
+- `generate_sprite_img2img(..., reference_path=<P-mode frame path>)` with a mock
+  img2img pipeline writes an output file that is **`P`-mode** and whose
+  `getpalette()` **equals the reference's** (proves the back sprite adopts the
+  shared palette rather than an adaptive one).
+- The saved reference-locked sprite is still 96×96 and PNG.
+- **Regression**: `generate_sprite_img2img` **without** `reference_path`
+  continues to produce a `P`-mode 96×96 PNG via adaptive `postprocess` (existing
+  tests suffice; add one asserting the two branches diverge only in palette if
+  desired — e.g. locked output's palette equals the reference while the
+  unlocked output's need not).
+- The pipeline is still invoked **exactly once** and with the unchanged
+  `strength` / `image` / `prompt_embeds` / `extra_tags` passthrough when
+  `reference_path` is supplied (the reference only affects post-quantization).
 
-## Done looks like
+### light (`tests/test_main.py`, no torch — sprite fns mocked)
 
-Across all six views of a stage: the background is uniformly `(200,200,168)` at
-palette index 0; frame 2 / back lock to frame 1's palette with their backgrounds
-mapped to index 0 (not white); and shiny hue rotation never alters the key,
-white, or black. Full `pytest` green (with the usual sandbox `ml` skips).
-`main.py` is confirmed already correct (`reference_path=sprite.png` for the back
-sprite, `generate_shiny` per view) and left untouched.
+- The back-sprite `generate_sprite_img2img` call receives
+  `reference_path == str(stage_dir / "sprite.png")` (frame 1), in **both** the
+  txt2img path and the img2img path. In the img2img path, assert the back call's
+  positional `image_path` (init) is `args.image` while its `reference_path` is
+  `sprite.png` — i.e. the reference is frame 1 even though the init image is the
+  user's drawing.
+- The existing back-sprite assertions still hold:
+  `extra_tags == ["backside"]`, `strength == 0.65`, and the img2img-path call
+  count (front + back). Distinguish the front call (`reference_path` absent/`None`)
+  from the back call (`reference_path == sprite.png`).
+- The back-shiny wiring is unchanged (`generate_shiny(back_path, name,
+  back_shiny_path)`); the existing shiny-count assertions
+  (`test_generate_shiny_called_three_times_per_stage`,
+  `test_line_mode_frame2_called_three_times`) remain valid, since no shiny call
+  was added or removed — only the back sprite's palette changed.
 
 ## Assumptions
 
-- **[picked]** `quantize_to_reference` gains the `_flatten_background_to_key`
-  pre-step (reusing the front-sprite helper) rather than a bespoke border-map,
-  so front, frame 2, and back all key the background identically.
-- **[picked]** The flatten step runs **after** resize+enhance and **before**
-  `quantize`, mirroring `_quantize_gen3`'s ordering (enhance before flatten so
-  the key stays byte-exact).
-- **[picked]** `generate_shiny` pins **index 0** plus any `(255,255,255)` /
-  `(0,0,0)` entry by exact match, independent of `_is_achromatic`. The key is
-  pinned by index (0), white/black by colour. The `_is_achromatic` check may
-  remain for other bright/dark creature entries or be superseded — either is
-  acceptable as long as key/white/black are provably never rotated.
-- **[picked]** `_flatten_background_to_key` requires RGB; the spec assumes the
-  enhanced image is RGB on the real path and that a defensive `convert("RGB")`
-  (only if not already RGB) is acceptable to satisfy that precondition without
-  changing behaviour on RGB inputs.
-- **[picked]** The pre-existing `build_frame2` tests that encode the *old*
-  no-flatten assumption (`test_build_frame2_near_identical_candidate_falls_back`,
-  `test_build_frame2_in_band_candidate_is_accepted`, and the
-  `_key_background_sprite` helper) may need updating to the new flattened
-  behaviour; that is in scope, while `build_frame2`'s own logic/thresholds stay
-  unchanged.
-- **[confirmed by code]** `main.py` already threads `reference_path=sprite_path`
-  into the back sprite's `generate_sprite_img2img` and calls `generate_shiny`
-  for front, frame 2, and back — no `main.py` change needed.
-- **[confirmed by code/CLAUDE.md]** Both functions are pure PIL, so their tests
-  belong in `tests/test_sprites.py` and run under the torch-free sandbox.
+Items marked **[picked]** are defaults chosen here (not confirmed by existing
+code/tests/docs); **[confirmed]** items are grounded in the codebase.
+
+- **[picked]** The lock is added as an optional `reference_path: str = None`
+  keyword parameter on the **existing** `generate_sprite_img2img`, rather than a
+  new dedicated `generate_back_sprite` function. Rationale: it is the minimal,
+  lowest-risk change (existing `reference_path=None` callers and their tests are
+  untouched), keeps the img2img call in one place, and matches how the front
+  frames were locked (via `quantize_to_reference`). The issue explicitly permits
+  either approach. Note: an unused `generate_back_sprite` (txt2img-based) already
+  exists in `sprites.py` but is **not** the back-sprite path `main` uses (`main`
+  calls `generate_sprite_img2img` for the back sprite); it is left untouched to
+  avoid scope creep. **[confirmed]** that `generate_back_sprite` is currently
+  unused by `main.py`.
+- **[picked]** The parameter is a **path** (`reference_path`) rather than a
+  pre-loaded `Image`, matching how `main` already threads file paths
+  (`front_sprite_path`, `image_path`) and letting the function own the
+  `Image.open`. The issue allowed `reference_path`/`reference`; path chosen for
+  consistency.
+- **[picked]** The parameter is placed **last** in the keyword-only signature and
+  defaults to `None`, preserving every existing call site and test.
+- **[picked]** When `reference_path` is set, the reference is opened without a
+  mode conversion (the saved front sprite is already `P`-mode); a non-`P`-mode
+  reference is left to raise via `quantize_to_reference` (caught by `main`'s
+  back-sprite `except`).
+- **[confirmed]** Frame 1 (`sprite.png`) is the canonical palette source: it is
+  generated first in the loop and is saved `P`-mode by `postprocess`'s
+  `.quantize`; front frame 2 already locks to it, and this slice locks the back
+  to it too.
+- **[confirmed]** The reference is always `sprite_path` (frame 1), independent of
+  the img2img init image — in the img2img path the init is the user's drawing
+  (`args.image`) while the palette reference must still be frame 1.
+- **[confirmed]** `quantize_to_reference` already mirrors `postprocess`'s
+  resize + colour/contrast pre-steps, so switching only the palette (adaptive →
+  fixed reference) is the sole behavioural difference between the branches; it
+  does not mutate its inputs.
+- **[confirmed]** `generate_shiny` rotates only the palette keyed on `name` and
+  preserves achromatic entries, so three views sharing one palette yield three
+  identical rotated shiny palettes — `sprite_back_shiny.png` is consistent with
+  `sprite_shiny.png` / `sprite_frame2_shiny.png` with **no** change to the shiny
+  blocks (the back shiny is already `generate_shiny(back_path, …)`).
+- **[confirmed]** `export_ini` / `writer.py` need no changes — they reference no
+  sprite files (ROM pointer fields / `stats.json` + `entry.md`).
+- **[confirmed]** Anything calling `generate_sprite_img2img` triggers a real
+  `import torch` (via `_run_img2img` → `_make_generator`) and is therefore an
+  `ml` test; the pure palette/shiny assertions in `test_sprites.py` must call
+  `quantize_to_reference` / `generate_shiny` directly, and the `main`-level
+  wiring is torch-free because `test_main.py` mocks the sprite functions.
