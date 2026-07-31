@@ -333,6 +333,18 @@ def test_sprite_failure_warning_includes_name(ctx, capsys):
     assert "Flamburr" in capsys.readouterr().err
 
 
+def test_front_sprite_failure_skips_chibi_and_icon(ctx):
+    """When the front sprite fails the stage continues past the icon block, so
+    neither the chibi render nor the icon runs against a missing sprite.png."""
+    ctx["sprite"].side_effect = RuntimeError("pipeline crash")
+    main(["--description", "fire lizard"])
+    # No chibi img2img render is attempted for the failed stage.
+    chibi = [c for c in ctx["sprite_i2i"].call_args_list
+             if c.kwargs.get("extra_tags") == _CHIBI_TAGS]
+    assert chibi == []
+    ctx["icon"].assert_not_called()
+
+
 # ---------------------------------------------------------------------------
 # Output path
 # ---------------------------------------------------------------------------
@@ -447,6 +459,8 @@ def test_icon_not_added_to_spritesheet_layout():
     names = {name for name, *_ in _SHEET_LAYOUT}
     assert len(_SHEET_LAYOUT) == 6
     assert "sprite_small.png" not in names
+    # The intermediate chibi render is likewise never stitched into the sheet.
+    assert "sprite_chibi.png" not in names
 
 
 # ---------------------------------------------------------------------------
