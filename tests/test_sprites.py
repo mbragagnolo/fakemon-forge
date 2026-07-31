@@ -22,6 +22,8 @@ from fakemon_forge.sprites import (
     difference_ratio,
     build_frame2,
     _background_index,
+    _flatten_background_to_key,
+    _KEY_COLOR,
     load_txt2img_pipeline,
     load_img2img_pipeline,
     _BASE_MODEL_ID,
@@ -212,6 +214,91 @@ def test_cross_view_shinies_share_one_rotated_palette(tmp_path):
     assert shiny_palettes[0] == shiny_palettes[1] == shiny_palettes[2]
     # Rotation actually happened (mid-tone entries changed).
     assert shiny_palettes[0] != reference.getpalette()
+
+
+# ---------------------------------------------------------------------------
+# _flatten_background_to_key()
+# ---------------------------------------------------------------------------
+
+def _noisy_border_sprite():
+    """96x96 RGB: noisy near-white background with a solid creature blob."""
+    img = Image.new("RGB", (96, 96), (255, 255, 253))
+    rng = random.Random(7)
+    px = img.load()
+    for y in range(96):
+        for x in range(96):
+            px[x, y] = (255 - rng.randint(0, 6), 255 - rng.randint(0, 6), 253 - rng.randint(0, 6))
+    ImageDraw.Draw(img).ellipse((30, 30, 66, 66), fill=(200, 80, 60))
+    return img
+
+
+def _ring_sprite():
+    """96x96 RGB: a creature disc with a background-coloured hole punched in it."""
+    img = Image.new("RGB", (96, 96), (250, 250, 250))
+    d = ImageDraw.Draw(img)
+    d.ellipse((20, 20, 76, 76), fill=(60, 120, 200))
+    d.ellipse((40, 40, 56, 56), fill=(250, 250, 250))  # enclosed background pocket
+    return img
+
+
+def _gradient_border_sprite():
+    """96x96 RGB whose border is a wide gradient (not near-uniform)."""
+    img = Image.new("RGB", (96, 96))
+    px = img.load()
+    for y in range(96):
+        for x in range(96):
+            px[x, y] = (min(x * 2, 255), min(y * 2, 255), 100)
+    return img
+
+
+def test_flatten_keys_every_border_pixel_and_leaves_creature():
+    img = _noisy_border_sprite()
+    out = _flatten_background_to_key(img)
+    assert out.mode == "RGB"
+    assert out.size == img.size
+
+    px = out.load()
+    w, h = out.size
+    for x in range(w):
+        assert px[x, 0] == _KEY_COLOR
+        assert px[x, h - 1] == _KEY_COLOR
+    for y in range(h):
+        assert px[0, y] == _KEY_COLOR
+        assert px[w - 1, y] == _KEY_COLOR
+
+    # Creature-blob pixels are untouched (well inside the ellipse).
+    for point in ((48, 48), (45, 50), (50, 45)):
+        assert px[point] == (200, 80, 60)
+
+
+def test_flatten_keys_enclosed_pocket_via_global_sweep():
+    img = _ring_sprite()
+    out = _flatten_background_to_key(img)
+    px = out.load()
+    # The enclosed hole the outer flood cannot reach is keyed by the sweep.
+    for point in ((48, 48), (46, 48), (48, 46)):
+        assert px[point] == _KEY_COLOR
+    # The creature ring itself is unchanged.
+    assert px[28, 48] == (60, 120, 200)
+
+
+def test_flatten_does_not_mutate_input():
+    img = _noisy_border_sprite()
+    original_data = list(img.get_flattened_data())
+    original_size = img.size
+    _flatten_background_to_key(img)
+    assert img.size == original_size
+    assert list(img.get_flattened_data()) == original_data
+
+
+def test_flatten_gradient_border_warns_without_raising(capsys):
+    img = _gradient_border_sprite()
+    out = _flatten_background_to_key(img)  # must not raise
+    assert out.mode == "RGB"
+    assert out.size == img.size
+    err = capsys.readouterr().err
+    assert err  # a warning was emitted
+    assert "border" in err.lower()
 
 
 # ---------------------------------------------------------------------------
