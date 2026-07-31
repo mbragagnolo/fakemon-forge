@@ -1,323 +1,320 @@
-# Spec: img2img frame-2 candidate + CLI wiring (sprite_frame2.png / sprite_frame2_shiny.png)
+# Spec: Lock the back sprite to the shared front-frame palette + cross-view shiny consistency
 
 ## Summary
 
-`fakemon-forge` is adding an Emerald-style **two-frame front animation**: every
-front sprite becomes two frames. Two prior slices already landed the groundwork
-in `fakemon_forge/sprites.py`:
+`fakemon-forge` already produces, per stage, a front sprite `sprite.png` and a
+second front-animation frame `sprite_frame2.png` that **share one exact
+16-colour palette** (frame 2 is palette-locked to frame 1 via
+`quantize_to_reference` / `build_frame2` in `fakemon_forge/sprites.py`), plus
+shiny variants. The **back sprite** (`sprite_back.png`) is the last view still
+carrying its **own adaptive palette**: it is produced by
+`generate_sprite_img2img`, whose final step is `postprocess(candidate)` — an
+*adaptive* 16-colour `quantize` that builds a fresh palette every call.
 
-- `quantize_to_reference(image, reference)` — quantize an image against a
-  reference `P`-mode image's exact 16-colour palette.
-- The pure-PIL frame-2 decision core: `build_frame2(frame1, candidate=None,
-  low=0.02, high=0.30)` plus `procedural_squash`, `recenter_to_anchor`,
-  `difference_ratio`. Given frame 1 (the finished 96×96 `P`-mode front sprite)
-  and an optional candidate, it palette-locks + recenters the candidate, checks
-  its pixel-difference against an acceptance band, and otherwise returns a
-  bottom-anchored vertical squash of frame 1. It **always** returns a valid
-  96×96 `P`-mode frame sharing frame 1's exact palette.
+This slice (4/4 of #1) brings the back sprite into the **same shared palette**
+as the two front frames, completing the authentic Gen-3 model of *one palette
+for the whole sprite set, one rotated palette for the whole shiny set*. It has
+two parts:
 
-This slice (3/4 of #1) supplies the missing img2img **candidate** and wires the
-whole thing into the CLI so every generated stage ships a `sprite_frame2.png`
-(plus its shiny). It has two parts:
+1. **`sprites.py`** — give the back-sprite generation path a way to re-quantize
+   its img2img result against a reference `P`-mode image's exact palette
+   (frame 1) instead of an adaptive palette, by adding an optional
+   `reference_path` parameter to `generate_sprite_img2img`. When
+   `reference_path` is given, the raw img2img candidate is locked with the
+   existing `quantize_to_reference(candidate, reference)` rather than
+   `postprocess`. When it is omitted, behaviour is byte-for-byte unchanged
+   (adaptive `postprocess`), so the front-sprite img2img path and all existing
+   tests are untouched.
+2. **`main.py`** — pass `sprite.png` (frame 1, the just-written front sprite) as
+   the back sprite's `reference_path`, so the back sprite locks to frame 1's
+   palette regardless of which image seeded the img2img (the user's drawing in
+   the img2img path, `sprite.png` in the txt2img path).
 
-1. **`sprites.py`** — a new frame-2 generator `generate_frame2(...)` that runs
-   the img2img pipeline from the finished front sprite at low strength with an
-   animation tag, hands the **raw pre-quantization RGB** candidate to
-   `build_frame2`, and saves the returned `P`-mode frame.
-2. **`main.py`** — inside the per-stage loop, after the front sprite exists, a
-   try/except block that calls `generate_frame2(...)` to write
-   `sprite_frame2.png`, then `generate_shiny(...)` to write
-   `sprite_frame2_shiny.png` — each wrapped in its own warn-and-continue block
-   matching the existing back/shiny sibling blocks.
-
-Because frame 2 shares frame 1's exact palette and `generate_shiny` is
-name-keyed and rotates only the palette, `sprite_frame2_shiny.png` is
-automatically consistent with `sprite_shiny.png` for free.
+Because the back sprite then shares frame 1's exact palette, and
+`generate_shiny` is name-keyed and **rotates only the palette** (preserving
+achromatic entries), `sprite_back_shiny.png` — already derived via
+`generate_shiny(back_path, …)` — automatically uses the **same rotated palette**
+as `sprite_shiny.png` and `sprite_frame2_shiny.png`. All three views' shinies
+become consistent for free; no shiny-path change is required.
 
 ### Explicitly out of scope
 
-- **Stitching** the two frames into a stacked double-height sprite sheet for ROM
-  tooling — a separate future issue. This slice ships the standalone
-  `sprite_frame2.png` / `sprite_frame2_shiny.png` only.
-- **`.ini` / writer changes** — verified unnecessary. `export_ini` emits ROM
-  pointer fields (`FrontAnimationTable=0`, `BackAnimTable=0`,
-  `AnimDelayTable=0`), not sprite filenames; `writer.py` writes only
-  `stats.json` / `entry.md`. Neither references the new files.
-- **Tuning** the acceptance band / strength / animation tag — the prior slice's
-  procedural fallback guarantees a valid frame regardless, so the defaults ship
-  as-is and are tuned later by eye.
+- **`.ini` / writer changes** — verified unnecessary (as in the prior slices).
+  `export_ini` emits ROM pointer fields, `writer.py` writes only
+  `stats.json` / `entry.md`; neither references sprite filenames.
+- **The img2img call itself** — the pipeline invocation (`_run_img2img`),
+  `strength=0.65`, and `extra_tags=["backside"]` are unchanged. Only the
+  post-generation quantization step gains a reference-locked branch.
+- **Recentering / animation-band logic** — the back sprite is a *different view*,
+  not an animation frame of the front, so `build_frame2` /
+  `recenter_to_anchor` / the acceptance band do **not** apply to it. Only the
+  palette is shared; geometry is whatever img2img produced.
+- **Colour-fidelity guarantees** — the back sprite's colours may degrade when
+  they land far from frame 1's 16 colours. Per the issue this is the authentic
+  Gen-3 constraint and is accepted, not mitigated.
 
 ## Inputs
 
-### New: `generate_frame2(prompt, types, front_sprite_path, output_path, *, pipeline, seed=None, strength=0.35, extra_tags=None)`
+### Changed: `generate_sprite_img2img(prompt, types, image_path, output_path, *, pipeline, extra_tags=None, seed=None, strength=0.8, reference_path=None)`
 
-- `prompt: str` — the sprite prompt (same value passed to `generate_sprite` /
-  `generate_sprite_img2img` for this stage; in `main` this is
-  `stage["sprite_prompt"]`).
-- `types: list[str]` — the stage's types, for type-tag prompting via
-  `build_prompt` (same as the sibling generators).
-- `front_sprite_path: str` — path to the finished front sprite (`sprite.png`),
-  used **both** as the img2img init image **and** loaded as frame 1 (`P`-mode)
-  for `build_frame2`.
-- `output_path: str` — where to save the resulting `sprite_frame2.png`.
-- `pipeline` (keyword-only) — an img2img pipeline (the same object `main`
-  passes to the back-sprite `generate_sprite_img2img` call).
-- `seed: int | None = None` (keyword-only) — RNG seed; `main` passes the stage
-  seed so frame 2 reuses **frame 1's seed** for consistency.
-- `strength: float = 0.35` (keyword-only) — low img2img strength; small
-  deviation from the front sprite. **[picked]** default.
-- `extra_tags: list[str] | None = None` (keyword-only) — animation tags;
-  defaults to `["open mouth"]` when `None`. **[picked]** default.
+All existing parameters are unchanged. One new keyword-only parameter is added
+at the end (so existing positional/keyword calls are unaffected):
 
-### `main.py` per-stage additions
+- `reference_path: str | None = None` (keyword-only) — path to a `P`-mode
+  reference image whose exact 16-colour palette the generated sprite must adopt.
+  When `None` (the default, and every current call except the new back-sprite
+  one), the sprite is quantized adaptively via `postprocess` exactly as today.
+  When set, the raw img2img candidate is locked to that palette via
+  `quantize_to_reference`. **[picked]** name/shape — see Assumptions.
 
-No new CLI arguments. The new block runs inside the existing
-`for stage, stage_dir in zip(stages, stage_dirs)` loop, using values already in
-scope:
+### `main.py` per-stage back-sprite call
 
-- `stage["sprite_prompt"]`, `stage["types"]`, `stage["name"]`.
-- `sprite_path` (the just-written `str(stage_dir / "sprite.png")`).
-- `seed` (the stage's `random.randint(0, 2**32 - 1)`).
-- `img2img_pipeline` — the same pipeline used for the back sprite (in the
-  txt2img path this is `make_img2img_pipeline(pipeline)`; in the img2img path
-  it is the loaded img2img pipeline itself).
+No new CLI arguments. Inside the existing
+`for stage, stage_dir in zip(stages, stage_dirs)` loop, the existing back-sprite
+block gains one keyword argument:
+
+- `reference_path = sprite_path` — i.e. `str(stage_dir / "sprite.png")`, the
+  front sprite written earlier in the same loop iteration. This is **always**
+  `sprite.png` (frame 1), independent of `init_image` (which is the user's
+  `args.image` in the img2img path, or `sprite_path` in the txt2img path).
 
 ## Outputs
 
-- **`generate_frame2`** → returns `None`; side effect is writing a 96×96
-  `P`-mode PNG at `output_path` whose palette is byte-for-byte equal to frame
-  1's (guaranteed by `build_frame2`).
-- **`main`** per stage, in addition to today's files, writes into `stage_dir`:
-  - `sprite_frame2.png` — the frame-2 image (within the acceptance band vs
-    `sprite.png`, sharing its exact 16-colour palette).
-  - `sprite_frame2_shiny.png` — `generate_shiny` applied to `sprite_frame2.png`,
-    keyed on `stage["name"]`; consistent with `sprite_shiny.png` by
-    construction.
+- **`generate_sprite_img2img` with `reference_path` set** → returns `None`; side
+  effect is writing a 96×96 `P`-mode PNG at `output_path` whose palette is
+  byte-for-byte equal to the reference image's palette (guaranteed by
+  `quantize_to_reference`).
+- **`generate_sprite_img2img` with `reference_path=None`** → unchanged: a 96×96
+  `P`-mode PNG with an adaptive ≤16-colour palette (via `postprocess`).
+- **`main`** per stage — the same set of files as today
+  (`sprite.png`, `sprite_frame2.png`, `sprite_frame2_shiny.png`,
+  `sprite_back.png`, `sprite_shiny.png`, `sprite_back_shiny.png`), but now:
+  - `sprite_back.png` shares `sprite.png`'s exact 16-colour palette (was: its
+    own adaptive palette).
+  - `sprite_back_shiny.png` uses the same rotated palette as `sprite_shiny.png`
+    and `sprite_frame2_shiny.png` (automatic consequence; no code change in the
+    shiny blocks).
 
 ## Behavior
 
-### `generate_frame2(...)` in `sprites.py`
+### `generate_sprite_img2img(...)` in `sprites.py`
 
-1. Run the img2img pipeline from the **front sprite** (`front_sprite_path`) as
-   the init image, using `build_prompt(prompt, types, extra_tags or ["open
-   mouth"])`, `strength` (default `0.35`), and `_make_generator(seed)` — the
-   same seed frame 1 used. This mirrors `generate_sprite_img2img`'s pipeline
-   call (init image loaded as RGB, resized to `_GEN_SIZE`×`_GEN_SIZE` with
-   `Image.LANCZOS`; `prompt_embeds`, `num_inference_steps=_NUM_STEPS`,
-   `guidance_scale=_CFG_SCALE`, `strength` passed through).
-2. Obtain the candidate as an **RGB image before adaptive quantization**. The
-   existing `generate_sprite_img2img` bakes in `postprocess` (adaptive
-   quantize) + save, which would double-quantize and produce an
-   off-frame-1-palette image. **Preferred approach: factor out an internal
-   helper** (e.g. `_run_img2img(prompt, types, image_path, *, pipeline,
-   extra_tags, seed, strength) -> Image.Image`) that performs steps 1 and
-   returns `result.images[0]` (the raw RGB pipeline output, no `postprocess`).
-   Refactor `generate_sprite_img2img` to call this helper and then
-   `postprocess` + save, so its existing behaviour/tests are unchanged.
-   `generate_frame2` calls the same helper to get the raw candidate.
-   (Alternative allowed by the issue: generate to a temp file and reload — but
-   factoring out the raw-image step is preferred and avoids the extra
-   quantize/round-trip.)
-3. Load frame 1 from `front_sprite_path` as a `P`-mode image
-   (`Image.open(front_sprite_path)` — the saved front sprite is already
-   `P`-mode; do **not** convert).
-4. Call `build_frame2(frame1, candidate)` (prior slice) with default `low` /
-   `high`. This palette-locks + recenters the candidate, accepts it iff its
-   difference from frame 1 is in `[low, high]`, else falls back to
-   `procedural_squash(frame1)`.
-5. Save the returned `P`-mode frame to `output_path` (PNG, inferred from
-   extension, matching the other generators' `.save(output_path)`).
+1. Run the img2img pipeline exactly as today via the existing internal helper
+   `_run_img2img(prompt, types, image_path, pipeline=…, extra_tags=…, seed=…,
+   strength=…)`, obtaining the raw RGB candidate (`result.images[0]`). This step
+   is unchanged.
+2. Quantize the candidate:
+   - If `reference_path is None`: `sprite = postprocess(candidate)` (adaptive
+     palette) — unchanged from today.
+   - Else: open the reference as a `P`-mode image
+     (`Image.open(reference_path)` — the saved front sprite is already `P`-mode;
+     do **not** convert) and `sprite = quantize_to_reference(candidate,
+     reference)`. `quantize_to_reference` already performs the same
+     resize-to-96×96 + colour/contrast enhance pre-steps as `postprocess`, then
+     `.quantize(palette=reference)`, so both branches feed identical input to
+     quantization and differ only in adaptive-vs-fixed palette.
+3. `sprite.save(output_path)` (PNG inferred from extension) — unchanged.
 
-The pixel-art LoRA may ignore the semantic `"open mouth"` animation tag
-entirely; that is exactly why `build_frame2`'s acceptance band + procedural
-fallback guarantee a valid frame 2 regardless of what the pipeline returns.
+The choice is a single branch on `reference_path`; `_run_img2img`,
+`postprocess`, `quantize_to_reference`, and the module constants are reused
+rather than duplicated.
 
 ### `main.py` wiring
 
-Insert, inside the per-stage loop, **after** the front-sprite block succeeds
-(the front-sprite block `continue`s on failure, so reaching this code means
-`sprite_path` exists) and alongside the existing back / shiny / back-shiny
-blocks. Suggested placement: after the front sprite, before or among the shiny
-blocks (order is not load-bearing). Two nested-sibling `try/except`s, each
-printing a `Warning: ...` to `stderr` and continuing — matching the existing
-blocks exactly:
+The existing back-sprite block becomes:
 
 ```
-frame2_path = str(stage_dir / "sprite_frame2.png")
+back_path = str(stage_dir / "sprite_back.png")
 try:
-    generate_frame2(
-        stage["sprite_prompt"], stage["types"], sprite_path, frame2_path,
-        pipeline=img2img_pipeline, seed=seed,
+    init_image = args.image if args.image else sprite_path
+    generate_sprite_img2img(
+        stage["sprite_prompt"], stage["types"], init_image, back_path,
+        pipeline=img2img_pipeline, extra_tags=["backside"], seed=seed,
+        strength=0.65, reference_path=sprite_path,
     )
 except Exception as exc:
-    print(f"Warning: frame 2 generation failed for {stage['name']}: {exc}",
-          file=sys.stderr)
-
-frame2_shiny_path = str(stage_dir / "sprite_frame2_shiny.png")
-try:
-    generate_shiny(frame2_path, stage["name"], frame2_shiny_path)
-except Exception as exc:
-    print(f"Warning: frame 2 shiny generation failed for {stage['name']}: {exc}",
-          file=sys.stderr)
+    print(
+        f"Warning: back sprite generation failed for {stage['name']}: {exc}",
+        file=sys.stderr,
+    )
 ```
 
-- `generate_frame2` must be added to the `from fakemon_forge.sprites import (…)`
-  block in `main.py`.
-- The frame-2 shiny reads `frame2_path`; if frame-2 generation failed and no
-  file was written, `generate_shiny` will raise (file not found / non-`P`) and
-  the shiny block's `except` will warn and continue — acceptable, consistent
-  with how a failed back sprite feeds `generate_shiny(back_path, …)` today.
+Only `reference_path=sprite_path` is added. The block still reaches this code
+only after the front-sprite block succeeded (that block `continue`s on failure),
+so `sprite_path` names an existing `P`-mode `sprite.png`. The back-shiny block
+(`generate_shiny(back_path, stage["name"], back_shiny_path)`) is **unchanged** —
+it now inherits the shared palette automatically.
 
 ## Edge cases
 
-- **Front sprite generation failed** → the existing front-sprite `except`
-  `continue`s to the next stage; the frame-2 blocks never run for that stage.
-- **img2img pipeline returns an off-band or garbage candidate** →
-  `build_frame2` falls back to `procedural_squash(frame1)`; `generate_frame2`
-  still writes a valid 96×96 `P`-mode `sprite_frame2.png`.
-- **LoRA ignores the animation tag** → same as above; procedural fallback
-  ensures a valid, in-band frame.
-- **Frame-2 generation raises** (pipeline error, I/O) → warn-and-continue; the
-  stage still gets its other sprites, and `export_ini` still runs.
-- **Frame-2 shiny consistency** → since `sprite_frame2.png` shares
-  `sprite.png`'s exact palette and `generate_shiny` hue-rotates only the
-  palette keyed on `name`, `sprite_frame2_shiny.png` and `sprite_shiny.png` use
-  the same rotated palette (consistent shinies) automatically.
-- **Line mode (3 stages)** → the new blocks are inside the per-stage loop, so
-  each of the 3 stages produces its own `sprite_frame2.png` /
-  `sprite_frame2_shiny.png`.
+- **Front sprite generation failed** → the front-sprite `except` `continue`s to
+  the next stage; the back-sprite block (and its `reference_path`) never runs
+  for that stage, so there is never a missing/absent reference.
+- **img2img returns colours far from frame 1's palette** →
+  `quantize_to_reference` maps each pixel to the nearest of frame 1's 16 colours;
+  the back sprite may look slightly off-palette / posterized. **Accepted** — this
+  is the authentic Gen-3 shared-palette constraint, not a bug.
+- **Back sprite content differs from the front** (it is a rear view) → only the
+  palette is shared, not geometry; no recentering/animation-band logic is applied
+  (that is `build_frame2`'s job for frame 2, not for the back view).
+- **Cross-view shiny consistency** → `sprite.png`, `sprite_frame2.png`, and
+  `sprite_back.png` now share one palette; `generate_shiny` rotates only the
+  palette keyed on `name`, so `sprite_shiny.png`, `sprite_frame2_shiny.png`, and
+  `sprite_back_shiny.png` share one rotated palette automatically.
+- **Line mode (3 stages)** → the back-sprite block is inside the per-stage loop;
+  each stage locks its own back sprite to its own `sprite.png`, and each stage's
+  three shinies stay mutually consistent within that stage.
+- **`reference_path=None` callers** (the front-sprite img2img call, and any other
+  existing caller) → behaviour is identical to today (adaptive `postprocess`).
 
 ## Errors
 
-- `generate_frame2` surfaces exceptions to its caller (it does not swallow
-  them); `main` wraps the call in try/except and warns. This matches every
-  other generator (`generate_sprite`, `generate_sprite_img2img`,
-  `generate_shiny`) and the existing warn-and-continue structure.
-- `build_frame2` raises `ValueError` ("palette-mode") if `frame1.mode != "P"`;
-  since `generate_frame2` loads the already-saved `P`-mode front sprite, this
-  only fires on misuse and would be caught by `main`'s frame-2 `except`.
-- No new `sys.exit` paths; the pipeline-load failure paths
-  (`load_txt2img_pipeline` / `load_img2img_pipeline`) are unchanged.
+- `generate_sprite_img2img` surfaces exceptions to its caller (it does not
+  swallow them); `main` wraps the back-sprite call in the existing try/except and
+  warns `Warning: back sprite generation failed for {name}: {exc}` — unchanged
+  wording and structure.
+- `quantize_to_reference` raises `ValueError` ("palette-mode reference image") if
+  the reference is not `P`-mode. Because `main` always passes the already-saved
+  `P`-mode `sprite.png`, this only fires on misuse and would be caught by the
+  back-sprite `except`.
+- A missing `reference_path` file (e.g. `sprite.png` never written) would raise
+  in `Image.open`; this cannot happen after a successful front-sprite block, and
+  if it somehow did it is caught by the back-sprite `except` (warn-and-continue).
+- No new `sys.exit` paths; pipeline-load failure paths are unchanged.
 
 ## Constraints & dependencies
 
-- `generate_frame2` lives in `fakemon_forge/sprites.py` next to the existing
-  generators; it reuses `build_frame2`, `build_prompt`, `_make_generator`, and
-  the module constants (`_GEN_SIZE`, `_NUM_STEPS`, `_CFG_SCALE`, `_SPRITE_SIZE`)
-  rather than hard-coding.
-- `generate_frame2` (and any factored-out `_run_img2img`) performs a
-  function-local `import torch` via `_make_generator`, so **any test that calls
-  it is an `ml` test** and belongs in `tests/test_sprites_ml.py` (or carries
-  `@pytest.mark.ml`) — per `CLAUDE.md`'s test-slicing rule.
-- `main.py` changes touch only import list + the per-stage loop; no new CLI
-  args, no signature changes to `main`. Because `test_main.py` mocks the sprite
-  functions, the `main` wiring is testable without torch.
-- Reuse `img2img_pipeline` already in scope in `main` (do not load a new
-  pipeline for frame 2).
-- Preserve `generate_sprite_img2img`'s public behaviour when factoring out the
-  raw-image helper — its existing `ml` tests (96×96, `P`-mode, PNG, single
-  pipeline call, `strength`/`image`/`prompt_embeds` passthrough) must still
-  pass unchanged.
+- The change lives in `fakemon_forge/sprites.py` (`generate_sprite_img2img`) and
+  `fakemon_forge/main.py` (one added kwarg). It reuses the existing
+  `quantize_to_reference`, `_run_img2img`, `postprocess`, and module constants;
+  nothing is hard-coded or duplicated.
+- `generate_sprite_img2img` performs a function-local `import torch` (via
+  `_run_img2img` → `_make_generator`), so **any test that calls it is an `ml`
+  test** and belongs in `tests/test_sprites_ml.py` (or carries
+  `@pytest.mark.ml`), per `CLAUDE.md`'s test-slicing rule. The pure
+  palette-lock/shiny assertions that go in `tests/test_sprites.py` must therefore
+  exercise `quantize_to_reference` / `generate_shiny` **directly**, not through
+  `generate_sprite_img2img`.
+- `main.py` changes touch only the back-sprite call (one kwarg); no import
+  changes, no new CLI args, no signature change to `main`. Because
+  `test_main.py` mocks the sprite functions, the `main` wiring is testable
+  without torch.
+- **Backward compatibility:** the new parameter defaults to `None`, so all
+  current `generate_sprite_img2img` calls and their `ml` tests (96×96, `P`-mode,
+  PNG, single pipeline call, `strength`/`image`/`prompt_embeds` passthrough)
+  must continue to pass unchanged. Only the new back-sprite call passes
+  `reference_path`.
+- Frame 1 (`sprite.png`) is the canonical palette source for the whole set
+  (front frame 1, front frame 2, and back all lock to it). The front sprite
+  itself is never reference-locked (it *defines* the palette).
 
 ## Tests
 
+### light (`tests/test_sprites.py`, torch-free)
+
+These exercise the shared-palette lock and shiny consistency **without** calling
+`generate_sprite_img2img` (which would trigger `import torch`). Follow the
+existing `postprocess` / `quantize_to_reference` / helper patterns.
+
+- **Back-sprite palette lock**: given a back RGB image and a `P`-mode reference
+  frame (build via `postprocess(_rgb_image())` / `postprocess(_noisy_image())`),
+  `quantize_to_reference(back_rgb, reference)` yields a `P`-mode 96×96 image
+  whose `getpalette()` equals the reference's exactly. (This is the pure core of
+  the back-sprite lock; `quantize_to_reference` is already well-covered, so this
+  test frames it as the back-sprite scenario and asserts palette equality.)
+- **Cross-view shiny consistency**: build three `P`-mode images that share one
+  palette (stand-ins for frame 1 / frame 2 / back — e.g. quantize three
+  different RGB inputs against one reference so all three share its palette),
+  save each, run `generate_shiny(path, name, out_path)` on each with the **same
+  `name`**, reload the three outputs, and assert their three `getpalette()`
+  results are **identical** to one another. (Optionally also assert each shiny
+  palette differs from the shared original, i.e. rotation happened.)
+
 ### ml (`tests/test_sprites_ml.py`, auto-skipped without torch)
 
-Follow the existing `_fake_img2img_pipeline` / `_stub_encode_prompt` patterns.
-Frame 1 fixtures should be real `P`-mode 96×96 images (build via `postprocess`
-of an `_rgb_image`, as sprites are saved) so `build_frame2` gets a valid
-palette-mode input.
+Follow the existing `_fake_img2img_pipeline` / `_stub_encode_prompt` patterns;
+build the reference as a real `P`-mode 96×96 file (e.g. via `_frame1_file` /
+`postprocess(_rgb_image())`, as sprites are saved).
 
-- `generate_frame2` with a mock img2img pipeline creates the output file, and
-  the saved image is 96×96, `P`-mode, PNG.
-- The pipeline is invoked with the **low `strength`** (default `0.35`, i.e.
-  `pipe.call_args.kwargs["strength"] == 0.35`).
-- The pipeline is invoked with the animation **`extra_tags`** — assert the
-  built prompt (via patched/inspected `_encode_prompt`, mirroring
-  `test_img2img_encode_prompt_called`) includes the `"open mouth"` tag by
-  default, and honours a caller-supplied `extra_tags`.
-- The **same-seed** path is exercised (calling with `seed=<n>` runs without
-  error / passes a generator through), mirroring how other tests drive
-  `_make_generator`.
-- The raw candidate is **not double-quantized**: e.g. `postprocess` is not
-  applied to the frame-2 candidate before `build_frame2` (can be asserted by
-  factoring `_run_img2img` and checking `generate_frame2` uses it, or by
-  confirming the saved frame's palette equals frame 1's — the `build_frame2`
-  contract).
-- Existing `generate_sprite_img2img` tests continue to pass after the refactor
-  (regression guard).
+- `generate_sprite_img2img(..., reference_path=<P-mode frame path>)` with a mock
+  img2img pipeline writes an output file that is **`P`-mode** and whose
+  `getpalette()` **equals the reference's** (proves the back sprite adopts the
+  shared palette rather than an adaptive one).
+- The saved reference-locked sprite is still 96×96 and PNG.
+- **Regression**: `generate_sprite_img2img` **without** `reference_path`
+  continues to produce a `P`-mode 96×96 PNG via adaptive `postprocess` (existing
+  tests suffice; add one asserting the two branches diverge only in palette if
+  desired — e.g. locked output's palette equals the reference while the
+  unlocked output's need not).
+- The pipeline is still invoked **exactly once** and with the unchanged
+  `strength` / `image` / `prompt_embeds` / `extra_tags` passthrough when
+  `reference_path` is supplied (the reference only affects post-quantization).
 
 ### light (`tests/test_main.py`, no torch — sprite fns mocked)
 
-Add `generate_frame2` to the fixture patches (`ctx` and `ctx_line`), then:
-
-- In the **txt2img path** and the **img2img path**, `main` calls
-  `generate_frame2` once per stage with `output_path == str(stage_dir /
-  "sprite_frame2.png")` and the stage's `sprite_path` as the front-sprite
-  argument.
-- `main` calls `generate_shiny` for the frame-2 shiny with `output_path ==
-  str(stage_dir / "sprite_frame2_shiny.png")` and reading `frame2_path`.
-- **Update existing call-count assertions** that this new call changes:
-  - `test_txt2img_path_calls_generate_sprite` currently asserts
-    `sprite_i2i.assert_called_once()` (back only) — frame 2 uses
-    `generate_frame2` (separately patched), so the img2img count is unaffected,
-    but verify.
-  - Any `generate_shiny` call-count assertion must account for the **added
-    frame-2 shiny call** (front shiny + back shiny + frame-2 shiny per stage).
-    (Today no test asserts the total `generate_shiny` count directly, but if one
-    is added or the count is used, it must include the frame-2 shiny.)
-- Line mode: each of the 3 stages triggers a `generate_frame2` +
-  frame-2-`generate_shiny` call (i.e. counts scale ×3), consistent with
-  `test_line_mode_calls_sprite_three_times`.
-- Frame-2 warn-and-continue: making `generate_frame2` raise prints a `Warning`
-  to stderr and does not exit (mirroring `test_sprite_failure_warns_but_does_
-  not_exit`, but note the front-sprite failure `continue`s whereas a frame-2
-  failure must **not** skip the rest of the stage).
+- The back-sprite `generate_sprite_img2img` call receives
+  `reference_path == str(stage_dir / "sprite.png")` (frame 1), in **both** the
+  txt2img path and the img2img path. In the img2img path, assert the back call's
+  positional `image_path` (init) is `args.image` while its `reference_path` is
+  `sprite.png` — i.e. the reference is frame 1 even though the init image is the
+  user's drawing.
+- The existing back-sprite assertions still hold:
+  `extra_tags == ["backside"]`, `strength == 0.65`, and the img2img-path call
+  count (front + back). Distinguish the front call (`reference_path` absent/`None`)
+  from the back call (`reference_path == sprite.png`).
+- The back-shiny wiring is unchanged (`generate_shiny(back_path, name,
+  back_shiny_path)`); the existing shiny-count assertions
+  (`test_generate_shiny_called_three_times_per_stage`,
+  `test_line_mode_frame2_called_three_times`) remain valid, since no shiny call
+  was added or removed — only the back sprite's palette changed.
 
 ## Assumptions
 
 Items marked **[picked]** are defaults chosen here (not confirmed by existing
 code/tests/docs); **[confirmed]** items are grounded in the codebase.
 
-- **[picked]** Function name `generate_frame2` and signature
-  `generate_frame2(prompt, types, front_sprite_path, output_path, *, pipeline,
-  seed=None, strength=0.35, extra_tags=None)` follow the issue's suggestion and
-  the existing generator signatures.
-- **[picked]** Default `strength=0.35` and `extra_tags=["open mouth"]` are the
-  issue's starting suggestions and are eyeball placeholders; the LoRA may ignore
-  the tag entirely, which the `build_frame2` acceptance band + procedural
-  fallback (prior slice) cover. Tunable by eye; not yet confirmed by output.
-- **[picked]** Frame 2 reuses **frame 1's seed** (the stage seed), matching how
-  the back sprite already reuses the stage seed for front/back consistency.
-- **[picked]** Preferred implementation factors an internal `_run_img2img`
-  helper returning the **raw RGB** pipeline image (no `postprocess`), and
-  `generate_sprite_img2img` is refactored to call it then `postprocess` + save —
-  avoiding double-quantization while preserving its behaviour. The temp-file
-  alternative is permitted but not chosen.
-- **[picked]** Frame 2 uses `build_frame2`'s **default** `low=0.02` /
-  `high=0.30` acceptance band (not re-exposed through `generate_frame2`).
-- **[picked]** In `main`, frame 2 uses the **same `img2img_pipeline`** already
-  in scope for the back sprite (not a new pipeline, not the txt2img pipeline).
-- **[picked]** The frame-2 and frame-2-shiny steps are **two separate**
-  warn-and-continue `try/except` blocks (like back/shiny today), so a frame-2
-  generation failure still attempts nothing further for frame 2 but leaves the
-  rest of the stage (and `export_ini`) intact.
-- **[picked]** Warning messages read `Warning: frame 2 generation failed for
-  {name}: {exc}` and `Warning: frame 2 shiny generation failed for {name}:
-  {exc}`, mirroring the existing wording.
-- **[picked]** Frame-2 blocks are placed after the successful front-sprite block
-  within the per-stage loop; exact ordering relative to the back/shiny blocks is
-  not load-bearing.
-- **[confirmed]** `sprite.png` is saved `P`-mode (from `postprocess`'s
-  `.quantize`), so loading it as frame 1 needs no conversion; `build_frame2`
-  requires `P`-mode and guarantees the output shares its palette.
-- **[confirmed]** `generate_shiny` rotates only the palette keyed on `name`, so
-  same-palette sprites yield consistent shinies — `sprite_frame2_shiny.png`
-  matches `sprite_shiny.png` for free.
-- **[confirmed]** `export_ini` / `writer.py` need no changes — verified in the
-  issue and by the modules' outputs (ROM pointer fields / `stats.json` +
-  `entry.md`, no sprite filenames).
-- **[confirmed]** Anything calling `generate_frame2` triggers a real
-  `import torch` (via `_make_generator`) and is therefore an `ml` test per
-  `CLAUDE.md`; the `main`-level wiring is torch-free because `test_main.py`
-  mocks the sprite functions.
+- **[picked]** The lock is added as an optional `reference_path: str = None`
+  keyword parameter on the **existing** `generate_sprite_img2img`, rather than a
+  new dedicated `generate_back_sprite` function. Rationale: it is the minimal,
+  lowest-risk change (existing `reference_path=None` callers and their tests are
+  untouched), keeps the img2img call in one place, and matches how the front
+  frames were locked (via `quantize_to_reference`). The issue explicitly permits
+  either approach. Note: an unused `generate_back_sprite` (txt2img-based) already
+  exists in `sprites.py` but is **not** the back-sprite path `main` uses (`main`
+  calls `generate_sprite_img2img` for the back sprite); it is left untouched to
+  avoid scope creep. **[confirmed]** that `generate_back_sprite` is currently
+  unused by `main.py`.
+- **[picked]** The parameter is a **path** (`reference_path`) rather than a
+  pre-loaded `Image`, matching how `main` already threads file paths
+  (`front_sprite_path`, `image_path`) and letting the function own the
+  `Image.open`. The issue allowed `reference_path`/`reference`; path chosen for
+  consistency.
+- **[picked]** The parameter is placed **last** in the keyword-only signature and
+  defaults to `None`, preserving every existing call site and test.
+- **[picked]** When `reference_path` is set, the reference is opened without a
+  mode conversion (the saved front sprite is already `P`-mode); a non-`P`-mode
+  reference is left to raise via `quantize_to_reference` (caught by `main`'s
+  back-sprite `except`).
+- **[confirmed]** Frame 1 (`sprite.png`) is the canonical palette source: it is
+  generated first in the loop and is saved `P`-mode by `postprocess`'s
+  `.quantize`; front frame 2 already locks to it, and this slice locks the back
+  to it too.
+- **[confirmed]** The reference is always `sprite_path` (frame 1), independent of
+  the img2img init image — in the img2img path the init is the user's drawing
+  (`args.image`) while the palette reference must still be frame 1.
+- **[confirmed]** `quantize_to_reference` already mirrors `postprocess`'s
+  resize + colour/contrast pre-steps, so switching only the palette (adaptive →
+  fixed reference) is the sole behavioural difference between the branches; it
+  does not mutate its inputs.
+- **[confirmed]** `generate_shiny` rotates only the palette keyed on `name` and
+  preserves achromatic entries, so three views sharing one palette yield three
+  identical rotated shiny palettes — `sprite_back_shiny.png` is consistent with
+  `sprite_shiny.png` / `sprite_frame2_shiny.png` with **no** change to the shiny
+  blocks (the back shiny is already `generate_shiny(back_path, …)`).
+- **[confirmed]** `export_ini` / `writer.py` need no changes — they reference no
+  sprite files (ROM pointer fields / `stats.json` + `entry.md`).
+- **[confirmed]** Anything calling `generate_sprite_img2img` triggers a real
+  `import torch` (via `_run_img2img` → `_make_generator`) and is therefore an
+  `ml` test; the pure palette/shiny assertions in `test_sprites.py` must call
+  `quantize_to_reference` / `generate_shiny` directly, and the `main`-level
+  wiring is torch-free because `test_main.py` mocks the sprite functions.

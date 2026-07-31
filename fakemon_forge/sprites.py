@@ -279,12 +279,25 @@ def _run_img2img(
 def generate_sprite_img2img(
     prompt: str, types: list[str], image_path: str, output_path: str, *, pipeline,
     extra_tags: list[str] | None = None, seed: int | None = None, strength: float = 0.8,
+    reference_path: str | None = None,
 ) -> None:
+    """Generate a sprite via img2img and save it as a 96x96 P-mode PNG.
+
+    When ``reference_path`` is given, the raw candidate is locked to that
+    reference image's exact 16-colour palette via ``quantize_to_reference`` — so
+    the back sprite can share the front frames' palette instead of building its
+    own adaptive one. When ``reference_path`` is ``None`` (every other caller),
+    the candidate is quantized adaptively via ``postprocess`` exactly as before.
+    """
     candidate = _run_img2img(
         prompt, types, image_path, pipeline=pipeline,
         extra_tags=extra_tags, seed=seed, strength=strength,
     )
-    sprite = postprocess(candidate)
+    if reference_path is None:
+        sprite = postprocess(candidate)
+    else:
+        reference = Image.open(reference_path)
+        sprite = quantize_to_reference(candidate, reference)
     sprite.save(output_path)
 
 

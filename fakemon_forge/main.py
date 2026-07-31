@@ -77,7 +77,7 @@ def main(argv=None):
             generate_sprite_img2img(
                 stage["sprite_prompt"], stage["types"], init_image, back_path,
                 pipeline=img2img_pipeline, extra_tags=["backside"], seed=seed,
-                strength=0.65,
+                strength=0.65, reference_path=sprite_path,
             )
         except Exception as exc:
             print(
