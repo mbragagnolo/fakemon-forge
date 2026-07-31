@@ -1,8 +1,9 @@
 import colorsys
 import hashlib
 import sys
+from collections import Counter
 from pathlib import Path
-from PIL import Image, ImageEnhance
+from PIL import Image, ImageDraw, ImageEnhance
 
 _BASE_MODEL_ID = "Lykon/dreamshaper-8"
 _LORA_PATH = Path(__file__).parent.parent / "models" / "loras" / "pksp768_V2-1.safetensors"
@@ -12,6 +13,16 @@ _NUM_STEPS = 30
 _CFG_SCALE = 7
 _SPRITE_SIZE = 96
 _PALETTE_COLORS = 16
+_KEY_COLOR = (200, 200, 168)  # Gen-3 transparency key colour (RGB).
+# Tunable eyeball placeholder (see the module spec, cf. procedural_squash's
+# ``amount_px`` / build_frame2's ``low``/``high``): a pixel within this
+# Euclidean RGB distance of the detected border background counts as
+# background — both for the border flood fill and the global sweep.
+_KEY_TOLERANCE = 30
+# Tunable eyeball placeholder: the border ring is treated as near-uniform (a
+# flat backdrop, not a gradient/vignette) when at least this fraction of its
+# pixels are within ``_KEY_TOLERANCE`` of the mean border colour.
+_BORDER_UNIFORM_FRACTION = 0.9
 
 _TYPE_TAGS = {
     "Normal": "normaltype", "Fire": "firetype", "Water": "watertype",
@@ -60,6 +71,84 @@ def quantize_to_reference(image: Image.Image, reference: Image.Image) -> Image.I
     image = ImageEnhance.Color(image).enhance(1.1)
     image = ImageEnhance.Contrast(image).enhance(1.1)
     return image.quantize(palette=reference)
+
+
+def _rgb_distance(a, b) -> float:
+    """Euclidean distance between two RGB tuples."""
+    return ((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2) ** 0.5
+
+
+def _border_ring(image: Image.Image) -> list[tuple[int, int, int]]:
+    """The pixels of the 1-px outer ring (top/bottom rows, left/right columns)."""
+    w, h = image.size
+    px = image.load()
+    ring = [px[x, 0] for x in range(w)] + [px[x, h - 1] for x in range(w)]
+    ring += [px[0, y] for y in range(h)] + [px[w - 1, y] for y in range(h)]
+    return ring
+
+
+def _flatten_background_to_key(image: Image.Image) -> Image.Image:
+    """Return a new RGB image with the background flattened to ``_KEY_COLOR``.
+
+    The SD background is near-white noise smeared across several tones, so this
+    keys it to a single dedicated Gen-3 transparency colour ``(200, 200, 168)``
+    while leaving the creature untouched. Two stages:
+
+    1. **Border flood fill.** The background colour ``bg`` is detected as the
+       per-channel mean of the 1-px border ring (robust to near-white noise,
+       and not assuming pure white — SD sometimes paints tints/vignettes). The
+       connected outer background is flood-filled from the corners with a
+       ``_KEY_TOLERANCE`` threshold (an exact match won't do on noisy pixels).
+    2. **Global near-background sweep.** Any remaining pixel within
+       ``_KEY_TOLERANCE`` of ``bg`` is keyed too, so enclosed pockets (gaps
+       between legs, the hole of a ring-shaped creature) the flood cannot reach
+       are keyed as well — as authentic sprites have their interior gaps keyed.
+
+    Robustness fallback: if the border ring is *not* near-uniform (a gradient /
+    vignette background), keying a single ``bg`` could eat the creature, so
+    instead only the dominant border colour is keyed, a warning is emitted to
+    stderr, and a best-effort result is returned — generation never fails on it.
+
+    Assumes RGB input (does not convert or validate mode) and does not mutate
+    the input; returns a fresh RGB image of the same size.
+    """
+    out = image.copy()
+    w, h = out.size
+    ring = _border_ring(out)
+    n = len(ring)
+    bg = tuple(round(sum(c[i] for c in ring) / n) for i in range(3))
+
+    near_fraction = sum(1 for c in ring if _rgb_distance(c, bg) <= _KEY_TOLERANCE) / n
+    px = out.load()
+
+    if near_fraction < _BORDER_UNIFORM_FRACTION:
+        # Gradient/vignette border: don't flood a single bg (it could eat the
+        # creature). Key only the dominant border colour and warn — never raise.
+        dominant = Counter(ring).most_common(1)[0][0]
+        print(
+            "warning: _flatten_background_to_key detected a non-uniform "
+            "(gradient/vignette) border; keying only the dominant border colour",
+            file=sys.stderr,
+        )
+        for y in range(h):
+            for x in range(w):
+                if _rgb_distance(px[x, y], dominant) <= _KEY_TOLERANCE:
+                    px[x, y] = _KEY_COLOR
+        return out
+
+    # Stage 1: flood the connected outer background from the corners.
+    for seed in ((0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1)):
+        if _rgb_distance(px[seed[0], seed[1]], bg) <= _KEY_TOLERANCE:
+            ImageDraw.floodfill(out, seed, _KEY_COLOR, thresh=_KEY_TOLERANCE)
+
+    # Stage 2: key any remaining near-background pixels (enclosed pockets).
+    px = out.load()
+    for y in range(h):
+        for x in range(w):
+            p = px[x, y]
+            if p != _KEY_COLOR and _rgb_distance(p, bg) <= _KEY_TOLERANCE:
+                px[x, y] = _KEY_COLOR
+    return out
 
 
 def _is_achromatic(r: int, g: int, b: int) -> bool:
