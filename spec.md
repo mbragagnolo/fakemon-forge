@@ -1,276 +1,320 @@
-# Spec: `footprint.py` — 16×16 Pokédex footprint renderer (Pillow-only)
+# Spec: Lock the back sprite to the shared front-frame palette + cross-view shiny consistency
 
 ## Summary
 
-Add a new, self-contained module `fakemon_forge/footprint.py` that renders a
-**Gen-3 Pokédex footprint** from a stage's finished front sprite. The footprint
-is the tiny monochrome "foot stamp" the Gen-3 Pokédex shows next to a species:
-a single stylized foot (a tapered pad plus a few toe marks).
+`fakemon-forge` already produces, per stage, a front sprite `sprite.png` and a
+second front-animation frame `sprite_frame2.png` that **share one exact
+16-colour palette** (frame 2 is palette-locked to frame 1 via
+`quantize_to_reference` / `build_frame2` in `fakemon_forge/sprites.py`), plus
+shiny variants. The **back sprite** (`sprite_back.png`) is the last view still
+carrying its **own adaptive palette**: it is produced by
+`generate_sprite_img2img`, whose final step is `postprocess(candidate)` — an
+*adaptive* 16-colour `quantize` that builds a fresh palette every call.
 
-The output must match the official Gen-3 format exactly:
+This slice (4/4 of #1) brings the back sprite into the **same shared palette**
+as the two front frames, completing the authentic Gen-3 model of *one palette
+for the whole sprite set, one rotated palette for the whole shiny set*. It has
+two parts:
 
-- a **16×16 PNG**,
-- **RGBA**, where every pixel is either **opaque black `(0, 0, 0, 255)`** or
-  **fully transparent (`alpha == 0`)** — *no other colours, no partial alpha*,
-- content is a single stylized foot derived from the sprite's bottom
-  "contact patch", with the toe count/style keyed off the creature's primary
-  type.
+1. **`sprites.py`** — give the back-sprite generation path a way to re-quantize
+   its img2img result against a reference `P`-mode image's exact palette
+   (frame 1) instead of an adaptive palette, by adding an optional
+   `reference_path` parameter to `generate_sprite_img2img`. When
+   `reference_path` is given, the raw img2img candidate is locked with the
+   existing `quantize_to_reference(candidate, reference)` rather than
+   `postprocess`. When it is omitted, behaviour is byte-for-byte unchanged
+   (adaptive `postprocess`), so the front-sprite img2img path and all existing
+   tests are untouched.
+2. **`main.py`** — pass `sprite.png` (frame 1, the just-written front sprite) as
+   the back sprite's `reference_path`, so the back sprite locks to frame 1's
+   palette regardless of which image seeded the img2img (the user's drawing in
+   the img2img path, `sprite.png` in the txt2img path).
 
-This module is **Pillow-only** — it must not import torch/diffusers, directly
-or transitively, so it runs in the slim sandbox container. It is a leaf module:
-**nothing wires it into the app in this slice** (CLI/`main.py`/`writer.py`/
-`export_ini.py` are untouched). This slice ships the module and its tests
-standing alone; wiring is a later slice.
+Because the back sprite then shares frame 1's exact palette, and
+`generate_shiny` is name-keyed and **rotates only the palette** (preserving
+achromatic entries), `sprite_back_shiny.png` — already derived via
+`generate_shiny(back_path, …)` — automatically uses the **same rotated palette**
+as `sprite_shiny.png` and `sprite_frame2_shiny.png`. All three views' shinies
+become consistent for free; no shiny-path change is required.
 
-This is slice 2/3 of #20 and depends on no earlier slice (`keep-depends-on:
-none`).
+### Explicitly out of scope
 
-### Relationship to `sprites.py`
-
-Modern pipeline sprites (`sprite.png`) are **P-mode (palette) PNGs at native
-768×768** with a flat backdrop stored as the **most common palette index**
-(the Gen-3 transparency key at index 0). `footprint.py` reuses two private
-helpers from `sprites.py` for background/content detection, mirroring
-`procedural_squash` / `recenter_to_anchor`:
-
-- `_background_index(image)` — background palette index = the most common index
-  (`max(image.getcolors(maxcolors=w*h))[1]`).
-- `_content_bbox(image, background)` — bbox of the non-background region via
-  `image.point(lambda p: 255 if p != background else 0).getbbox()`, returning
-  `None` when the image is all background.
-
-**Import safety (verified):** a top-level `import fakemon_forge.sprites` pulls
-in **neither torch nor diffusers** — those are function-local imports in
-`sprites.py`. Confirmed at spec time:
-`python3 -c "import sys, fakemon_forge.sprites; print('torch' in sys.modules, 'diffusers' in sys.modules)"` →
-`False False`. Therefore `footprint.py` will
-`from fakemon_forge.sprites import _background_index, _content_bbox` rather than
-copying the helper logic. (If that ever became unsafe, the fallback is to
-replicate the two ~2-line helpers locally; not needed now.)
+- **`.ini` / writer changes** — verified unnecessary (as in the prior slices).
+  `export_ini` emits ROM pointer fields, `writer.py` writes only
+  `stats.json` / `entry.md`; neither references sprite filenames.
+- **The img2img call itself** — the pipeline invocation (`_run_img2img`),
+  `strength=0.65`, and `extra_tags=["backside"]` are unchanged. Only the
+  post-generation quantization step gains a reference-locked branch.
+- **Recentering / animation-band logic** — the back sprite is a *different view*,
+  not an animation frame of the front, so `build_frame2` /
+  `recenter_to_anchor` / the acceptance band do **not** apply to it. Only the
+  palette is shared; geometry is whatever img2img produced.
+- **Colour-fidelity guarantees** — the back sprite's colours may degrade when
+  they land far from frame 1's 16 colours. Per the issue this is the authentic
+  Gen-3 constraint and is accepted, not mitigated.
 
 ## Inputs
 
-Public function:
+### Changed: `generate_sprite_img2img(prompt, types, image_path, output_path, *, pipeline, extra_tags=None, seed=None, strength=0.8, reference_path=None)`
 
-```python
-def generate_footprint(
-    sprite_path: str,
-    output_path: str,
-    *,
-    types: list[str],
-    size_fraction: float = 0.9,
-    blank: bool = False,
-) -> None
-```
+All existing parameters are unchanged. One new keyword-only parameter is added
+at the end (so existing positional/keyword calls are unaffected):
 
-- `sprite_path` — path to the stage's `sprite.png`: a **P-mode**, native-768,
-  flat-backdrop front sprite. Read only when `blank` is false.
-- `output_path` — filesystem path where the 16×16 `footprint.png` is written.
-- `types` (keyword-only) — the stage's type list, e.g. `["Fire"]` or
-  `["Water", "Flying"]`. The **first (primary) type** keys the toe lookup;
-  remaining types are ignored. An empty list is treated as "no listed type"
-  (0 toes / plain pad).
-- `size_fraction` (keyword-only, default `0.9`) — fraction of the 16×16 canvas
-  that the footprint's **long axis** spans. Default 0.9 → the foot's longer
-  dimension is ~14 px.
-- `blank` (keyword-only, default `False`) — when true, write the all-transparent
-  16×16 footprint and skip **all** derivation (no sprite read).
+- `reference_path: str | None = None` (keyword-only) — path to a `P`-mode
+  reference image whose exact 16-colour palette the generated sprite must adopt.
+  When `None` (the default, and every current call except the new back-sprite
+  one), the sprite is quantized adaptively via `postprocess` exactly as today.
+  When set, the raw img2img candidate is locked to that palette via
+  `quantize_to_reference`. **[picked]** name/shape — see Assumptions.
 
-Returns `None`; the function's effect is writing the PNG at `output_path`.
+### `main.py` per-stage back-sprite call
+
+No new CLI arguments. Inside the existing
+`for stage, stage_dir in zip(stages, stage_dirs)` loop, the existing back-sprite
+block gains one keyword argument:
+
+- `reference_path = sprite_path` — i.e. `str(stage_dir / "sprite.png")`, the
+  front sprite written earlier in the same loop iteration. This is **always**
+  `sprite.png` (frame 1), independent of `init_image` (which is the user's
+  `args.image` in the img2img path, or `sprite_path` in the txt2img path).
 
 ## Outputs
 
-A single file at `output_path`:
-
-- PIL image mode **RGBA**, size exactly **(16, 16)**.
-- Every one of the 256 pixels is exactly `(0, 0, 0, 255)` **or** fully
-  transparent (`alpha == 0`). No greys, no anti-aliased edges, no non-black
-  colours, no partial alpha. This is the hard format/colour contract the tests
-  assert.
-- Opaque black marks on a fully transparent background form a single stylized
-  foot (tapered pad + optional toe marks).
+- **`generate_sprite_img2img` with `reference_path` set** → returns `None`; side
+  effect is writing a 96×96 `P`-mode PNG at `output_path` whose palette is
+  byte-for-byte equal to the reference image's palette (guaranteed by
+  `quantize_to_reference`).
+- **`generate_sprite_img2img` with `reference_path=None`** → unchanged: a 96×96
+  `P`-mode PNG with an adaptive ≤16-colour palette (via `postprocess`).
+- **`main`** per stage — the same set of files as today
+  (`sprite.png`, `sprite_frame2.png`, `sprite_frame2_shiny.png`,
+  `sprite_back.png`, `sprite_shiny.png`, `sprite_back_shiny.png`), but now:
+  - `sprite_back.png` shares `sprite.png`'s exact 16-colour palette (was: its
+    own adaptive palette).
+  - `sprite_back_shiny.png` uses the same rotated palette as `sprite_shiny.png`
+    and `sprite_frame2_shiny.png` (automatic consequence; no code change in the
+    shiny blocks).
 
 ## Behavior
 
-Order of operations inside `generate_footprint`:
+### `generate_sprite_img2img(...)` in `sprites.py`
 
-1. **Blank fast-path.** If `blank` is true → build an all-transparent 16×16
-   RGBA image, save it to `output_path`, and return. `sprite_path` is **not**
-   opened (so a nonexistent/irrelevant path is fine when `blank=True`).
+1. Run the img2img pipeline exactly as today via the existing internal helper
+   `_run_img2img(prompt, types, image_path, pipeline=…, extra_tags=…, seed=…,
+   strength=…)`, obtaining the raw RGB candidate (`result.images[0]`). This step
+   is unchanged.
+2. Quantize the candidate:
+   - If `reference_path is None`: `sprite = postprocess(candidate)` (adaptive
+     palette) — unchanged from today.
+   - Else: open the reference as a `P`-mode image
+     (`Image.open(reference_path)` — the saved front sprite is already `P`-mode;
+     do **not** convert) and `sprite = quantize_to_reference(candidate,
+     reference)`. `quantize_to_reference` already performs the same
+     resize-to-96×96 + colour/contrast enhance pre-steps as `postprocess`, then
+     `.quantize(palette=reference)`, so both branches feed identical input to
+     quantization and differ only in adaptive-vs-fixed palette.
+3. `sprite.save(output_path)` (PNG inferred from extension) — unchanged.
 
-2. **Load + validate.** Open `sprite_path`. Require **P-mode**; if
-   `image.mode != "P"`, raise `ValueError` (see Errors), matching the
-   `sprites.py` convention.
+The choice is a single branch on `reference_path`; `_run_img2img`,
+`postprocess`, `quantize_to_reference`, and the module constants are reused
+rather than duplicated.
 
-3. **Locate content.** Compute `background = _background_index(image)` and
-   `bbox = _content_bbox(image, background)`. If `bbox is None` (all-background
-   sprite), write the **blank** (all-transparent) output and return.
+### `main.py` wiring
 
-4. **Contact patch.** Take the bottom **15%** of the content bbox's rows (the
-   region where feet touch the ground) and collect the non-background pixels in
-   that band. This is the raw silhouette of whatever is touching the ground.
+The existing back-sprite block becomes:
 
-5. **Foot blobs.** Compute connected components of the contact patch. Discard
-   noise blobs whose area is below **0.2%** of the band's pixel area. From the
-   survivors, pick the **widest** blob as "the foot". If no blob survives, write
-   the blank output and return.
+```
+back_path = str(stage_dir / "sprite_back.png")
+try:
+    init_image = args.image if args.image else sprite_path
+    generate_sprite_img2img(
+        stage["sprite_prompt"], stage["types"], init_image, back_path,
+        pipeline=img2img_pipeline, extra_tags=["backside"], seed=seed,
+        strength=0.65, reference_path=sprite_path,
+    )
+except Exception as exc:
+    print(
+        f"Warning: back sprite generation failed for {stage['name']}: {exc}",
+        file=sys.stderr,
+    )
+```
 
-6. **Pad shape.** Derive pad dimensions from the chosen blob:
-   - `width_ratio` = blob width / content-bbox width.
-   - Pad width scales with `width_ratio`, **clamped to a minimum** so a foot is
-     always legible.
-   - A very thin leg (tiny `width_ratio`) intentionally yields a **small tall
-     oval** that reads as a hoof print — this is desired output, not an error.
-   - The pad is **tapered**: wider "shoulders" near the toes, narrower at the
-     base (the classic footprint teardrop/pad silhouette).
-
-7. **Toe count/style — primary-type lookup with rare contour override.** The
-   first type keys a small table defined in `footprint.py`. Representative
-   entries (exact contents are an implementation tunable — see Assumptions):
-   - Dragon / Fighting / Fire → **3 claw wedges**
-   - Flying → **3 bird prongs**
-   - Normal / Ground → **4 round toes**
-   - Water / Poison / Ghost / Psychic → **0** (plain or webbed pad)
-   - any unlisted primary type (or empty `types`) → **0**
-
-   **Contour override (expected to fire rarely):** if the chosen blob's **top
-   contour** yields a *strong* bump signal — **≥2 bumps** with a mostly-genuine
-   contour (bump-count/quality thresholds are tunables) — the contour-derived
-   toe count **overrides** the table. This lets an unusually toe-shaped
-   silhouette speak for itself.
-
-8. **Render.**
-   - Draw the **tapered pad** (wide shoulders, narrower base) **supersampled**
-     (e.g. 4×) then downsample to 16 px, giving a crisp but rounded pad.
-   - Stamp the **toe marks directly on the 16×16 grid** — *not* through the
-     supersample/downsample step. (Supersampled toes merge unpredictably into
-     blobs at 16 px; stamping at final resolution keeps them distinct.)
-   - Guarantee a **≥1 px transparent gap row** between the toe tips and the pad
-     edge so toes read as separate marks, never fused to the pad.
-   - Scale so the footprint's **long axis spans `size_fraction`** of the 16 px
-     canvas, roughly centered.
-
-9. **Binarize + save.** Ensure the final image is RGBA with every pixel either
-   `(0, 0, 0, 255)` or fully transparent (any supersample/downsample greys are
-   thresholded to one or the other — no partial alpha survives). Save to
-   `output_path` as PNG.
+Only `reference_path=sprite_path` is added. The block still reaches this code
+only after the front-sprite block succeeded (that block `continue`s on failure),
+so `sprite_path` names an existing `P`-mode `sprite.png`. The back-shiny block
+(`generate_shiny(back_path, stage["name"], back_shiny_path)`) is **unchanged** —
+it now inherits the shared palette automatically.
 
 ## Edge cases
 
-- **`blank=True`** → all 256 pixels transparent; `sprite_path` never opened.
-- **All-background sprite** (`_content_bbox` returns `None`) → all-transparent
-  output (no crash).
-- **Contact patch empty / only sub-threshold noise blobs** → all-transparent
-  output (no crash).
-- **Very thin leg** (tiny `width_ratio`) → deliberate small tall oval (hoof
-  print); not an error.
-- **Empty `types` list / unknown primary type** → 0 toes (plain pad), unless the
-  contour override fires.
-- **Primary type with toes vs. type with none** (e.g. `["Normal"]` vs
-  `["Water"]`) → both must still satisfy the colour/format contract; exact toe
-  pixel positions are a visual tunable and are *not* asserted.
-- **Sprite larger/smaller than 768** — the code keys off the content bbox and
-  percentages, not a hard 768 assumption, so odd sizes still produce a valid
-  16×16 output. (Native 768 is the expected input.)
+- **Front sprite generation failed** → the front-sprite `except` `continue`s to
+  the next stage; the back-sprite block (and its `reference_path`) never runs
+  for that stage, so there is never a missing/absent reference.
+- **img2img returns colours far from frame 1's palette** →
+  `quantize_to_reference` maps each pixel to the nearest of frame 1's 16 colours;
+  the back sprite may look slightly off-palette / posterized. **Accepted** — this
+  is the authentic Gen-3 shared-palette constraint, not a bug.
+- **Back sprite content differs from the front** (it is a rear view) → only the
+  palette is shared, not geometry; no recentering/animation-band logic is applied
+  (that is `build_frame2`'s job for frame 2, not for the back view).
+- **Cross-view shiny consistency** → `sprite.png`, `sprite_frame2.png`, and
+  `sprite_back.png` now share one palette; `generate_shiny` rotates only the
+  palette keyed on `name`, so `sprite_shiny.png`, `sprite_frame2_shiny.png`, and
+  `sprite_back_shiny.png` share one rotated palette automatically.
+- **Line mode (3 stages)** → the back-sprite block is inside the per-stage loop;
+  each stage locks its own back sprite to its own `sprite.png`, and each stage's
+  three shinies stay mutually consistent within that stage.
+- **`reference_path=None` callers** (the front-sprite img2img call, and any other
+  existing caller) → behaviour is identical to today (adaptive `postprocess`).
 
 ## Errors
 
-- **Non-P-mode `sprite_path`** (e.g. an RGB or RGBA PNG) → raise
-  `ValueError`, message matching the `sprites.py` convention
-  (`f"Expected palette-mode ... got {image.mode}"`, so it matches
-  `pytest.raises(ValueError, match="palette-mode")`). Only enforced on the
-  non-blank path — `blank=True` never reads the sprite, so it never raises on
-  mode.
-- **Missing `sprite_path` on the non-blank path** → the underlying
-  `Image.open` raises `FileNotFoundError` (not caught/reshaped here).
-- No other exceptions are raised for "empty" derivations — those degrade to a
-  blank footprint rather than erroring (see Edge cases).
+- `generate_sprite_img2img` surfaces exceptions to its caller (it does not
+  swallow them); `main` wraps the back-sprite call in the existing try/except and
+  warns `Warning: back sprite generation failed for {name}: {exc}` — unchanged
+  wording and structure.
+- `quantize_to_reference` raises `ValueError` ("palette-mode reference image") if
+  the reference is not `P`-mode. Because `main` always passes the already-saved
+  `P`-mode `sprite.png`, this only fires on misuse and would be caught by the
+  back-sprite `except`.
+- A missing `reference_path` file (e.g. `sprite.png` never written) would raise
+  in `Image.open`; this cannot happen after a successful front-sprite block, and
+  if it somehow did it is caught by the back-sprite `except` (warn-and-continue).
+- No new `sys.exit` paths; pipeline-load failure paths are unchanged.
 
 ## Constraints & dependencies
 
-- **Pillow-only.** No torch/diffusers import, transitively or otherwise.
-  Importing `footprint` must leave `torch`/`diffusers` out of `sys.modules`.
-- May import the private helpers `_background_index` / `_content_bbox` from
-  `fakemon_forge.sprites` (verified safe — those don't pull the ML stack).
-- Reuses the `sprites.py` `ValueError` convention for non-P-mode input.
-- Output contract is exact: 16×16 RGBA, two-valued (opaque black / fully
-  transparent).
-- **Tests location (per `CLAUDE.md`):** because this module touches no ML code
-  and fakes nothing via `sys.modules`, its tests go in a **regular test file
-  `tests/test_footprint.py`** with **no `@pytest.mark.ml`**. They must **pass,
-  not skip**, in the slim (no-torch) sandbox. The pre-existing ~21 `ml` tests
-  still skip when torch is absent (expected).
+- The change lives in `fakemon_forge/sprites.py` (`generate_sprite_img2img`) and
+  `fakemon_forge/main.py` (one added kwarg). It reuses the existing
+  `quantize_to_reference`, `_run_img2img`, `postprocess`, and module constants;
+  nothing is hard-coded or duplicated.
+- `generate_sprite_img2img` performs a function-local `import torch` (via
+  `_run_img2img` → `_make_generator`), so **any test that calls it is an `ml`
+  test** and belongs in `tests/test_sprites_ml.py` (or carries
+  `@pytest.mark.ml`), per `CLAUDE.md`'s test-slicing rule. The pure
+  palette-lock/shiny assertions that go in `tests/test_sprites.py` must therefore
+  exercise `quantize_to_reference` / `generate_shiny` **directly**, not through
+  `generate_sprite_img2img`.
+- `main.py` changes touch only the back-sprite call (one kwarg); no import
+  changes, no new CLI args, no signature change to `main`. Because
+  `test_main.py` mocks the sprite functions, the `main` wiring is testable
+  without torch.
+- **Backward compatibility:** the new parameter defaults to `None`, so all
+  current `generate_sprite_img2img` calls and their `ml` tests (96×96, `P`-mode,
+  PNG, single pipeline call, `strength`/`image`/`prompt_embeds` passthrough)
+  must continue to pass unchanged. Only the new back-sprite call passes
+  `reference_path`.
+- Frame 1 (`sprite.png`) is the canonical palette source for the whole set
+  (front frame 1, front frame 2, and back all lock to it). The front sprite
+  itself is never reference-locked (it *defines* the palette).
 
-### Reference metrics (the contract; official assets are NOT in the repo — copyrighted)
+## Tests
 
-- Output size exactly **(16, 16)**.
-- Venusaur reference: content spans ~**13×12 px** (~80% of canvas),
-  **112 black px**, 3 claw bumps merged into the pad top.
+### light (`tests/test_sprites.py`, torch-free)
 
-These are targets the tunables aim at; tests assert the *format/colour*
-contract, not these exact pixel counts.
+These exercise the shared-palette lock and shiny consistency **without** calling
+`generate_sprite_img2img` (which would trigger `import torch`). Follow the
+existing `postprocess` / `quantize_to_reference` / helper patterns.
 
-## Tests: `tests/test_footprint.py` (regular suite, no `ml` marker)
+- **Back-sprite palette lock**: given a back RGB image and a `P`-mode reference
+  frame (build via `postprocess(_rgb_image())` / `postprocess(_noisy_image())`),
+  `quantize_to_reference(back_rgb, reference)` yields a `P`-mode 96×96 image
+  whose `getpalette()` equals the reference's exactly. (This is the pure core of
+  the back-sprite lock; `quantize_to_reference` is already well-covered, so this
+  test frames it as the back-sprite scenario and asserts palette equality.)
+- **Cross-view shiny consistency**: build three `P`-mode images that share one
+  palette (stand-ins for frame 1 / frame 2 / back — e.g. quantize three
+  different RGB inputs against one reference so all three share its palette),
+  save each, run `generate_shiny(path, name, out_path)` on each with the **same
+  `name`**, reload the three outputs, and assert their three `getpalette()`
+  results are **identical** to one another. (Optionally also assert each shiny
+  palette differs from the shared original, i.e. rotation happened.)
 
-Build small synthetic P-mode sprites in memory (or via `tmp_path`) — e.g.
-`Image.new("P", (768, 768))` with a flat background index and a drawn blob near
-the bottom, saved to `tmp_path`. Assert the numeric/format contract, **not** a
-golden image:
+### ml (`tests/test_sprites_ml.py`, auto-skipped without torch)
 
-- **Output size** — the written image is 16×16.
-- **Colour contract** — every pixel's `(r, g, b, a)` is in
-  `{(0, 0, 0, 255)}` or has `alpha == 0`, and nothing else appears.
-- **`blank=True`** — all 256 pixels transparent, and prove no sprite read
-  happens by passing a **nonexistent/irrelevant path** (call must not raise).
-- **All-background sprite** — a P sprite that is entirely the background index →
-  all-transparent output.
-- **Clear foot blob** — a sprite with a distinct bottom blob → the output has at
-  least one opaque-black pixel (a footprint was rendered).
-- **Non-P-mode input** — an RGB image passed as the sprite → raises `ValueError`
-  (`match="palette-mode"`).
-- **Type variation** — a primary type with toes (`["Normal"]`) vs one with none
-  (`["Water"]`): both outputs stay within the colour contract. **Do not** assert
-  exact toe pixels (visual tunable).
+Follow the existing `_fake_img2img_pipeline` / `_stub_encode_prompt` patterns;
+build the reference as a real `P`-mode 96×96 file (e.g. via `_frame1_file` /
+`postprocess(_rgb_image())`, as sprites are saved).
 
-Helper suggestion (mirrors `test_sprites.py` style): a small factory that
-returns a P-mode 768 sprite with a chosen flat background index and an
-optional rectangular/elliptical blob near the bottom, plus an assertion helper
-that walks all 256 RGBA pixels and checks the two-value contract.
+- `generate_sprite_img2img(..., reference_path=<P-mode frame path>)` with a mock
+  img2img pipeline writes an output file that is **`P`-mode** and whose
+  `getpalette()` **equals the reference's** (proves the back sprite adopts the
+  shared palette rather than an adaptive one).
+- The saved reference-locked sprite is still 96×96 and PNG.
+- **Regression**: `generate_sprite_img2img` **without** `reference_path`
+  continues to produce a `P`-mode 96×96 PNG via adaptive `postprocess` (existing
+  tests suffice; add one asserting the two branches diverge only in palette if
+  desired — e.g. locked output's palette equals the reference while the
+  unlocked output's need not).
+- The pipeline is still invoked **exactly once** and with the unchanged
+  `strength` / `image` / `prompt_embeds` / `extra_tags` passthrough when
+  `reference_path` is supplied (the reference only affects post-quantization).
+
+### light (`tests/test_main.py`, no torch — sprite fns mocked)
+
+- The back-sprite `generate_sprite_img2img` call receives
+  `reference_path == str(stage_dir / "sprite.png")` (frame 1), in **both** the
+  txt2img path and the img2img path. In the img2img path, assert the back call's
+  positional `image_path` (init) is `args.image` while its `reference_path` is
+  `sprite.png` — i.e. the reference is frame 1 even though the init image is the
+  user's drawing.
+- The existing back-sprite assertions still hold:
+  `extra_tags == ["backside"]`, `strength == 0.65`, and the img2img-path call
+  count (front + back). Distinguish the front call (`reference_path` absent/`None`)
+  from the back call (`reference_path == sprite.png`).
+- The back-shiny wiring is unchanged (`generate_shiny(back_path, name,
+  back_shiny_path)`); the existing shiny-count assertions
+  (`test_generate_shiny_called_three_times_per_stage`,
+  `test_line_mode_frame2_called_three_times`) remain valid, since no shiny call
+  was added or removed — only the back sprite's palette changed.
 
 ## Assumptions
 
-Every item here is a default chosen for this headless slice (no live user), not
-something already fixed by code/tests/docs — except where noted as
-**verified**.
+Items marked **[picked]** are defaults chosen here (not confirmed by existing
+code/tests/docs); **[confirmed]** items are grounded in the codebase.
 
-- **[picked]** Exact `type → toe` table contents (which types map to 3 claws /
-  3 prongs / 4 toes / 0) and the toe-mark shapes (wedge/dot/prong) are
-  implementation tunables chosen during implementation. Tests assert the
-  format/colour contract, not specific toe pixels. The representative mapping in
-  Behavior §7 is the starting point.
-- **[picked]** Contour-override thresholds (what counts as "≥2 bumps" and a
-  "mostly-genuine" contour) are tunables, expected to fire rarely; not asserted
-  by tests.
-- **[picked]** Contact-patch band = bottom **15%** of the content bbox; noise
-  cutoff = **0.2%** of the band area; "the foot" = the **widest** surviving
-  blob. These are the numbers named in the issue and adopted verbatim.
-- **[picked]** Supersample factor **4×** for the pad; toes stamped at final
-  16 px resolution with a **≥1 px** gap row. Factor is a tunable; the
-  stamp-toes-at-final-res rule and the gap are contract-level (they exist to
-  keep pixels distinct).
-- **[picked]** `size_fraction` default **0.9**; interpreted as the fraction the
-  **long axis** occupies. Binarization threshold that maps downsample greys to
-  black-or-transparent is an implementation detail chosen so the two-value
-  contract always holds.
-- **[picked]** Empty `types` and unknown primary types both → 0 toes (plain
-  pad).
-- **[picked]** Missing sprite file on the non-blank path is left to
-  `Image.open`'s `FileNotFoundError`; not caught or reshaped.
-- **[verified]** Importing `fakemon_forge.sprites` at module top level pulls in
-  neither torch nor diffusers, so `footprint.py` imports `_background_index` /
-  `_content_bbox` from it rather than duplicating them.
-- **[verified — `CLAUDE.md`]** Tests live in `tests/test_footprint.py`, carry no
-  `ml` marker, and must pass (not skip) in the slim container.
-- **[scope]** This slice ships only the module + its tests. No CLI, `main.py`,
-  `writer.py`, `export_ini.py`, or spritesheet wiring — that is an explicitly
-  later slice.
+- **[picked]** The lock is added as an optional `reference_path: str = None`
+  keyword parameter on the **existing** `generate_sprite_img2img`, rather than a
+  new dedicated `generate_back_sprite` function. Rationale: it is the minimal,
+  lowest-risk change (existing `reference_path=None` callers and their tests are
+  untouched), keeps the img2img call in one place, and matches how the front
+  frames were locked (via `quantize_to_reference`). The issue explicitly permits
+  either approach. Note: an unused `generate_back_sprite` (txt2img-based) already
+  exists in `sprites.py` but is **not** the back-sprite path `main` uses (`main`
+  calls `generate_sprite_img2img` for the back sprite); it is left untouched to
+  avoid scope creep. **[confirmed]** that `generate_back_sprite` is currently
+  unused by `main.py`.
+- **[picked]** The parameter is a **path** (`reference_path`) rather than a
+  pre-loaded `Image`, matching how `main` already threads file paths
+  (`front_sprite_path`, `image_path`) and letting the function own the
+  `Image.open`. The issue allowed `reference_path`/`reference`; path chosen for
+  consistency.
+- **[picked]** The parameter is placed **last** in the keyword-only signature and
+  defaults to `None`, preserving every existing call site and test.
+- **[picked]** When `reference_path` is set, the reference is opened without a
+  mode conversion (the saved front sprite is already `P`-mode); a non-`P`-mode
+  reference is left to raise via `quantize_to_reference` (caught by `main`'s
+  back-sprite `except`).
+- **[confirmed]** Frame 1 (`sprite.png`) is the canonical palette source: it is
+  generated first in the loop and is saved `P`-mode by `postprocess`'s
+  `.quantize`; front frame 2 already locks to it, and this slice locks the back
+  to it too.
+- **[confirmed]** The reference is always `sprite_path` (frame 1), independent of
+  the img2img init image — in the img2img path the init is the user's drawing
+  (`args.image`) while the palette reference must still be frame 1.
+- **[confirmed]** `quantize_to_reference` already mirrors `postprocess`'s
+  resize + colour/contrast pre-steps, so switching only the palette (adaptive →
+  fixed reference) is the sole behavioural difference between the branches; it
+  does not mutate its inputs.
+- **[confirmed]** `generate_shiny` rotates only the palette keyed on `name` and
+  preserves achromatic entries, so three views sharing one palette yield three
+  identical rotated shiny palettes — `sprite_back_shiny.png` is consistent with
+  `sprite_shiny.png` / `sprite_frame2_shiny.png` with **no** change to the shiny
+  blocks (the back shiny is already `generate_shiny(back_path, …)`).
+- **[confirmed]** `export_ini` / `writer.py` need no changes — they reference no
+  sprite files (ROM pointer fields / `stats.json` + `entry.md`).
+- **[confirmed]** Anything calling `generate_sprite_img2img` triggers a real
+  `import torch` (via `_run_img2img` → `_make_generator`) and is therefore an
+  `ml` test; the pure palette/shiny assertions in `test_sprites.py` must call
+  `quantize_to_reference` / `generate_shiny` directly, and the `main`-level
+  wiring is torch-free because `test_main.py` mocks the sprite functions.
