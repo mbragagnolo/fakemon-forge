@@ -38,14 +38,14 @@ def _assert_two_valued(path):
     """Every one of the 256 pixels is opaque black or fully transparent."""
     img = Image.open(path).convert("RGBA")
     assert img.size == (16, 16)
-    for pixel in img.getdata():
+    for pixel in img.get_flattened_data():
         r, g, b, a = pixel
         assert a == 0 or pixel == (0, 0, 0, 255), f"stray pixel {pixel}"
 
 
 def _black_count(path):
     img = Image.open(path).convert("RGBA")
-    return sum(1 for p in img.getdata() if p == (0, 0, 0, 255))
+    return sum(1 for p in img.get_flattened_data() if p == (0, 0, 0, 255))
 
 
 # ---------------------------------------------------------------------------
@@ -84,8 +84,8 @@ def test_blank_all_transparent_without_reading_sprite(tmp_path):
                        types=["Fire"], blank=True)
     img = Image.open(out).convert("RGBA")
     assert img.size == (16, 16)
-    assert all(p[3] == 0 for p in img.getdata())
-    assert len(list(img.getdata())) == 256
+    assert all(p[3] == 0 for p in img.get_flattened_data())
+    assert len(list(img.get_flattened_data())) == 256
 
 
 # ---------------------------------------------------------------------------
@@ -98,7 +98,7 @@ def test_all_background_sprite_is_transparent(tmp_path):
     generate_footprint(sprite, str(out), types=["Fire"])
     img = Image.open(out).convert("RGBA")
     assert img.size == (16, 16)
-    assert all(p[3] == 0 for p in img.getdata())
+    assert all(p[3] == 0 for p in img.get_flattened_data())
 
 
 def test_only_subthreshold_noise_is_transparent(tmp_path):
@@ -119,6 +119,16 @@ def test_non_p_mode_raises_value_error(tmp_path):
     out = tmp_path / "footprint.png"
     with pytest.raises(ValueError, match="palette-mode"):
         generate_footprint(str(rgb), str(out), types=["Fire"])
+
+
+def test_missing_sprite_raises_on_non_blank_path(tmp_path):
+    # On the non-blank path the sprite IS opened, so a missing file surfaces
+    # Image.open's FileNotFoundError unchanged (the mirror of the blank test,
+    # which proves the sprite is *never* opened when blank=True).
+    out = tmp_path / "footprint.png"
+    with pytest.raises(FileNotFoundError):
+        generate_footprint(str(tmp_path / "does_not_exist.png"), str(out),
+                           types=["Fire"])
 
 
 def test_blank_never_raises_on_non_p_mode(tmp_path):
