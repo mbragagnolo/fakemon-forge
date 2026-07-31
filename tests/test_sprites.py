@@ -120,8 +120,32 @@ def test_postprocess_output_is_palette_mode():
     assert postprocess(_rgb_image()).mode == "P"
 
 
-def test_postprocess_at_most_16_colors():
-    assert len(set(postprocess(_noisy_image()).get_flattened_data())) <= 16
+def test_postprocess_obeys_gen3_contract():
+    # postprocess now delegates to _quantize_gen3, so its output must obey the
+    # Gen-3 palette contract. Feed a background-bearing sprite (not the fully
+    # random _noisy_image, which hits the gradient-border fallback) so the
+    # "background -> index 0" assertion is meaningful.
+    out = postprocess(_noisy_border_sprite())
+    pal = out.getpalette()
+    # Reserved head of the palette: key at index 0, then black and white.
+    assert pal[0:3] == [200, 200, 168]
+    assert pal[3:6] == [0, 0, 0]
+    assert pal[6:9] == [255, 255, 255]
+    # At most 13 creature colours (used colours minus the three reserved) and at
+    # most 16 total.
+    used = _used_colors(out)
+    reserved = {_KEY_COLOR, (0, 0, 0), (255, 255, 255)}
+    assert len(used - reserved) <= _MAX_CREATURE_COLORS
+    assert len(used) <= 16
+    # Every border/background pixel decodes to index 0 (the transparency key).
+    px = out.load()
+    w, h = out.size
+    for x in range(w):
+        assert px[x, 0] == 0
+        assert px[x, h - 1] == 0
+    for y in range(h):
+        assert px[0, y] == 0
+        assert px[w - 1, y] == 0
 
 
 def test_postprocess_does_not_mutate_input():
@@ -617,7 +641,10 @@ def test_build_frame2_no_candidate_returns_squash():
 
 def test_build_frame2_near_identical_candidate_falls_back():
     frame1 = postprocess(_sprite_rgb())
-    # Feeding the original RGB reproduces frame1 after locking -> ratio < low.
+    # _sprite_rgb's dark (40, 40, 60) background nearest-maps to reserved black
+    # (index 1), not the key (index 0) frame1's background sits on, so the
+    # candidate differs from frame1 across the whole backdrop -> ratio above
+    # high -> rejected -> squash fallback.
     out = build_frame2(frame1, _sprite_rgb())
     assert list(out.get_flattened_data()) == list(procedural_squash(frame1).get_flattened_data())
 
@@ -628,10 +655,29 @@ def test_build_frame2_wildly_different_candidate_falls_back():
     assert list(out.get_flattened_data()) == list(procedural_squash(frame1).get_flattened_data())
 
 
+def _key_background_sprite(body):
+    """A _sprite_rgb whose dark backdrop is swapped for the transparency key.
+
+    quantize_to_reference does not flatten a candidate's background to the key,
+    so only a key-coloured backdrop nearest-maps to index 0 (matching frame 1's
+    key background). Then the sole difference from frame 1 is the recoloured
+    creature region, yielding an in-band diff ratio.
+    """
+    img = _sprite_rgb(body=body)
+    px = img.load()
+    for y in range(96):
+        for x in range(96):
+            if px[x, y] == (40, 40, 60):
+                px[x, y] = _KEY_COLOR
+    return img
+
+
 def test_build_frame2_in_band_candidate_is_accepted():
     frame1 = postprocess(_sprite_rgb())
-    # A moderately different creature: recoloured body -> in-band difference.
-    candidate = _sprite_rgb(body=(90, 160, 210))
+    # A moderately different creature with a key background (so its backdrop
+    # locks to index 0 like frame 1's) -> only the recoloured body differs ->
+    # in-band difference.
+    candidate = _key_background_sprite(body=(90, 160, 210))
     out = build_frame2(frame1, candidate)
     squash = list(procedural_squash(frame1).get_flattened_data())
     assert list(out.get_flattened_data()) != squash

@@ -57,10 +57,16 @@ def _encode_prompt(prompt: str, pipeline):
 
 
 def postprocess(image: Image.Image) -> Image.Image:
-    image = image.resize((_SPRITE_SIZE, _SPRITE_SIZE), Image.NEAREST)
-    image = ImageEnhance.Color(image).enhance(1.1)
-    image = ImageEnhance.Contrast(image).enhance(1.1)
-    return image.quantize(colors=_PALETTE_COLORS)
+    """Turn a raw SD RGB image into a 96x96 ``P``-mode Gen-3-contract sprite.
+
+    Delegates to ``_quantize_gen3`` — the single source of truth for the Gen-3
+    palette contract (``_KEY_COLOR`` at index 0, reserved black/white, at most
+    ``_MAX_CREATURE_COLORS`` creature colours, background pixels on index 0).
+    ``_quantize_gen3`` already performs the resize + colour/contrast enhance
+    pre-steps internally (before flattening the background to the key), so they
+    are not repeated here.
+    """
+    return _quantize_gen3(image)
 
 
 def quantize_to_reference(image: Image.Image, reference: Image.Image) -> Image.Image:
