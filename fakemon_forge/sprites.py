@@ -253,10 +253,16 @@ def generate_back_sprite(
 
 
 
-def generate_sprite_img2img(
-    prompt: str, types: list[str], image_path: str, output_path: str, *, pipeline,
+def _run_img2img(
+    prompt: str, types: list[str], image_path: str, *, pipeline,
     extra_tags: list[str] | None = None, seed: int | None = None, strength: float = 0.8,
-) -> None:
+) -> Image.Image:
+    """Run the img2img pipeline and return the raw RGB pipeline image.
+
+    Shared by ``generate_sprite_img2img`` (which then adaptively quantizes +
+    saves) and ``generate_frame2`` (which hands the raw candidate to
+    ``build_frame2`` so it isn't double-quantized off frame 1's palette).
+    """
     init = Image.open(image_path).convert("RGB").resize((_GEN_SIZE, _GEN_SIZE), Image.LANCZOS)
     conditioning = _encode_prompt(build_prompt(prompt, types, extra_tags), pipeline)
     result = pipeline(
@@ -267,8 +273,41 @@ def generate_sprite_img2img(
         generator=_make_generator(seed),
         strength=strength,
     )
-    sprite = postprocess(result.images[0])
+    return result.images[0]
+
+
+def generate_sprite_img2img(
+    prompt: str, types: list[str], image_path: str, output_path: str, *, pipeline,
+    extra_tags: list[str] | None = None, seed: int | None = None, strength: float = 0.8,
+) -> None:
+    candidate = _run_img2img(
+        prompt, types, image_path, pipeline=pipeline,
+        extra_tags=extra_tags, seed=seed, strength=strength,
+    )
+    sprite = postprocess(candidate)
     sprite.save(output_path)
+
+
+def generate_frame2(
+    prompt: str, types: list[str], front_sprite_path: str, output_path: str, *, pipeline,
+    seed: int | None = None, strength: float = 0.35, extra_tags: list[str] | None = None,
+) -> None:
+    """Generate the second front-animation frame and save it to ``output_path``.
+
+    Runs img2img from the finished front sprite at low ``strength`` with an
+    animation tag (defaults to ``["open mouth"]``) using frame 1's seed, then
+    hands the raw RGB candidate to ``build_frame2`` — which palette-locks +
+    recenters it, accepts it iff its difference from frame 1 is in-band, and
+    otherwise falls back to a procedural squash. The result always shares
+    frame 1's exact 16-colour palette.
+    """
+    candidate = _run_img2img(
+        prompt, types, front_sprite_path, pipeline=pipeline,
+        extra_tags=extra_tags or ["open mouth"], seed=seed, strength=strength,
+    )
+    frame1 = Image.open(front_sprite_path)
+    frame2 = build_frame2(frame1, candidate)
+    frame2.save(output_path)
 
 
 def make_img2img_pipeline(txt2img_pipe):
