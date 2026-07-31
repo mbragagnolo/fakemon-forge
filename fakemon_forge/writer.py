@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-_STATS_KEYS = {"name", "stage", "types", "ability", "base_stats"}
+_STATS_KEYS = {"name", "stage", "types", "ability", "base_stats", "levitates"}
 
 
 def _resolve_dir(name: str, base: Path) -> Path:
@@ -17,7 +17,8 @@ def _resolve_dir(name: str, base: Path) -> Path:
 
 
 def _write_stats(stage: dict, stage_dir: Path) -> None:
-    data = {k: stage[k] for k in _STATS_KEYS}
+    data = {k: stage[k] for k in _STATS_KEYS if k != "levitates"}
+    data["levitates"] = stage.get("levitates", False)
     (stage_dir / "stats.json").write_text(
         json.dumps(data, indent=2), encoding="utf-8"
     )

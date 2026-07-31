@@ -161,3 +161,36 @@ def test_collision_increments_suffix(tmp_path):
 def test_no_collision_no_suffix(tmp_path):
     dirs = write_output(_SINGLE, base_dir=str(tmp_path))
     assert dirs[0].parent.name == "Flamburr"
+
+
+# ---------------------------------------------------------------------------
+# levitates flag in stats.json
+# ---------------------------------------------------------------------------
+
+def test_stats_json_persists_levitates_true(tmp_path):
+    stage = {**_STAGE_1, "levitates": True}
+    dirs = write_output([stage], base_dir=str(tmp_path))
+    data = json.loads((dirs[0] / "stats.json").read_text())
+    assert data["levitates"] is True
+
+
+def test_stats_json_persists_levitates_false(tmp_path):
+    stage = {**_STAGE_1, "levitates": False}
+    dirs = write_output([stage], base_dir=str(tmp_path))
+    data = json.loads((dirs[0] / "stats.json").read_text())
+    assert data["levitates"] is False
+
+
+def test_stats_json_defaults_missing_levitates_to_false(tmp_path):
+    # _STAGE_1 has no "levitates" key.
+    assert "levitates" not in _STAGE_1
+    dirs = write_output(_SINGLE, base_dir=str(tmp_path))
+    data = json.loads((dirs[0] / "stats.json").read_text())
+    assert data["levitates"] is False
+
+
+def test_stats_json_still_excludes_llm_only_with_levitates(tmp_path):
+    stage = {**_STAGE_1, "levitates": True}
+    dirs = write_output([stage], base_dir=str(tmp_path))
+    data = json.loads((dirs[0] / "stats.json").read_text())
+    assert not (_LLM_ONLY & set(data.keys()))
