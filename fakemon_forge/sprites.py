@@ -45,6 +45,23 @@ def postprocess(image: Image.Image) -> Image.Image:
     return image.quantize(colors=_PALETTE_COLORS)
 
 
+def quantize_to_reference(image: Image.Image, reference: Image.Image) -> Image.Image:
+    """Quantize ``image`` against a fixed ``reference`` palette instead of an adaptive one.
+
+    Unlike ``postprocess``, which builds a fresh 16-colour palette every call,
+    this reuses ``reference``'s exact palette so a whole sprite set (front frames
+    plus back sprite) can share one 16-colour palette. The pre-steps (resize +
+    colour/contrast enhance) match ``postprocess`` so either path yields the same
+    input to quantization. Inputs are not mutated.
+    """
+    if reference.mode != "P":
+        raise ValueError(f"Expected palette-mode reference image, got {reference.mode}")
+    image = image.resize((_SPRITE_SIZE, _SPRITE_SIZE), Image.NEAREST)
+    image = ImageEnhance.Color(image).enhance(1.1)
+    image = ImageEnhance.Contrast(image).enhance(1.1)
+    return image.quantize(palette=reference)
+
+
 def _is_achromatic(r: int, g: int, b: int) -> bool:
     lum = 0.299 * r + 0.587 * g + 0.114 * b
     return lum < 40 or lum > 215
