@@ -19,6 +19,7 @@ from fakemon_forge.sprites import (
 )
 from fakemon_forge.writer import write_output
 from fakemon_forge.export_ini import export_ini
+from fakemon_forge.cries import generate_cry
 
 
 def main(argv=None):
@@ -55,6 +56,21 @@ def main(argv=None):
 
     for stage, stage_dir in zip(stages, stage_dirs):
         seed = random.randint(0, 2**32 - 1)
+
+        # Audio does not depend on the sprites — generate it before the sprite
+        # block so a sprite failure (which `continue`s) can't skip the cry.
+        try:
+            generate_cry(
+                stages[0]["name"],   # line_name — stage 1's name, shared by the whole line
+                stage["stage"],
+                stage["types"],
+                str(stage_dir / "cry.wav"),
+            )
+        except Exception as exc:
+            print(
+                f"Warning: cry generation failed for {stage['name']}: {exc}",
+                file=sys.stderr,
+            )
 
         sprite_path = str(stage_dir / "sprite.png")
         try:
