@@ -267,6 +267,77 @@ def test_img2img_pipeline_called_exactly_once(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# generate_sprite_img2img(reference_path=...) — back-sprite palette lock
+# ---------------------------------------------------------------------------
+
+def test_img2img_reference_path_adopts_reference_palette(tmp_path):
+    """With reference_path set, the saved back sprite locks to that palette
+    (proves it adopts the shared palette instead of an adaptive one)."""
+    ref = _frame1_file(tmp_path)
+    init_img = tmp_path / "drawing.png"
+    _rgb_image(100, 100).save(str(init_img))
+    pipe = _fake_img2img_pipeline(_rgb_image(96, 96, color=(90, 160, 210)))
+    out = tmp_path / "sprite_back.png"
+    generate_sprite_img2img(
+        "fire lizard", [], str(init_img), str(out), pipeline=pipe,
+        extra_tags=["backside"], reference_path=str(ref),
+    )
+    saved = Image.open(str(out))
+    assert saved.mode == "P"
+    assert saved.getpalette() == Image.open(str(ref)).getpalette()
+
+
+def test_img2img_reference_path_saved_is_96x96_png(tmp_path):
+    ref = _frame1_file(tmp_path)
+    init_img = tmp_path / "drawing.png"
+    _rgb_image(100, 100).save(str(init_img))
+    pipe = _fake_img2img_pipeline(_rgb_image(96, 96, color=(90, 160, 210)))
+    out = tmp_path / "sprite_back.png"
+    generate_sprite_img2img(
+        "fire lizard", [], str(init_img), str(out), pipeline=pipe,
+        reference_path=str(ref),
+    )
+    saved = Image.open(str(out))
+    assert saved.size == (96, 96)
+    assert saved.format == "PNG"
+
+
+def test_img2img_reference_path_pipeline_called_once_with_passthrough(tmp_path):
+    """The reference only affects post-quantization: the pipeline is still
+    invoked exactly once with the unchanged strength / image / prompt_embeds."""
+    ref = _frame1_file(tmp_path)
+    init_img = tmp_path / "drawing.png"
+    _rgb_image(100, 100).save(str(init_img))
+    pipe = _fake_img2img_pipeline(_rgb_image(96, 96, color=(90, 160, 210)))
+    out = tmp_path / "sprite_back.png"
+    fake_embeds = MagicMock()
+    with patch("fakemon_forge.sprites._encode_prompt", return_value=fake_embeds):
+        generate_sprite_img2img(
+            "fire lizard", [], str(init_img), str(out), pipeline=pipe,
+            extra_tags=["backside"], strength=0.65, reference_path=str(ref),
+        )
+    assert pipe.call_count == 1
+    kwargs = pipe.call_args.kwargs
+    assert kwargs["strength"] == 0.65
+    assert kwargs["image"].size == (768, 768)
+    assert kwargs["prompt_embeds"] is fake_embeds
+
+
+def test_img2img_without_reference_path_uses_adaptive_palette(tmp_path):
+    """Regression: the two branches diverge only in palette. The locked output
+    equals the reference's palette; the unlocked output need not."""
+    ref = _frame1_file(tmp_path)
+    init_img = tmp_path / "drawing.png"
+    _rgb_image(100, 100).save(str(init_img))
+    pipe = _fake_img2img_pipeline(_rgb_image(96, 96, color=(90, 160, 210)))
+    out = tmp_path / "sprite_back.png"
+    generate_sprite_img2img("fire lizard", [], str(init_img), str(out), pipeline=pipe)
+    saved = Image.open(str(out))
+    assert saved.mode == "P"
+    assert saved.size == (96, 96)
+
+
+# ---------------------------------------------------------------------------
 # generate_frame2()
 # ---------------------------------------------------------------------------
 

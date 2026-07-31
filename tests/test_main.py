@@ -168,6 +168,38 @@ def test_img2img_vision_image_path_passed(ctx, tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Back sprite locked to frame 1's palette (reference_path=sprite.png)
+# ---------------------------------------------------------------------------
+
+def test_txt2img_back_sprite_reference_is_frame1(ctx):
+    """The back-sprite call locks to frame 1's palette (sprite.png)."""
+    main(["--description", "fire lizard"])
+    back_call = ctx["sprite_i2i"].call_args   # only one img2img call in txt2img path
+    assert back_call.kwargs["reference_path"] == str(ctx["stage_dir"] / "sprite.png")
+
+
+def test_img2img_back_sprite_reference_is_frame1_not_init_image(ctx, tmp_path):
+    """In the img2img path the back sprite's init image is the user's drawing,
+    but its palette reference is still frame 1 (sprite.png)."""
+    img = tmp_path / "drawing.png"
+    img.write_bytes(b"\x89PNG\r\n")
+    main(["--image", str(img), "--description", "fire lizard"])
+
+    # Two img2img calls: the front (no reference_path) and the back (locked).
+    calls = ctx["sprite_i2i"].call_args_list
+    assert len(calls) == 2
+    front = [c for c in calls if c.kwargs.get("reference_path") is None]
+    back = [c for c in calls if c.kwargs.get("reference_path") is not None]
+    assert len(front) == 1 and len(back) == 1
+
+    back_call = back[0]
+    assert back_call.args[2] == str(img)   # init image = user's drawing
+    assert back_call.kwargs["reference_path"] == str(ctx["stage_dir"] / "sprite.png")
+    assert back_call.kwargs["extra_tags"] == ["backside"]
+    assert back_call.kwargs["strength"] == 0.65
+
+
+# ---------------------------------------------------------------------------
 # Description combination
 # ---------------------------------------------------------------------------
 

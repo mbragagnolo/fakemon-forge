@@ -15,6 +15,7 @@ from PIL import Image, ImageDraw
 from fakemon_forge.sprites import (
     postprocess,
     quantize_to_reference,
+    generate_shiny,
     build_prompt,
     procedural_squash,
     recenter_to_anchor,
@@ -167,6 +168,50 @@ def test_quantize_to_reference_does_not_mutate_inputs():
 def test_quantize_to_reference_rejects_non_palette_reference():
     with pytest.raises(ValueError, match="palette-mode"):
         quantize_to_reference(_rgb_image(), _rgb_image())
+
+
+# ---------------------------------------------------------------------------
+# Back-sprite palette lock (pure core of the reference-locked back sprite)
+# ---------------------------------------------------------------------------
+
+def test_back_sprite_locks_to_reference_frame_palette():
+    """A back RGB candidate quantized against frame 1's P-mode palette adopts it
+    exactly — the pure core of the shared-palette back-sprite lock."""
+    reference = postprocess(_sprite_rgb())
+    back_rgb = _sprite_rgb(body=(90, 160, 210))
+    locked = quantize_to_reference(back_rgb, reference)
+    assert locked.mode == "P"
+    assert locked.size == (96, 96)
+    assert locked.getpalette() == reference.getpalette()
+
+
+# ---------------------------------------------------------------------------
+# Cross-view shiny consistency (front / frame2 / back share one rotated palette)
+# ---------------------------------------------------------------------------
+
+def test_cross_view_shinies_share_one_rotated_palette(tmp_path):
+    """Three views sharing one palette yield three identical shiny palettes
+    when generate_shiny runs with the same name (achromatic-preserving, palette
+    rotation only)."""
+    reference = postprocess(_sprite_rgb())
+    # Stand-ins for frame1 / frame2 / back: three different RGB inputs quantized
+    # against one reference, so all three share its exact palette.
+    frame1 = quantize_to_reference(_sprite_rgb(), reference)
+    frame2 = quantize_to_reference(_sprite_rgb(body=(90, 160, 210)), reference)
+    back = quantize_to_reference(_noisy_image(96, 96), reference)
+    assert frame1.getpalette() == frame2.getpalette() == back.getpalette()
+
+    shiny_palettes = []
+    for i, view in enumerate((frame1, frame2, back)):
+        src = tmp_path / f"view_{i}.png"
+        out = tmp_path / f"view_{i}_shiny.png"
+        view.save(str(src))
+        generate_shiny(str(src), "Flamburr", str(out))
+        shiny_palettes.append(Image.open(str(out)).getpalette())
+
+    assert shiny_palettes[0] == shiny_palettes[1] == shiny_palettes[2]
+    # Rotation actually happened (mid-tone entries changed).
+    assert shiny_palettes[0] != reference.getpalette()
 
 
 # ---------------------------------------------------------------------------
