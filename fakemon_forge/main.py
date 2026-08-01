@@ -17,6 +17,7 @@ from fakemon_forge.sprites import (
     load_img2img_pipeline,
     make_img2img_pipeline,
 )
+from fakemon_forge.icon import generate_icon
 from fakemon_forge.writer import write_output
 from fakemon_forge.footprint import generate_footprint
 from fakemon_forge.export_ini import export_ini
@@ -72,6 +73,15 @@ def main(argv=None):
                 file=sys.stderr,
             )
             continue
+
+        icon_path = str(stage_dir / "sprite_small.png")
+        try:
+            generate_icon(sprite_path, icon_path)
+        except Exception as exc:
+            print(
+                f"Warning: icon generation failed for {stage['name']}: {exc}",
+                file=sys.stderr,
+            )
 
         back_path = str(stage_dir / "sprite_back.png")
         try:
