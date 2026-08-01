@@ -7,7 +7,7 @@ background and a small (<= 16 colour) palette. There is no Stable Diffusion /
 torch / diffusers involvement — the whole module is deterministic pure Pillow,
 so it (and its tests) run in the slim keep sandbox.
 
-Reference contract (measured from the official Venusaur icon, kept out of the
+Reference contract (measured from an official Gen 3 icon, kept out of the
 repo): 32x64, all pixels opaque, <= 16 distinct colours, teal-green background
 ``(96, 152, 128)`` dominating, and frame 2 == frame 1 shifted down 1px.
 """
@@ -19,7 +19,7 @@ from fakemon_forge.sprites import _KEY_COLOR, _KEY_TOLERANCE, _rgb_distance
 # Party-menu icon background — an *opaque* teal-green that dominates the image
 # and is forced onto palette index 0 (unlike the sprites' transparency key,
 # which downstream tools alpha-key against, the icon background is a normal
-# opaque colour). Value measured from the reference Venusaur icon.
+# opaque colour). Value measured from the official reference icon.
 _ICON_BG_COLOR = (96, 152, 128)
 # Icon frame size — two of these stack vertically into the 32x64 output.
 _ICON_SIZE = 32

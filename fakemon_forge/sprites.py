@@ -520,7 +520,7 @@ def generate_frame2(
 
 
 # Cell layout of the 4x2 stitched sheet, matching the hand-made reference
-# sheets in F:/Projects/Projet_Pokemon (Charmander 4.png, Blitin, Bluchis):
+# sheets kept outside the repo (Blitin, Bluchis, and one official sheet):
 # row 0 is normal/shiny column pairs of front then back, row 1 is frame 2.
 # The remaining two cells stay on the transparency key.
 _SHEET_LAYOUT = [
