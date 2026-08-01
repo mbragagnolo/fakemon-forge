@@ -17,6 +17,9 @@ _STAGE_1 = {
 _STAGE_2 = {**_STAGE_1, "name": "Flamburro", "stage": 2, "pokedex_entry": "Grows bolder."}
 _STAGE_3 = {**_STAGE_1, "name": "Flamburron", "stage": 3, "pokedex_entry": "Melts rock."}
 
+# A single form that levitates, for exercising blank=True footprints.
+_STAGE_LEVITATE = {**_STAGE_1, "name": "Floatburr", "levitates": True}
+
 
 # ---------------------------------------------------------------------------
 # Fixture: patch every external call in main
@@ -42,6 +45,7 @@ def ctx(tmp_path, monkeypatch):
         patch("fakemon_forge.main.generate_frame2")                as m_frame2,
         patch("fakemon_forge.main.generate_shiny")                 as m_shiny,
         patch("fakemon_forge.main.stitch_spritesheet")             as m_stitch,
+        patch("fakemon_forge.main.generate_footprint")             as m_footprint,
         patch("fakemon_forge.main.write_output", return_value=[stage_dir]) as m_write,
         patch("fakemon_forge.main.export_ini")                     as m_export,
     ):
@@ -50,6 +54,7 @@ def ctx(tmp_path, monkeypatch):
             "t2i": m_t2i, "i2i": m_i2i, "make_i2i": m_make_i2i,
             "sprite": m_sprite, "sprite_i2i": m_sprite_i2i,
             "frame2": m_frame2, "shiny": m_shiny, "stitch": m_stitch,
+            "footprint": m_footprint,
             "write": m_write, "export": m_export, "stage_dir": stage_dir,
         }
 
@@ -77,11 +82,12 @@ def ctx_line(tmp_path, monkeypatch):
         patch("fakemon_forge.main.generate_frame2")           as m_frame2,
         patch("fakemon_forge.main.generate_shiny")            as m_shiny,
         patch("fakemon_forge.main.stitch_spritesheet")        as m_stitch,
+        patch("fakemon_forge.main.generate_footprint")        as m_footprint,
         patch("fakemon_forge.main.write_output", return_value=dirs),
         patch("fakemon_forge.main.export_ini"),
     ):
         yield {"sprite": m_sprite, "frame2": m_frame2, "shiny": m_shiny,
-               "stitch": m_stitch, "dirs": dirs}
+               "stitch": m_stitch, "footprint": m_footprint, "dirs": dirs}
 
 
 # ---------------------------------------------------------------------------
@@ -380,3 +386,56 @@ def test_spritesheet_failure_warns_but_does_not_exit(ctx, capsys):
     main(["--description", "fire lizard"])   # must not raise
     err = capsys.readouterr().err
     assert "Warning" in err and "Flamburr" in err
+
+
+# ---------------------------------------------------------------------------
+# Footprint generation
+# ---------------------------------------------------------------------------
+
+def test_footprint_generated_once_per_single_stage(ctx):
+    main(["--description", "fire lizard"])
+    ctx["footprint"].assert_called_once()
+
+
+def test_footprint_generated_once_per_stage_in_line_mode(ctx_line):
+    main(["--description", "fire lizard", "--mode", "line"])
+    assert ctx_line["footprint"].call_count == 3
+
+
+def test_footprint_paths_and_types(ctx):
+    main(["--description", "fire lizard"])
+    call = ctx["footprint"].call_args
+    assert call.args[0] == str(ctx["stage_dir"] / "sprite.png")     # sprite_path
+    assert call.args[1] == str(ctx["stage_dir"] / "footprint.png")  # output_path
+    assert call.kwargs["types"] == ["Fire"]
+
+
+def test_footprint_blank_false_when_levitates_missing(ctx):
+    main(["--description", "fire lizard"])
+    assert ctx["footprint"].call_args.kwargs["blank"] is False
+
+
+def test_footprint_blank_true_when_levitates(ctx):
+    ctx["gen"].return_value = [_STAGE_LEVITATE]
+    main(["--description", "fire lizard"])
+    assert ctx["footprint"].call_args.kwargs["blank"] is True
+
+
+def test_footprint_size_fraction_single_form_is_point_nine(ctx):
+    main(["--description", "fire lizard"])
+    assert ctx["footprint"].call_args.kwargs["size_fraction"] == 0.9
+
+
+def test_footprint_size_fraction_mapping_across_line(ctx_line):
+    main(["--description", "fire lizard", "--mode", "line"])
+    fractions = [c.kwargs["size_fraction"] for c in ctx_line["footprint"].call_args_list]
+    assert fractions == [0.6, 0.75, 0.9]
+
+
+def test_footprint_failure_warns_but_does_not_exit(ctx, capsys):
+    ctx["footprint"].side_effect = RuntimeError("footprint crash")
+    main(["--description", "fire lizard"])   # must not raise
+    err = capsys.readouterr().err
+    assert "Warning: footprint generation failed for Flamburr" in err
+    # The run still proceeds to the export_ini loop / normal completion.
+    ctx["export"].assert_called_once()

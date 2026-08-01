@@ -18,6 +18,7 @@ from fakemon_forge.sprites import (
     make_img2img_pipeline,
 )
 from fakemon_forge.writer import write_output
+from fakemon_forge.footprint import generate_footprint
 from fakemon_forge.export_ini import export_ini
 
 
@@ -131,6 +132,28 @@ def main(argv=None):
         except Exception as exc:
             print(
                 f"Warning: spritesheet stitching failed for {stage['name']}: {exc}",
+                file=sys.stderr,
+            )
+
+        # Footprint size scales with the stage's position in a 3-stage line;
+        # single forms (any tier) always use the full-size footprint.
+        if len(stages) == 3:
+            size_fraction = {1: 0.6, 2: 0.75, 3: 0.9}.get(stage["stage"], 0.9)
+        else:
+            size_fraction = 0.9
+
+        footprint_path = str(stage_dir / "footprint.png")
+        try:
+            generate_footprint(
+                sprite_path,
+                footprint_path,
+                types=stage["types"],
+                size_fraction=size_fraction,
+                blank=stage.get("levitates", False),
+            )
+        except Exception as exc:
+            print(
+                f"Warning: footprint generation failed for {stage['name']}: {exc}",
                 file=sys.stderr,
             )
 
