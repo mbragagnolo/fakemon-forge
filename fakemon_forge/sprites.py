@@ -537,7 +537,7 @@ def stitch_spritesheet(stage_dir: str, output_path: str, *, cell_size: int = 64)
     """Stitch a stage's six sprite views into one 4x2 sheet of GBA-sized cells.
 
     The canvas (including the two unused cells) is filled with ``_KEY_COLOR``
-    so a ROM tool can key transparency off the whole sheet. A missing view
+    so a downstream tool can key transparency off the whole sheet. A missing view
     leaves its cell on the key rather than failing — mirroring how sprite
     generation degrades per-view. The individual views are kept at the native
     SD render size (``_SPRITE_SIZE``), so the default 64px cell is a **single**

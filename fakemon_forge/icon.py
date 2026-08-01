@@ -18,7 +18,7 @@ from fakemon_forge.sprites import _KEY_COLOR, _KEY_TOLERANCE, _rgb_distance
 
 # Party-menu icon background — an *opaque* teal-green that dominates the image
 # and is forced onto palette index 0 (unlike the sprites' transparency key,
-# which downstream ROM tools alpha-key against, the icon background is a normal
+# which downstream tools alpha-key against, the icon background is a normal
 # opaque colour). Value measured from the reference Venusaur icon.
 _ICON_BG_COLOR = (96, 152, 128)
 # Icon frame size — two of these stack vertically into the 32x64 output.
@@ -30,7 +30,7 @@ _MAX_ICON_CREATURE_COLORS = 15
 
 # NOTE: this is a *per-mon* palette (up to 15 colours quantized from this render
 # plus teal at index 0). Authentic Gen-3 instead shares 3 fixed palettes across
-# every species and ROM-insertion tools remap on import — so do NOT "fix" this
+# every species and downstream tools remap on import — so do NOT "fix" this
 # into shared fixed palettes; per-mon adaptive palettes are the intended output.
 
 

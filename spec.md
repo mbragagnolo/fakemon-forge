@@ -40,7 +40,7 @@ become consistent for free; no shiny-path change is required.
 ### Explicitly out of scope
 
 - **`.ini` / writer changes** — verified unnecessary (as in the prior slices).
-  `export_ini` emits ROM pointer fields, `writer.py` writes only
+  `export_ini` emits Gen 3 data fields, `writer.py` writes only
   `stats.json` / `entry.md`; neither references sprite filenames.
 - **The img2img call itself** — the pipeline invocation (`_run_img2img`),
   `strength=0.65`, and `extra_tags=["backside"]` are unchanged. Only the
@@ -312,7 +312,7 @@ code/tests/docs); **[confirmed]** items are grounded in the codebase.
   `sprite_shiny.png` / `sprite_frame2_shiny.png` with **no** change to the shiny
   blocks (the back shiny is already `generate_shiny(back_path, …)`).
 - **[confirmed]** `export_ini` / `writer.py` need no changes — they reference no
-  sprite files (ROM pointer fields / `stats.json` + `entry.md`).
+  sprite files (Gen 3 data fields / `stats.json` + `entry.md`).
 - **[confirmed]** Anything calling `generate_sprite_img2img` triggers a real
   `import torch` (via `_run_img2img` → `_make_generator`) and is therefore an
   `ml` test; the pure palette/shiny assertions in `test_sprites.py` must call

@@ -10,3 +10,4 @@ build/
 .claude/settings.local.json
 models/
 test_sprite.png
+*.gba

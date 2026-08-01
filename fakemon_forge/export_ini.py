@@ -1,4 +1,4 @@
-"""Export a Fakemon stage directory to a GBA ROM hack .ini file."""
+"""Export a Fakemon stage directory to a Gen 3-style .ini data file."""
 
 import hashlib
 import json
