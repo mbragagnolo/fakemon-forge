@@ -2,7 +2,7 @@ import json
 import pytest
 from unittest.mock import MagicMock, patch
 
-from fakemon_forge.generator import generate_fakemon
+from fakemon_forge.generator import generate_fakemon, _SYSTEM_PROMPT
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -287,3 +287,15 @@ def test_single_mode_does_not_mention_evo_progression():
     generate_fakemon("fire lizard", "single", client=client)
     text = _get_prompt_text(client)
     assert "juvenile" not in text.lower() and "adolescent" not in text.lower()
+
+
+# ---------------------------------------------------------------------------
+# levitates field in system prompt
+# ---------------------------------------------------------------------------
+
+def test_system_prompt_mentions_levitates():
+    assert "levitates" in _SYSTEM_PROMPT
+
+
+def test_system_prompt_levitates_defines_never_touches_ground():
+    assert "ground" in _SYSTEM_PROMPT.lower()

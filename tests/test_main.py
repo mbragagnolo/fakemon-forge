@@ -3,7 +3,7 @@ import pytest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from fakemon_forge.main import main
+from fakemon_forge.main import main, _CHIBI_TAGS
 
 # ---------------------------------------------------------------------------
 # Shared stage data
@@ -16,6 +16,9 @@ _STAGE_1 = {
 }
 _STAGE_2 = {**_STAGE_1, "name": "Flamburro", "stage": 2, "pokedex_entry": "Grows bolder."}
 _STAGE_3 = {**_STAGE_1, "name": "Flamburron", "stage": 3, "pokedex_entry": "Melts rock."}
+
+# A single form that levitates, for exercising blank=True footprints.
+_STAGE_LEVITATE = {**_STAGE_1, "name": "Floatburr", "levitates": True}
 
 
 # ---------------------------------------------------------------------------
@@ -42,6 +45,9 @@ def ctx(tmp_path, monkeypatch):
         patch("fakemon_forge.main.generate_frame2")                as m_frame2,
         patch("fakemon_forge.main.generate_shiny")                 as m_shiny,
         patch("fakemon_forge.main.stitch_spritesheet")             as m_stitch,
+        patch("fakemon_forge.main.generate_footprint")             as m_footprint,
+        patch("fakemon_forge.main.generate_icon")                  as m_icon,
+        patch("fakemon_forge.main.generate_cry")                   as m_cry,
         patch("fakemon_forge.main.write_output", return_value=[stage_dir]) as m_write,
         patch("fakemon_forge.main.export_ini")                     as m_export,
     ):
@@ -50,6 +56,9 @@ def ctx(tmp_path, monkeypatch):
             "t2i": m_t2i, "i2i": m_i2i, "make_i2i": m_make_i2i,
             "sprite": m_sprite, "sprite_i2i": m_sprite_i2i,
             "frame2": m_frame2, "shiny": m_shiny, "stitch": m_stitch,
+            "footprint": m_footprint,
+            "icon": m_icon,
+            "cry": m_cry,
             "write": m_write, "export": m_export, "stage_dir": stage_dir,
         }
 
@@ -77,11 +86,15 @@ def ctx_line(tmp_path, monkeypatch):
         patch("fakemon_forge.main.generate_frame2")           as m_frame2,
         patch("fakemon_forge.main.generate_shiny")            as m_shiny,
         patch("fakemon_forge.main.stitch_spritesheet")        as m_stitch,
+        patch("fakemon_forge.main.generate_footprint")        as m_footprint,
+        patch("fakemon_forge.main.generate_icon")             as m_icon,
+        patch("fakemon_forge.main.generate_cry")              as m_cry,
         patch("fakemon_forge.main.write_output", return_value=dirs),
         patch("fakemon_forge.main.export_ini"),
     ):
         yield {"sprite": m_sprite, "frame2": m_frame2, "shiny": m_shiny,
-               "stitch": m_stitch, "dirs": dirs}
+               "stitch": m_stitch, "footprint": m_footprint,
+               "icon": m_icon, "cry": m_cry, "dirs": dirs}
 
 
 # ---------------------------------------------------------------------------
@@ -120,8 +133,12 @@ def test_txt2img_path_uses_txt2img_pipeline(ctx):
 def test_txt2img_path_calls_generate_sprite(ctx):
     main(["--description", "fire lizard"])
     ctx["sprite"].assert_called_once()
-    ctx["sprite_i2i"].assert_called_once()   # back sprite only
-    assert ctx["sprite_i2i"].call_args.kwargs["extra_tags"] == ["backside"]
+    # txt2img path now has 2 img2img calls per stage: back + chibi.
+    calls = ctx["sprite_i2i"].call_args_list
+    back = [c for c in calls if c.kwargs.get("extra_tags") == ["backside"]]
+    chibi = [c for c in calls if c.kwargs.get("extra_tags") == _CHIBI_TAGS]
+    assert len(back) == 1
+    assert len(chibi) == 1
 
 
 def test_txt2img_sprite_called_with_user_description(ctx):
@@ -152,7 +169,7 @@ def test_img2img_path_calls_generate_sprite_img2img(ctx, tmp_path):
     img = tmp_path / "drawing.png"
     img.write_bytes(b"\x89PNG\r\n")
     main(["--image", str(img), "--description", "fire lizard"])
-    assert ctx["sprite_i2i"].call_count == 2   # front + back sprite
+    assert ctx["sprite_i2i"].call_count == 3   # front + chibi + back sprite
     ctx["sprite"].assert_not_called()
 
 
@@ -177,7 +194,8 @@ def test_img2img_vision_image_path_passed(ctx, tmp_path):
 def test_txt2img_back_sprite_reference_is_frame1(ctx):
     """The back-sprite call locks to frame 1's palette (sprite.png)."""
     main(["--description", "fire lizard"])
-    back_call = ctx["sprite_i2i"].call_args   # only one img2img call in txt2img path
+    calls = ctx["sprite_i2i"].call_args_list
+    back_call = next(c for c in calls if c.kwargs.get("extra_tags") == ["backside"])
     assert back_call.kwargs["reference_path"] == str(ctx["stage_dir"] / "sprite.png")
 
 
@@ -189,14 +207,16 @@ def test_img2img_back_sprite_inits_from_front_sprite(ctx, tmp_path):
     img.write_bytes(b"\x89PNG\r\n")
     main(["--image", str(img), "--description", "fire lizard"])
 
-    # Two img2img calls: the front (no reference_path) and the back (locked).
+    # Three img2img calls: front, chibi, and back. The chibi call also has
+    # reference_path=None (like the front), so distinguish by extra_tags.
     calls = ctx["sprite_i2i"].call_args_list
-    assert len(calls) == 2
-    front = [c for c in calls if c.kwargs.get("reference_path") is None]
-    back = [c for c in calls if c.kwargs.get("reference_path") is not None]
+    assert len(calls) == 3
+    front = [c for c in calls if c.kwargs.get("extra_tags") is None]
+    back = [c for c in calls if c.kwargs.get("extra_tags") == ["backside"]]
     assert len(front) == 1 and len(back) == 1
 
     assert front[0].args[2] == str(img)   # front still seeds from the drawing
+    assert front[0].kwargs.get("reference_path") is None
     back_call = back[0]
     assert back_call.args[2] == str(ctx["stage_dir"] / "sprite.png")   # init = front sprite
     assert back_call.kwargs["reference_path"] == str(ctx["stage_dir"] / "sprite.png")
@@ -323,6 +343,18 @@ def test_sprite_failure_warning_includes_name(ctx, capsys):
     assert "Flamburr" in capsys.readouterr().err
 
 
+def test_front_sprite_failure_skips_chibi_and_icon(ctx):
+    """When the front sprite fails the stage continues past the icon block, so
+    neither the chibi render nor the icon runs against a missing sprite.png."""
+    ctx["sprite"].side_effect = RuntimeError("pipeline crash")
+    main(["--description", "fire lizard"])
+    # No chibi img2img render is attempted for the failed stage.
+    chibi = [c for c in ctx["sprite_i2i"].call_args_list
+             if c.kwargs.get("extra_tags") == _CHIBI_TAGS]
+    assert chibi == []
+    ctx["icon"].assert_not_called()
+
+
 # ---------------------------------------------------------------------------
 # Output path
 # ---------------------------------------------------------------------------
@@ -359,6 +391,89 @@ def test_tier_legendary_passed_to_llm(ctx):
 
 
 # ---------------------------------------------------------------------------
+# Party-menu icon (sprite_small.png)
+# ---------------------------------------------------------------------------
+
+def test_icon_generated_once_per_stage(ctx):
+    main(["--description", "fire lizard"])
+    ctx["icon"].assert_called_once()
+    # Happy path: the icon is now derived from the chibi render, not sprite.png.
+    assert ctx["icon"].call_args.args == (
+        str(ctx["stage_dir"] / "sprite_chibi.png"),
+        str(ctx["stage_dir"] / "sprite_small.png"),
+    )
+
+
+def test_chibi_render_feeds_the_icon(ctx):
+    """Happy path: a chibi img2img render is produced from sprite.png and its
+    output feeds generate_icon."""
+    main(["--description", "fire lizard"])
+
+    calls = ctx["sprite_i2i"].call_args_list
+    chibi = [c for c in calls if c.kwargs.get("extra_tags") == _CHIBI_TAGS]
+    assert len(chibi) == 1
+    chibi_call = chibi[0]
+    assert chibi_call.args[2] == str(ctx["stage_dir"] / "sprite.png")        # init image
+    assert chibi_call.args[3] == str(ctx["stage_dir"] / "sprite_chibi.png")  # output
+    assert chibi_call.kwargs.get("reference_path") is None                   # own palette
+    assert "seed" in chibi_call.kwargs
+
+    ctx["icon"].assert_called_once()
+    assert ctx["icon"].call_args.args == (
+        str(ctx["stage_dir"] / "sprite_chibi.png"),
+        str(ctx["stage_dir"] / "sprite_small.png"),
+    )
+
+
+def test_chibi_render_failure_falls_back_to_plain_downscale(ctx, capsys):
+    """If the chibi img2img render raises, the icon is built from sprite.png
+    (plain downscale), silently, and the stage keeps going."""
+    def _side_effect(*args, **kwargs):
+        # Fail only the chibi render (output path ends in sprite_chibi.png).
+        if args[3].endswith("sprite_chibi.png"):
+            raise RuntimeError("chibi crash")
+        return MagicMock()
+
+    ctx["sprite_i2i"].side_effect = _side_effect
+    main(["--description", "fire lizard"])   # must not raise
+
+    ctx["icon"].assert_called_once()
+    assert ctx["icon"].call_args.args == (
+        str(ctx["stage_dir"] / "sprite.png"),
+        str(ctx["stage_dir"] / "sprite_small.png"),
+    )
+    # A failed enhancement is silent — no icon warning printed.
+    assert "icon generation failed" not in capsys.readouterr().err
+    # The stage does not abort: the spritesheet is still stitched.
+    ctx["stitch"].assert_called_once()
+
+
+def test_icon_generated_three_times_in_line_mode(ctx_line):
+    main(["--description", "fire lizard", "--mode", "line"])
+    assert ctx_line["icon"].call_count == 3
+
+
+def test_icon_failure_warns_but_does_not_exit(ctx, capsys):
+    ctx["icon"].side_effect = RuntimeError("icon crash")
+    main(["--description", "fire lizard"])   # must not raise
+    err = capsys.readouterr().err
+    assert "Warning" in err
+    assert "Flamburr" in err
+    # an icon failure must NOT skip the rest of the stage: a later block in the
+    # same stage still runs (the spritesheet is still stitched).
+    ctx["stitch"].assert_called_once()
+
+
+def test_icon_not_added_to_spritesheet_layout():
+    from fakemon_forge.sprites import _SHEET_LAYOUT
+    names = {name for name, *_ in _SHEET_LAYOUT}
+    assert len(_SHEET_LAYOUT) == 6
+    assert "sprite_small.png" not in names
+    # The intermediate chibi render is likewise never stitched into the sheet.
+    assert "sprite_chibi.png" not in names
+
+
+# ---------------------------------------------------------------------------
 # Spritesheet stitching
 # ---------------------------------------------------------------------------
 
@@ -380,3 +495,98 @@ def test_spritesheet_failure_warns_but_does_not_exit(ctx, capsys):
     main(["--description", "fire lizard"])   # must not raise
     err = capsys.readouterr().err
     assert "Warning" in err and "Flamburr" in err
+
+
+# ---------------------------------------------------------------------------
+# Footprint generation
+# ---------------------------------------------------------------------------
+
+def test_footprint_generated_once_per_single_stage(ctx):
+    main(["--description", "fire lizard"])
+    ctx["footprint"].assert_called_once()
+
+
+def test_footprint_generated_once_per_stage_in_line_mode(ctx_line):
+    main(["--description", "fire lizard", "--mode", "line"])
+    assert ctx_line["footprint"].call_count == 3
+
+
+def test_footprint_paths_and_types(ctx):
+    main(["--description", "fire lizard"])
+    call = ctx["footprint"].call_args
+    assert call.args[0] == str(ctx["stage_dir"] / "sprite.png")     # sprite_path
+    assert call.args[1] == str(ctx["stage_dir"] / "footprint.png")  # output_path
+    assert call.kwargs["types"] == ["Fire"]
+
+
+def test_footprint_blank_false_when_levitates_missing(ctx):
+    main(["--description", "fire lizard"])
+    assert ctx["footprint"].call_args.kwargs["blank"] is False
+
+
+def test_footprint_blank_true_when_levitates(ctx):
+    ctx["gen"].return_value = [_STAGE_LEVITATE]
+    main(["--description", "fire lizard"])
+    assert ctx["footprint"].call_args.kwargs["blank"] is True
+
+
+def test_footprint_size_fraction_single_form_is_point_nine(ctx):
+    main(["--description", "fire lizard"])
+    assert ctx["footprint"].call_args.kwargs["size_fraction"] == 0.9
+
+
+def test_footprint_size_fraction_mapping_across_line(ctx_line):
+    main(["--description", "fire lizard", "--mode", "line"])
+    fractions = [c.kwargs["size_fraction"] for c in ctx_line["footprint"].call_args_list]
+    assert fractions == [0.6, 0.75, 0.9]
+
+
+def test_footprint_failure_warns_but_does_not_exit(ctx, capsys):
+    ctx["footprint"].side_effect = RuntimeError("footprint crash")
+    main(["--description", "fire lizard"])   # must not raise
+    err = capsys.readouterr().err
+    assert "Warning: footprint generation failed for Flamburr" in err
+    # The run still proceeds to the export_ini loop / normal completion.
+    ctx["export"].assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Cry generation (cry.wav per stage)
+# ---------------------------------------------------------------------------
+
+def test_cry_generated_once_per_stage(ctx):
+    main(["--description", "fire lizard"])
+    ctx["cry"].assert_called_once()
+    args = ctx["cry"].call_args.args
+    assert args[0] == "Flamburr"                                    # line_name = stage 1's name
+    assert args[1] == 1                                             # stage int
+    assert args[2] == ["Fire"]                                      # types
+    assert args[3] == str(ctx["stage_dir"] / "cry.wav")            # output_path
+
+
+def test_cry_generated_per_stage_in_line_mode(ctx_line):
+    main(["--description", "fire lizard", "--mode", "line"])
+    assert ctx_line["cry"].call_count == 3
+    calls = ctx_line["cry"].call_args_list
+    for call, stage_dir, stage_int in zip(calls, ctx_line["dirs"], (1, 2, 3)):
+        assert call.args[0] == "Flamburr"                          # whole line shares stage 1's name
+        assert call.args[1] == stage_int
+        assert call.args[3] == str(stage_dir / "cry.wav")
+
+
+def test_cry_generated_even_when_sprite_fails(ctx):
+    """Audio does not depend on the images: a sprite failure (which hits the
+    sprite block's `continue`) must not skip cry generation."""
+    ctx["sprite"].side_effect = RuntimeError("pipeline crash")
+    main(["--description", "fire lizard"])   # must not raise
+    ctx["cry"].assert_called_once()
+
+
+def test_cry_failure_warns_but_does_not_exit(ctx, capsys):
+    ctx["cry"].side_effect = RuntimeError("cry crash")
+    main(["--description", "fire lizard"])   # must not raise
+    err = capsys.readouterr().err
+    assert "Warning" in err
+    assert "Flamburr" in err
+    # cry failure is isolated: the sprite block still runs afterward.
+    ctx["sprite"].assert_called_once()

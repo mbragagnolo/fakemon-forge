@@ -17,8 +17,17 @@ from fakemon_forge.sprites import (
     load_img2img_pipeline,
     make_img2img_pipeline,
 )
+from fakemon_forge.icon import generate_icon
 from fakemon_forge.writer import write_output
+from fakemon_forge.footprint import generate_footprint
 from fakemon_forge.export_ini import export_ini
+from fakemon_forge.cries import generate_cry
+
+
+# Chibi caricature tags for the party-menu icon's img2img pass. Prototype
+# tunable: needs a GPU spike to confirm the LoRA actually produces caricature
+# proportions (big head / small body) from img2img before committing to these.
+_CHIBI_TAGS = ["chibi", "big head", "small body"]
 
 
 def main(argv=None):
@@ -56,6 +65,21 @@ def main(argv=None):
     for stage, stage_dir in zip(stages, stage_dirs):
         seed = random.randint(0, 2**32 - 1)
 
+        # Audio does not depend on the sprites — generate it before the sprite
+        # block so a sprite failure (which `continue`s) can't skip the cry.
+        try:
+            generate_cry(
+                stages[0]["name"],   # line_name — stage 1's name, shared by the whole line
+                stage["stage"],
+                stage["types"],
+                str(stage_dir / "cry.wav"),
+            )
+        except Exception as exc:
+            print(
+                f"Warning: cry generation failed for {stage['name']}: {exc}",
+                file=sys.stderr,
+            )
+
         sprite_path = str(stage_dir / "sprite.png")
         try:
             if args.image:
@@ -71,6 +95,30 @@ def main(argv=None):
                 file=sys.stderr,
             )
             continue
+
+        small_path = str(stage_dir / "sprite_small.png")
+        chibi_path = str(stage_dir / "sprite_chibi.png")
+        try:
+            try:
+                # Chibi caricature enhancement: render a big-head/small-body
+                # variant of the front sprite, then downscale THAT into the
+                # party-menu icon so it reads like a Gen-3 caricature.
+                generate_sprite_img2img(
+                    stage["sprite_prompt"], stage["types"], sprite_path, chibi_path,
+                    pipeline=img2img_pipeline, extra_tags=_CHIBI_TAGS, seed=seed,
+                )
+            except Exception:
+                # Enhancement is optional: fall back to the plain downscale of
+                # sprite.png (exactly today's behavior). No warning.
+                icon_source = sprite_path
+            else:
+                icon_source = chibi_path
+            generate_icon(icon_source, small_path)
+        except Exception as exc:
+            print(
+                f"Warning: icon generation failed for {stage['name']}: {exc}",
+                file=sys.stderr,
+            )
 
         back_path = str(stage_dir / "sprite_back.png")
         try:
@@ -131,6 +179,28 @@ def main(argv=None):
         except Exception as exc:
             print(
                 f"Warning: spritesheet stitching failed for {stage['name']}: {exc}",
+                file=sys.stderr,
+            )
+
+        # Footprint size scales with the stage's position in a 3-stage line;
+        # single forms (any tier) always use the full-size footprint.
+        if len(stages) == 3:
+            size_fraction = {1: 0.6, 2: 0.75, 3: 0.9}.get(stage["stage"], 0.9)
+        else:
+            size_fraction = 0.9
+
+        footprint_path = str(stage_dir / "footprint.png")
+        try:
+            generate_footprint(
+                sprite_path,
+                footprint_path,
+                types=stage["types"],
+                size_fraction=size_fraction,
+                blank=stage.get("levitates", False),
+            )
+        except Exception as exc:
+            print(
+                f"Warning: footprint generation failed for {stage['name']}: {exc}",
                 file=sys.stderr,
             )
 
