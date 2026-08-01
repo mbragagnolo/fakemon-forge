@@ -47,6 +47,7 @@ def ctx(tmp_path, monkeypatch):
         patch("fakemon_forge.main.stitch_spritesheet")             as m_stitch,
         patch("fakemon_forge.main.generate_footprint")             as m_footprint,
         patch("fakemon_forge.main.generate_icon")                  as m_icon,
+        patch("fakemon_forge.main.generate_cry")                   as m_cry,
         patch("fakemon_forge.main.write_output", return_value=[stage_dir]) as m_write,
         patch("fakemon_forge.main.export_ini")                     as m_export,
     ):
@@ -57,6 +58,7 @@ def ctx(tmp_path, monkeypatch):
             "frame2": m_frame2, "shiny": m_shiny, "stitch": m_stitch,
             "footprint": m_footprint,
             "icon": m_icon,
+            "cry": m_cry,
             "write": m_write, "export": m_export, "stage_dir": stage_dir,
         }
 
@@ -86,12 +88,13 @@ def ctx_line(tmp_path, monkeypatch):
         patch("fakemon_forge.main.stitch_spritesheet")        as m_stitch,
         patch("fakemon_forge.main.generate_footprint")        as m_footprint,
         patch("fakemon_forge.main.generate_icon")             as m_icon,
+        patch("fakemon_forge.main.generate_cry")              as m_cry,
         patch("fakemon_forge.main.write_output", return_value=dirs),
         patch("fakemon_forge.main.export_ini"),
     ):
         yield {"sprite": m_sprite, "frame2": m_frame2, "shiny": m_shiny,
                "stitch": m_stitch, "footprint": m_footprint,
-               "icon": m_icon, "dirs": dirs}
+               "icon": m_icon, "cry": m_cry, "dirs": dirs}
 
 
 # ---------------------------------------------------------------------------
@@ -545,3 +548,45 @@ def test_footprint_failure_warns_but_does_not_exit(ctx, capsys):
     assert "Warning: footprint generation failed for Flamburr" in err
     # The run still proceeds to the export_ini loop / normal completion.
     ctx["export"].assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Cry generation (cry.wav per stage)
+# ---------------------------------------------------------------------------
+
+def test_cry_generated_once_per_stage(ctx):
+    main(["--description", "fire lizard"])
+    ctx["cry"].assert_called_once()
+    args = ctx["cry"].call_args.args
+    assert args[0] == "Flamburr"                                    # line_name = stage 1's name
+    assert args[1] == 1                                             # stage int
+    assert args[2] == ["Fire"]                                      # types
+    assert args[3] == str(ctx["stage_dir"] / "cry.wav")            # output_path
+
+
+def test_cry_generated_per_stage_in_line_mode(ctx_line):
+    main(["--description", "fire lizard", "--mode", "line"])
+    assert ctx_line["cry"].call_count == 3
+    calls = ctx_line["cry"].call_args_list
+    for call, stage_dir, stage_int in zip(calls, ctx_line["dirs"], (1, 2, 3)):
+        assert call.args[0] == "Flamburr"                          # whole line shares stage 1's name
+        assert call.args[1] == stage_int
+        assert call.args[3] == str(stage_dir / "cry.wav")
+
+
+def test_cry_generated_even_when_sprite_fails(ctx):
+    """Audio does not depend on the images: a sprite failure (which hits the
+    sprite block's `continue`) must not skip cry generation."""
+    ctx["sprite"].side_effect = RuntimeError("pipeline crash")
+    main(["--description", "fire lizard"])   # must not raise
+    ctx["cry"].assert_called_once()
+
+
+def test_cry_failure_warns_but_does_not_exit(ctx, capsys):
+    ctx["cry"].side_effect = RuntimeError("cry crash")
+    main(["--description", "fire lizard"])   # must not raise
+    err = capsys.readouterr().err
+    assert "Warning" in err
+    assert "Flamburr" in err
+    # cry failure is isolated: the sprite block still runs afterward.
+    ctx["sprite"].assert_called_once()
