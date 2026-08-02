@@ -194,13 +194,18 @@ def _normalize_category(raw, types: list[str]) -> str:
     """Uppercase/truncate/strip-trailing-"POKEMON" for the Pokédex category
     noun; falls back to the primary type word when raw is missing, empty,
     non-str, or cleans away to nothing. Truncation is immediate — unlike
-    ``name``, an over-long category never triggers a retry."""
-    if not isinstance(raw, str) or not raw:
+    ``name``, an over-long category never triggers a retry.
+
+    Whitespace is trimmed on the way in (rstrip only, so the leading space of
+    a bare " POKEMON" still reads as the suffix token) and again after
+    truncation, which would otherwise emit a dangling "GIANT SEED ".
+    """
+    if not isinstance(raw, str):
         return types[0].upper()
-    cleaned = "".join(ch for ch in raw if ch in _ALLOWED_NAME_CHARS)
+    cleaned = "".join(ch for ch in raw if ch in _ALLOWED_NAME_CHARS).rstrip()
     if cleaned.upper().endswith(" POKEMON"):
         cleaned = cleaned[: -len(" POKEMON")]
-    result = cleaned.upper()[:_MAX_CATEGORY_LEN]
+    result = cleaned.upper().strip()[:_MAX_CATEGORY_LEN].strip()
     return result or types[0].upper()
 
 

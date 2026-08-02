@@ -990,12 +990,13 @@ def test_normalize_category_over_eleven_chars_truncated_no_retry():
     assert len(result[0]["category"]) == 11
 
 
-def test_normalize_category_truncation_makes_no_api_call():
-    client = MagicMock()
+def test_over_long_category_does_not_trigger_corrective_retry():
+    """An over-long name costs a retry; an over-long category never does."""
     stage = {**_STAGE_1, "category": "WAY TOO LONG NOUN HERE"}
-    with patch("fakemon_forge.generator.Mistral", return_value=client):
-        _normalize([stage], "single", "standard")
-    client.chat.complete.assert_not_called()
+    client = _make_client(json.dumps([stage]))
+    result = generate_fakemon("fire lizard", "single", client=client)
+    assert client.chat.complete.call_count == 1
+    assert result[0]["category"] == "WAY TOO LON"
 
 
 def test_normalize_category_strips_illegal_chars():
@@ -1056,6 +1057,27 @@ def test_normalize_category_all_illegal_chars_falls_back_to_type_word():
     stage = {**_STAGE_1, "category": "\n\t"}
     result = _normalize([stage], "single", "standard")
     assert result[0]["category"] == "FIRE"
+
+
+@pytest.mark.parametrize("blank", ["   ", "\n \t", " POKEMON"])
+def test_normalize_category_blank_after_cleaning_falls_back_to_type_word(blank):
+    """Whitespace is not a usable noun — a blank category never survives."""
+    stage = {**_STAGE_1, "category": blank}
+    result = _normalize([stage], "single", "standard")
+    assert result[0]["category"] == "FIRE"
+
+
+def test_normalize_category_truncation_does_not_leave_trailing_space():
+    stage = {**_STAGE_1, "category": "GIANT SEED PODS"}
+    result = _normalize([stage], "single", "standard")
+    assert result[0]["category"] == "GIANT SEED"
+
+
+def test_normalize_category_strips_trailing_pokemon_despite_stray_spaces():
+    """A stray space must not defeat the suffix check and leave "POKEMO"."""
+    stage = {**_STAGE_1, "category": "Seed Pokemon "}
+    result = _normalize([stage], "single", "standard")
+    assert result[0]["category"] == "SEED"
 
 
 def test_normalize_category_uses_second_type_never_used():

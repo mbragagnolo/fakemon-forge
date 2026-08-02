@@ -1,0 +1,5 @@
+- [ ] Generate a Fakemon (`fakemon-forge "..."`) and confirm `output/<Name>/stats.json` has a `category` key holding an uppercase noun of ≤ 11 chars (e.g. `"SEED"`), not the type word.
+- [ ] Generate a line (`--mode line`) and confirm every stage's `stats.json` carries its own `category`.
+- [ ] Confirm the run makes a single API call when the model returns an over-long category — no corrective-retry message about the category in the logs.
+- [ ] Hand-edit a `stats.json`-style stage dict with no `category` and run `write_output` on it; the written `stats.json` should show `"category": ""`.
+- [ ] Confirm `export_ini.py` output is unchanged — `PokedexType=` still reads `<TYPE> POKEMON` (wiring the new field into the INI is slice 5, out of scope here).
