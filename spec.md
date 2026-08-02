@@ -1,204 +1,320 @@
-# Spec: `category` schema field (Pokédex category noun)
+# Spec: Lock the back sprite to the shared front-frame palette + cross-view shiny consistency
 
 ## Summary
 
-Add a `category` field to generated Fakemon stages — the Pokédex category
-noun (e.g. `"SEED"`, `"MOUSE"`, `"TINY TURTLE"`) that describes what a
-creature *is*, distinct from its type. Today no such field exists, so
-downstream consumers (e.g. `export_ini.py`'s `PokedexType` line) fall back to
-the bare primary-type word, and every species ends up categorised `"WATER"`
-or `"FIRE"`. This slice adds the field to the LLM prompt, enforces its
-contract in `generator._normalize`, and persists it (with an empty-string
-default) in `writer.py`. Wiring `category` into any consumer (e.g.
-`export_ini.py`) is out of scope — this slice only produces and persists the
-field.
+`fakemon-forge` already produces, per stage, a front sprite `sprite.png` and a
+second front-animation frame `sprite_frame2.png` that **share one exact
+16-colour palette** (frame 2 is palette-locked to frame 1 via
+`quantize_to_reference` / `build_frame2` in `fakemon_forge/sprites.py`), plus
+shiny variants. The **back sprite** (`sprite_back.png`) is the last view still
+carrying its **own adaptive palette**: it is produced by
+`generate_sprite_img2img`, whose final step is `postprocess(candidate)` — an
+*adaptive* 16-colour `quantize` that builds a fresh palette every call.
 
-Done: `generate_fakemon(...)` returns stages carrying an uppercase `category`
-of ≤ 11 valid Gen 3 chars (or the uppercased primary-type word when the LLM
-omits/mangles it), `write_output(...)` persists it to `stats.json` with a
-`""` default, and `pytest` passes with no new `ml`-marked tests.
+This slice (4/4 of #1) brings the back sprite into the **same shared palette**
+as the two front frames, completing the authentic Gen-3 model of *one palette
+for the whole sprite set, one rotated palette for the whole shiny set*. It has
+two parts:
+
+1. **`sprites.py`** — give the back-sprite generation path a way to re-quantize
+   its img2img result against a reference `P`-mode image's exact palette
+   (frame 1) instead of an adaptive palette, by adding an optional
+   `reference_path` parameter to `generate_sprite_img2img`. When
+   `reference_path` is given, the raw img2img candidate is locked with the
+   existing `quantize_to_reference(candidate, reference)` rather than
+   `postprocess`. When it is omitted, behaviour is byte-for-byte unchanged
+   (adaptive `postprocess`), so the front-sprite img2img path and all existing
+   tests are untouched.
+2. **`main.py`** — pass `sprite.png` (frame 1, the just-written front sprite) as
+   the back sprite's `reference_path`, so the back sprite locks to frame 1's
+   palette regardless of which image seeded the img2img (the user's drawing in
+   the img2img path, `sprite.png` in the txt2img path).
+
+Because the back sprite then shares frame 1's exact palette, and
+`generate_shiny` is name-keyed and **rotates only the palette** (preserving
+achromatic entries), `sprite_back_shiny.png` — already derived via
+`generate_shiny(back_path, …)` — automatically uses the **same rotated palette**
+as `sprite_shiny.png` and `sprite_frame2_shiny.png`. All three views' shinies
+become consistent for free; no shiny-path change is required.
+
+### Explicitly out of scope
+
+- **`.ini` / writer changes** — verified unnecessary (as in the prior slices).
+  `export_ini` emits Gen 3 data fields, `writer.py` writes only
+  `stats.json` / `entry.md`; neither references sprite filenames.
+- **The img2img call itself** — the pipeline invocation (`_run_img2img`),
+  `strength=0.65`, and `extra_tags=["backside"]` are unchanged. Only the
+  post-generation quantization step gains a reference-locked branch.
+- **Recentering / animation-band logic** — the back sprite is a *different view*,
+  not an animation frame of the front, so `build_frame2` /
+  `recenter_to_anchor` / the acceptance band do **not** apply to it. Only the
+  palette is shared; geometry is whatever img2img produced.
+- **Colour-fidelity guarantees** — the back sprite's colours may degrade when
+  they land far from frame 1's 16 colours. Per the issue this is the authentic
+  Gen-3 constraint and is accepted, not mitigated.
 
 ## Inputs
 
-- LLM JSON response per stage: an optional `category` key, expected to be a
-  short string (e.g. `"Seed"`, `"tiny turtle"`), but may be absent, empty,
-  non-string, over-length, or contain illegal characters — same failure
-  modes as `name` today.
-- `stage["types"]`: list of 1–2 type strings, already validated/normalized
-  upstream of `_normalize`'s `category` handling (unchanged by this slice).
+### Changed: `generate_sprite_img2img(prompt, types, image_path, output_path, *, pipeline, extra_tags=None, seed=None, strength=0.8, reference_path=None)`
+
+All existing parameters are unchanged. One new keyword-only parameter is added
+at the end (so existing positional/keyword calls are unaffected):
+
+- `reference_path: str | None = None` (keyword-only) — path to a `P`-mode
+  reference image whose exact 16-colour palette the generated sprite must adopt.
+  When `None` (the default, and every current call except the new back-sprite
+  one), the sprite is quantized adaptively via `postprocess` exactly as today.
+  When set, the raw img2img candidate is locked to that palette via
+  `quantize_to_reference`. **[picked]** name/shape — see Assumptions.
+
+### `main.py` per-stage back-sprite call
+
+No new CLI arguments. Inside the existing
+`for stage, stage_dir in zip(stages, stage_dirs)` loop, the existing back-sprite
+block gains one keyword argument:
+
+- `reference_path = sprite_path` — i.e. `str(stage_dir / "sprite.png")`, the
+  front sprite written earlier in the same loop iteration. This is **always**
+  `sprite.png` (frame 1), independent of `init_image` (which is the user's
+  `args.image` in the img2img path, or `sprite_path` in the txt2img path).
 
 ## Outputs
 
-- Each stage dict returned by `generate_fakemon` / `_normalize` gains a
-  `category` key: an uppercase string, ≤ 11 characters, drawn from the Gen 3
-  charset, with no trailing `" POKEMON"`.
-- `stats.json` written by `write_output` gains a `"category"` key: the
-  stage's `category` if present, else `""`.
+- **`generate_sprite_img2img` with `reference_path` set** → returns `None`; side
+  effect is writing a 96×96 `P`-mode PNG at `output_path` whose palette is
+  byte-for-byte equal to the reference image's palette (guaranteed by
+  `quantize_to_reference`).
+- **`generate_sprite_img2img` with `reference_path=None`** → unchanged: a 96×96
+  `P`-mode PNG with an adaptive ≤16-colour palette (via `postprocess`).
+- **`main`** per stage — the same set of files as today
+  (`sprite.png`, `sprite_frame2.png`, `sprite_frame2_shiny.png`,
+  `sprite_back.png`, `sprite_shiny.png`, `sprite_back_shiny.png`), but now:
+  - `sprite_back.png` shares `sprite.png`'s exact 16-colour palette (was: its
+    own adaptive palette).
+  - `sprite_back_shiny.png` uses the same rotated palette as `sprite_shiny.png`
+    and `sprite_frame2_shiny.png` (automatic consequence; no code change in the
+    shiny blocks).
 
 ## Behavior
 
-### `generator.py`
+### `generate_sprite_img2img(...)` in `sprites.py`
 
-1. **System prompt.** Add a `category` line to `_SYSTEM_PROMPT`'s field list,
-   directly under (or near) the existing `types` line, per the wording given
-   in the issue:
-   ```
-   category – Pokédex category noun in caps, max 11 characters, e.g. "SEED",
-     "MOUSE", "TINY TURTLE". Describes what the creature *is*, not its type —
-     never "FIRE" or "WATER". No trailing "POKEMON".
-   ```
+1. Run the img2img pipeline exactly as today via the existing internal helper
+   `_run_img2img(prompt, types, image_path, pipeline=…, extra_tags=…, seed=…,
+   strength=…)`, obtaining the raw RGB candidate (`result.images[0]`). This step
+   is unchanged.
+2. Quantize the candidate:
+   - If `reference_path is None`: `sprite = postprocess(candidate)` (adaptive
+     palette) — unchanged from today.
+   - Else: open the reference as a `P`-mode image
+     (`Image.open(reference_path)` — the saved front sprite is already `P`-mode;
+     do **not** convert) and `sprite = quantize_to_reference(candidate,
+     reference)`. `quantize_to_reference` already performs the same
+     resize-to-96×96 + colour/contrast enhance pre-steps as `postprocess`, then
+     `.quantize(palette=reference)`, so both branches feed identical input to
+     quantization and differ only in adaptive-vs-fixed palette.
+3. `sprite.save(output_path)` (PNG inferred from extension) — unchanged.
 
-2. **New constant.** `_MAX_CATEGORY_LEN = 11`, kept separate from
-   `_MAX_NAME_LEN = 10` — same numeric family, different budget, not
-   collapsed into one constant.
+The choice is a single branch on `reference_path`; `_run_img2img`,
+`postprocess`, `quantize_to_reference`, and the module constants are reused
+rather than duplicated.
 
-3. **Charset.** Reuse the existing `_ALLOWED_NAME_CHARS` set for `category`
-   (the issue specifies the identical Gen 3 text set already used for
-   names — no new charset constant needed).
+### `main.py` wiring
 
-4. **`_normalize` additions**, per stage, evaluated independently of the
-   existing name-repair logic (order relative to the existing `name` /
-   `abilities_gen3` lines in `_normalize` does not matter functionally):
-   - Read `raw = stage.get("category")`.
-   - **Fallback:** if `raw` is missing, `""` (or empty after cleaning), or
-     not a `str`, set `stage["category"] = stage["types"][0].upper()`.
-   - **Otherwise:**
-     a. Strip illegal characters: keep only characters in
-        `_ALLOWED_NAME_CHARS`.
-     b. Strip a trailing `" POKEMON"` (case-insensitive) if present, so an
-        LLM that ignores the instruction still produces a bare noun. Compare
-        against the cleaned string from step (a).
-     c. Uppercase the result.
-     d. Truncate to `_MAX_CATEGORY_LEN` characters.
-     e. If the result is empty after cleaning/truncation, fall back to
-        `stage["types"][0].upper()` (empty-after-cleaning is equivalent to
-        "no usable category supplied").
-   - This is a pure, single-pass transform — no retry, no interaction with
-     `_name_violations` / `_corrective_message` / the two-attempt API loop.
-     `category` is fixed up unconditionally inside `_normalize`, which
-     already runs only after the retry loop has produced a name-valid
-     `stages` list.
+The existing back-sprite block becomes:
 
-   Suggested helper (naming only — implementation deferred):
-   `_normalize_category(raw, types) -> str`, called from `_normalize` as
-   `stage["category"] = _normalize_category(stage.get("category"), stage["types"])`.
+```
+back_path = str(stage_dir / "sprite_back.png")
+try:
+    init_image = args.image if args.image else sprite_path
+    generate_sprite_img2img(
+        stage["sprite_prompt"], stage["types"], init_image, back_path,
+        pipeline=img2img_pipeline, extra_tags=["backside"], seed=seed,
+        strength=0.65, reference_path=sprite_path,
+    )
+except Exception as exc:
+    print(
+        f"Warning: back sprite generation failed for {stage['name']}: {exc}",
+        file=sys.stderr,
+    )
+```
 
-5. **No change to the retry loop.** `_name_violations`, `_corrective_message`,
-   `_repair_name`, and the `generate_fakemon` retry logic are untouched.
-   `category` never triggers a second API call.
-
-### `writer.py`
-
-- Add `"category"` to `_STATS_DEFAULTS` with default `""`:
-  ```python
-  _STATS_DEFAULTS = {"levitates": False, "height_dm": 5, "weight_hg": 30,
-                      "abilities_gen3": [], "category": ""}
-  ```
-  This follows the existing `levitates` precedent exactly: `_STATS_KEYS`
-  already derives from `_STATS_DEFAULTS` via `*_STATS_DEFAULTS`, and
-  `_write_stats` already does `stage.get(key, fallback)` for every key in
-  `_STATS_DEFAULTS`, so no other code in `writer.py` changes.
-- The writer does **not** compute the `types[0].upper()` fallback itself —
-  that fallback already runs inside `_normalize`, so any stage dict that
-  went through `generate_fakemon` already carries a non-empty `category` by
-  the time it reaches the writer. The `""` default in `writer.py` exists
-  only for hand-built/partial stage dicts (mirroring how `levitates`,
-  `height_dm`, etc. are defaulted for the same reason), not as a second
-  place implementing the fallback rule.
+Only `reference_path=sprite_path` is added. The block still reaches this code
+only after the front-sprite block succeeded (that block `continue`s on failure),
+so `sprite_path` names an existing `P`-mode `sprite.png`. The back-shiny block
+(`generate_shiny(back_path, stage["name"], back_shiny_path)`) is **unchanged** —
+it now inherits the shared palette automatically.
 
 ## Edge cases
 
-- `category` absent entirely → `types[0].upper()`.
-- `category == ""` → `types[0].upper()`.
-- `category` is `None`, an int, a list, etc. → non-`str`, `types[0].upper()`.
-- `category` is only illegal characters (e.g. all emoji) → cleans to `""` →
-  `types[0].upper()`.
-- `category` is exactly 11 characters → passes through unchanged (after
-  case/charset normalization).
-- `category` is 12+ characters → truncated to 11, no retry, no API call
-  (e.g. `"TINY TURTLE"` → `"TINY TURTL"`).
-- `category` given in lowercase or mixed case → uppercased.
-- `category` given as `"Seed Pokemon"` → trailing `" POKEMON"` stripped
-  (case-insensitive) → `"SEED"`.
-- `category` given as `"Seedmon"` or any string that merely *contains*
-  "pokemon" mid-word (not as a trailing `" POKEMON"` token) → left as-is
-  aside from case/charset/length handling; only an exact trailing
-  `" POKEMON"` suffix is stripped.
-- `category` contains illegal characters mixed with legal ones (e.g. a
-  newline or emoji embedded in an otherwise valid noun) → illegal chars
-  stripped, remainder kept (mirrors `_repair_name`'s behavior for names).
-- Truncation and trailing-`" POKEMON"`-stripping can interact: stripping
-  happens before truncation, so a >11-char noun that happens to end in
-  `" POKEMON"` is shortened by the strip first, then truncated only if
-  still too long.
-- `types` list is always non-empty by the time `_normalize` runs (existing
-  invariant from the LLM contract / upstream validation) — `types[0]` is
-  safe to index without a further empty-list guard, consistent with how
-  `footprint.py` and `cries.py` already treat `types[0]` as available
-  (they only guard against an empty list defensively; `_normalize` itself
-  has no such guard for any existing field and this slice doesn't add one).
-- `write_output` called with a hand-built stage dict lacking `category`
-  entirely (e.g. in tests or the `levitates`-precedent-style manual dict) →
-  `stats.json["category"] == ""`.
+- **Front sprite generation failed** → the front-sprite `except` `continue`s to
+  the next stage; the back-sprite block (and its `reference_path`) never runs
+  for that stage, so there is never a missing/absent reference.
+- **img2img returns colours far from frame 1's palette** →
+  `quantize_to_reference` maps each pixel to the nearest of frame 1's 16 colours;
+  the back sprite may look slightly off-palette / posterized. **Accepted** — this
+  is the authentic Gen-3 shared-palette constraint, not a bug.
+- **Back sprite content differs from the front** (it is a rear view) → only the
+  palette is shared, not geometry; no recentering/animation-band logic is applied
+  (that is `build_frame2`'s job for frame 2, not for the back view).
+- **Cross-view shiny consistency** → `sprite.png`, `sprite_frame2.png`, and
+  `sprite_back.png` now share one palette; `generate_shiny` rotates only the
+  palette keyed on `name`, so `sprite_shiny.png`, `sprite_frame2_shiny.png`, and
+  `sprite_back_shiny.png` share one rotated palette automatically.
+- **Line mode (3 stages)** → the back-sprite block is inside the per-stage loop;
+  each stage locks its own back sprite to its own `sprite.png`, and each stage's
+  three shinies stay mutually consistent within that stage.
+- **`reference_path=None` callers** (the front-sprite img2img call, and any other
+  existing caller) → behaviour is identical to today (adaptive `postprocess`).
 
 ## Errors
 
-No new error paths. `category` handling never raises, never calls `sys.exit`,
-and never extends the API retry loop — malformed `category` values are
-silently repaired in `_normalize`, same as the existing `abilities_gen3`
-filtering (which also silently drops/repairs rather than erroring).
+- `generate_sprite_img2img` surfaces exceptions to its caller (it does not
+  swallow them); `main` wraps the back-sprite call in the existing try/except and
+  warns `Warning: back sprite generation failed for {name}: {exc}` — unchanged
+  wording and structure.
+- `quantize_to_reference` raises `ValueError` ("palette-mode reference image") if
+  the reference is not `P`-mode. Because `main` always passes the already-saved
+  `P`-mode `sprite.png`, this only fires on misuse and would be caught by the
+  back-sprite `except`.
+- A missing `reference_path` file (e.g. `sprite.png` never written) would raise
+  in `Image.open`; this cannot happen after a successful front-sprite block, and
+  if it somehow did it is caught by the back-sprite `except` (warn-and-continue).
+- No new `sys.exit` paths; pipeline-load failure paths are unchanged.
 
 ## Constraints & dependencies
 
-- No new dependencies.
-- `_MAX_CATEGORY_LEN` must stay a distinct constant from `_MAX_NAME_LEN`
-  even though both are currently small integers — the issue explicitly
-  calls out not collapsing them, since the two limits are allowed to
-  diverge independently in the future.
-- Must not touch `sprites.py`/`vision.py`/ML code paths — this is a pure
-  text-schema change; no `@pytest.mark.ml` tests.
-- `writer.py`'s `_STATS_KEYS`/`_STATS_DEFAULTS` mechanism is reused as-is;
-  no structural change to `_write_stats`.
+- The change lives in `fakemon_forge/sprites.py` (`generate_sprite_img2img`) and
+  `fakemon_forge/main.py` (one added kwarg). It reuses the existing
+  `quantize_to_reference`, `_run_img2img`, `postprocess`, and module constants;
+  nothing is hard-coded or duplicated.
+- `generate_sprite_img2img` performs a function-local `import torch` (via
+  `_run_img2img` → `_make_generator`), so **any test that calls it is an `ml`
+  test** and belongs in `tests/test_sprites_ml.py` (or carries
+  `@pytest.mark.ml`), per `CLAUDE.md`'s test-slicing rule. The pure
+  palette-lock/shiny assertions that go in `tests/test_sprites.py` must therefore
+  exercise `quantize_to_reference` / `generate_shiny` **directly**, not through
+  `generate_sprite_img2img`.
+- `main.py` changes touch only the back-sprite call (one kwarg); no import
+  changes, no new CLI args, no signature change to `main`. Because
+  `test_main.py` mocks the sprite functions, the `main` wiring is testable
+  without torch.
+- **Backward compatibility:** the new parameter defaults to `None`, so all
+  current `generate_sprite_img2img` calls and their `ml` tests (96×96, `P`-mode,
+  PNG, single pipeline call, `strength`/`image`/`prompt_embeds` passthrough)
+  must continue to pass unchanged. Only the new back-sprite call passes
+  `reference_path`.
+- Frame 1 (`sprite.png`) is the canonical palette source for the whole set
+  (front frame 1, front frame 2, and back all lock to it). The front sprite
+  itself is never reference-locked (it *defines* the palette).
+
+## Tests
+
+### light (`tests/test_sprites.py`, torch-free)
+
+These exercise the shared-palette lock and shiny consistency **without** calling
+`generate_sprite_img2img` (which would trigger `import torch`). Follow the
+existing `postprocess` / `quantize_to_reference` / helper patterns.
+
+- **Back-sprite palette lock**: given a back RGB image and a `P`-mode reference
+  frame (build via `postprocess(_rgb_image())` / `postprocess(_noisy_image())`),
+  `quantize_to_reference(back_rgb, reference)` yields a `P`-mode 96×96 image
+  whose `getpalette()` equals the reference's exactly. (This is the pure core of
+  the back-sprite lock; `quantize_to_reference` is already well-covered, so this
+  test frames it as the back-sprite scenario and asserts palette equality.)
+- **Cross-view shiny consistency**: build three `P`-mode images that share one
+  palette (stand-ins for frame 1 / frame 2 / back — e.g. quantize three
+  different RGB inputs against one reference so all three share its palette),
+  save each, run `generate_shiny(path, name, out_path)` on each with the **same
+  `name`**, reload the three outputs, and assert their three `getpalette()`
+  results are **identical** to one another. (Optionally also assert each shiny
+  palette differs from the shared original, i.e. rotation happened.)
+
+### ml (`tests/test_sprites_ml.py`, auto-skipped without torch)
+
+Follow the existing `_fake_img2img_pipeline` / `_stub_encode_prompt` patterns;
+build the reference as a real `P`-mode 96×96 file (e.g. via `_frame1_file` /
+`postprocess(_rgb_image())`, as sprites are saved).
+
+- `generate_sprite_img2img(..., reference_path=<P-mode frame path>)` with a mock
+  img2img pipeline writes an output file that is **`P`-mode** and whose
+  `getpalette()` **equals the reference's** (proves the back sprite adopts the
+  shared palette rather than an adaptive one).
+- The saved reference-locked sprite is still 96×96 and PNG.
+- **Regression**: `generate_sprite_img2img` **without** `reference_path`
+  continues to produce a `P`-mode 96×96 PNG via adaptive `postprocess` (existing
+  tests suffice; add one asserting the two branches diverge only in palette if
+  desired — e.g. locked output's palette equals the reference while the
+  unlocked output's need not).
+- The pipeline is still invoked **exactly once** and with the unchanged
+  `strength` / `image` / `prompt_embeds` / `extra_tags` passthrough when
+  `reference_path` is supplied (the reference only affects post-quantization).
+
+### light (`tests/test_main.py`, no torch — sprite fns mocked)
+
+- The back-sprite `generate_sprite_img2img` call receives
+  `reference_path == str(stage_dir / "sprite.png")` (frame 1), in **both** the
+  txt2img path and the img2img path. In the img2img path, assert the back call's
+  positional `image_path` (init) is `args.image` while its `reference_path` is
+  `sprite.png` — i.e. the reference is frame 1 even though the init image is the
+  user's drawing.
+- The existing back-sprite assertions still hold:
+  `extra_tags == ["backside"]`, `strength == 0.65`, and the img2img-path call
+  count (front + back). Distinguish the front call (`reference_path` absent/`None`)
+  from the back call (`reference_path == sprite.png`).
+- The back-shiny wiring is unchanged (`generate_shiny(back_path, name,
+  back_shiny_path)`); the existing shiny-count assertions
+  (`test_generate_shiny_called_three_times_per_stage`,
+  `test_line_mode_frame2_called_three_times`) remain valid, since no shiny call
+  was added or removed — only the back sprite's palette changed.
 
 ## Assumptions
 
-- **Trailing-`" POKEMON"` stripping is case-insensitive and matches only an
-  exact trailing `" POKEMON"` token** (i.e. `str.upper().removesuffix("
-  POKEMON")` semantics after uppercasing), not a broader regex/substring
-  removal. The issue's example (`"Seed Pokemon"` → `"SEED"`) supports this;
-  more aggressive stripping (e.g. removing "POKEMON" anywhere in the string)
-  is not specified and risks mangling legitimate nouns, so the conservative
-  suffix-only interpretation is picked.
-- **Order of operations for the non-fallback branch** is: strip illegal
-  chars → strip trailing `" POKEMON"` → uppercase → truncate → re-check for
-  emptiness → fallback if empty. The issue doesn't pin down ordering
-  precisely; this order ensures the `" POKEMON"` check isn't defeated by
-  stray illegal characters immediately preceding it, and ensures truncation
-  is the last content-affecting step (matching `_repair_name`'s
-  strip-then-truncate order for names, per its existing
-  `test_last_resort_repair_strips_then_truncates` test).
-- **The Gen 3 charset for `category` is identical to `_ALLOWED_NAME_CHARS`**
-  and reuses that constant directly rather than introducing a duplicate
-  `_ALLOWED_CATEGORY_CHARS`. The issue states the charset is "same table as
-  names," so no new set literal is needed.
-- **Empty-after-cleaning triggers the same fallback as missing/absent**,
-  rather than persisting an empty string from `_normalize`. The issue's
-  fallback rule is phrasing "absent, empty, or non-string" as the trigger
-  conditions; treating "became empty after stripping illegal chars" as
-  equivalent to "empty" keeps the invariant that `_normalize`'s output
-  `category` is never blank, which existing code (and `writer.py`'s `""`
-  default meaning "absent") relies on to distinguish "never went through
-  `_normalize`" from "went through `_normalize`."
-- **This slice does not modify `export_ini.py`** (or any other consumer) to
-  read the new `category` field for `PokedexType`. The issue's file list
-  scopes this slice to `generator.py` + `writer.py` (+ their tests) only;
-  wiring consumers to prefer `category` over `types[0]` is left to a later
-  slice, consistent with the issue being "slice 4/5."
-- **No helper function name is prescribed** by the issue; `_normalize_category`
-  is suggested as a natural counterpart to `_normalize_abilities_gen3` for
-  implementation, but this is a naming suggestion, not a requirement — the
-  implementer may inline the logic in `_normalize` instead.
-- **Scope is appropriately sized for one slice** — it touches two source
-  files with a small, self-contained normalization rule and mirrors an
-  existing precedent (`levitates`) end to end, so no further scoping-down
-  was needed.
+Items marked **[picked]** are defaults chosen here (not confirmed by existing
+code/tests/docs); **[confirmed]** items are grounded in the codebase.
+
+- **[picked]** The lock is added as an optional `reference_path: str = None`
+  keyword parameter on the **existing** `generate_sprite_img2img`, rather than a
+  new dedicated `generate_back_sprite` function. Rationale: it is the minimal,
+  lowest-risk change (existing `reference_path=None` callers and their tests are
+  untouched), keeps the img2img call in one place, and matches how the front
+  frames were locked (via `quantize_to_reference`). The issue explicitly permits
+  either approach. Note: an unused `generate_back_sprite` (txt2img-based) already
+  exists in `sprites.py` but is **not** the back-sprite path `main` uses (`main`
+  calls `generate_sprite_img2img` for the back sprite); it is left untouched to
+  avoid scope creep. **[confirmed]** that `generate_back_sprite` is currently
+  unused by `main.py`.
+- **[picked]** The parameter is a **path** (`reference_path`) rather than a
+  pre-loaded `Image`, matching how `main` already threads file paths
+  (`front_sprite_path`, `image_path`) and letting the function own the
+  `Image.open`. The issue allowed `reference_path`/`reference`; path chosen for
+  consistency.
+- **[picked]** The parameter is placed **last** in the keyword-only signature and
+  defaults to `None`, preserving every existing call site and test.
+- **[picked]** When `reference_path` is set, the reference is opened without a
+  mode conversion (the saved front sprite is already `P`-mode); a non-`P`-mode
+  reference is left to raise via `quantize_to_reference` (caught by `main`'s
+  back-sprite `except`).
+- **[confirmed]** Frame 1 (`sprite.png`) is the canonical palette source: it is
+  generated first in the loop and is saved `P`-mode by `postprocess`'s
+  `.quantize`; front frame 2 already locks to it, and this slice locks the back
+  to it too.
+- **[confirmed]** The reference is always `sprite_path` (frame 1), independent of
+  the img2img init image — in the img2img path the init is the user's drawing
+  (`args.image`) while the palette reference must still be frame 1.
+- **[confirmed]** `quantize_to_reference` already mirrors `postprocess`'s
+  resize + colour/contrast pre-steps, so switching only the palette (adaptive →
+  fixed reference) is the sole behavioural difference between the branches; it
+  does not mutate its inputs.
+- **[confirmed]** `generate_shiny` rotates only the palette keyed on `name` and
+  preserves achromatic entries, so three views sharing one palette yield three
+  identical rotated shiny palettes — `sprite_back_shiny.png` is consistent with
+  `sprite_shiny.png` / `sprite_frame2_shiny.png` with **no** change to the shiny
+  blocks (the back shiny is already `generate_shiny(back_path, …)`).
+- **[confirmed]** `export_ini` / `writer.py` need no changes — they reference no
+  sprite files (Gen 3 data fields / `stats.json` + `entry.md`).
+- **[confirmed]** Anything calling `generate_sprite_img2img` triggers a real
+  `import torch` (via `_run_img2img` → `_make_generator`) and is therefore an
+  `ml` test; the pure palette/shiny assertions in `test_sprites.py` must call
+  `quantize_to_reference` / `generate_shiny` directly, and the `main`-level
+  wiring is torch-free because `test_main.py` mocks the sprite functions.
