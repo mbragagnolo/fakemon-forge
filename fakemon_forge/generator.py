@@ -33,6 +33,11 @@ Each element represents one evolutionary stage and must have exactly these field
   pokedex_entry – 2 sentence flavour text (string)
   sprite_prompt – visual description for pixel-art sprite generation; max 75 words, lead with the creature's most distinctive shape and colour features (string)
   levitates     – boolean; true only if the creature levitates, is bodiless/gaseous/amorphous, or otherwise never touches the ground (e.g. floating orbs, ghosts, cloud/gas creatures); otherwise false
+  height_dm – height in decimetres (integer).
+  weight_hg – weight in hectograms (integer).
+    For scale: a small rodent is ~3 dm / 35 hg, a mid-size quadruped
+    ~10 dm / 300 hg, a large final-stage dragon ~20 dm / 2100 hg.
+    Values must grow across an evolutionary line.
 
 All stage names and sprite prompts must share a clear thematic throughline.
 Return ONLY the JSON array. No markdown fences, no explanation, no extra keys.\
@@ -127,14 +132,42 @@ def _repair_name(name: str) -> str:
     return cleaned[:_MAX_NAME_LEN]
 
 
+_SIZE_DEFAULTS_BY_LINE_STAGE = {
+    1: (5, 30),
+    2: (10, 150),
+    3: (17, 600),
+}
+
+_SIZE_DEFAULTS_BY_TIER = {
+    "standard": (10, 150),
+    "pseudo": (17, 600),
+    "legendary": (17, 600),
+    "mythical": (17, 600),
+}
+
+
 def _normalize(stages: list[dict], mode: str, tier: str) -> list[dict]:
-    """Post-parse cleanup pass. Currently enforces the name contract only.
+    """Post-parse cleanup pass: enforces the name contract, and defaults/clamps
+    height_dm and weight_hg.
 
     Repair is idempotent: a name already inside the Gen 3 contract comes out
     of ``_repair_name`` unchanged, so valid names pass through untouched.
     """
     for stage in stages:
         stage["name"] = _repair_name(stage["name"])
+
+        if "height_dm" not in stage or "weight_hg" not in stage:
+            if mode == "line":
+                height_default, weight_default = _SIZE_DEFAULTS_BY_LINE_STAGE[stage["stage"]]
+            else:
+                height_default, weight_default = _SIZE_DEFAULTS_BY_TIER[tier]
+            if "height_dm" not in stage:
+                stage["height_dm"] = height_default
+            if "weight_hg" not in stage:
+                stage["weight_hg"] = weight_default
+
+        stage["height_dm"] = max(1, min(999, stage["height_dm"]))
+        stage["weight_hg"] = max(1, min(9999, stage["weight_hg"]))
     return stages
 
 

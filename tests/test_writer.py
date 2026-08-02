@@ -194,3 +194,29 @@ def test_stats_json_still_excludes_llm_only_with_levitates(tmp_path):
     dirs = write_output([stage], base_dir=str(tmp_path))
     data = json.loads((dirs[0] / "stats.json").read_text())
     assert not (_LLM_ONLY & set(data.keys()))
+
+
+# ---------------------------------------------------------------------------
+# height_dm / weight_hg in stats.json
+# ---------------------------------------------------------------------------
+
+def test_stats_json_persists_height_dm_and_weight_hg(tmp_path):
+    stage = {**_STAGE_1, "height_dm": 12, "weight_hg": 345}
+    dirs = write_output([stage], base_dir=str(tmp_path))
+    data = json.loads((dirs[0] / "stats.json").read_text())
+    assert data["height_dm"] == 12
+    assert data["weight_hg"] == 345
+
+
+def test_stats_json_defaults_missing_height_dm_to_five(tmp_path):
+    assert "height_dm" not in _STAGE_1
+    dirs = write_output(_SINGLE, base_dir=str(tmp_path))
+    data = json.loads((dirs[0] / "stats.json").read_text())
+    assert data["height_dm"] == 5
+
+
+def test_stats_json_defaults_missing_weight_hg_to_thirty(tmp_path):
+    assert "weight_hg" not in _STAGE_1
+    dirs = write_output(_SINGLE, base_dir=str(tmp_path))
+    data = json.loads((dirs[0] / "stats.json").read_text())
+    assert data["weight_hg"] == 30
