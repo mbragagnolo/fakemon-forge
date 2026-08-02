@@ -1,6 +1,0 @@
-- [ ] Generate a Fakemon line for real (`fakemon-forge "fire lizard" --mode line`) and confirm each `stage*/stats.json` has an `abilities_gen3` list of 0–2 names, all spelled exactly as in `resources/gen3_abilities.json`
-- [ ] Check the generated `abilities_gen3` values are plausible Gen 3 abilities that match the free-text `ability` flavour, and that `ability` itself is unchanged/still creative
-- [ ] Confirm most stages come back with two abilities (the prompt asks for two) and that the line largely shares the same pair
-- [ ] Write a `stats.json` from a hand-built stage dict with no `abilities_gen3` key and confirm it persists as `[]` rather than erroring
-- [ ] Sanity-check the prompt: `python3 -c "from fakemon_forge.generator import _SYSTEM_PROMPT; print(_SYSTEM_PROMPT)"` shows the 76-name closed set with no `None` or `Cacophony`
-- [ ] Temporarily add a fake entry to `resources/gen3_abilities.json` and confirm the pool/prompt pick it up without any code change (then revert)
