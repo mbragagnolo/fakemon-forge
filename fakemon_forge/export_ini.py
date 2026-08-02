@@ -102,7 +102,7 @@ def _ev_yield(stats: dict) -> int:
     return 1
 
 
-def _encode_base_stats(data: dict, ability_idx: int) -> str:
+def _encode_base_stats(data: dict, ability1_idx: int, ability2_idx: int) -> str:
     s = data["base_stats"]
     types = [t if t != "Fairy" else "Normal" for t in data["types"]]
     t1 = _TYPE_INDEX[types[0]]
@@ -120,7 +120,7 @@ def _encode_base_stats(data: dict, ability_idx: int) -> str:
         70,                                      # base happiness
         0,                                       # growth rate: Medium Fast
         11, 11,                                  # egg groups: Amorphous
-        ability_idx & 0xFF, 0x00,               # ability1, ability2
+        ability1_idx & 0xFF, ability2_idx & 0xFF,  # ability1, ability2
         0x00,                                    # safari flee rate
         _TYPE_BODY_COLOR.get(t1, 8),
         0x00, 0x00,                              # padding
@@ -175,10 +175,26 @@ def export_ini(stage_dir: Path) -> Path:
     data = json.loads((stage_dir / "stats.json").read_text(encoding="utf-8"))
     entry = (stage_dir / "entry.md").read_text(encoding="utf-8").strip()
 
-    ability_idx = _resolve_ability(data.get("ability", ""))
+    abilities_gen3 = data.get("abilities_gen3")
+    if abilities_gen3:
+        ability1_idx = _resolve_ability(abilities_gen3[0])
+        ability2_idx = _resolve_ability(abilities_gen3[1]) if len(abilities_gen3) >= 2 else 0x00
+    else:
+        ability1_idx = _resolve_ability(data.get("ability", ""))
+        ability2_idx = 0x00
+
     dex = _dex_number(data["name"])
-    base_stats = _encode_base_stats(data, ability_idx)
+    base_stats = _encode_base_stats(data, ability1_idx, ability2_idx)
     moves = _build_moveset(data)
+
+    height_dm = data["height_dm"] if "height_dm" in data else 5
+    weight_hg = data["weight_hg"] if "weight_hg" in data else 30
+
+    category = data.get("category")
+    if isinstance(category, str) and category:
+        dex_type = category
+    else:
+        dex_type = data["types"][0].upper()
 
     ini_lines = [
         "[Pokemon]",
@@ -197,14 +213,14 @@ def export_ini(stage_dir: Path) -> Path:
         "TMHMCompatibility=0000000000000000",
         f"NationalDexNumber={dex}",
         f"SecondDexNumber={dex}",
-        "Hght=5",
-        "Wght=30",
+        f"Hght={height_dm}",
+        f"Wght={weight_hg}",
         "Scale1=256",
         "Scale2=256",
         "Offset_1=0",
         "Offset_2=0",
         f"PokedexDescription={_format_entry(entry)}",
-        f"PokedexType={data['types'][0].upper()} POKEMON",
+        f"PokedexType={dex_type}",
         "",
     ]
 
