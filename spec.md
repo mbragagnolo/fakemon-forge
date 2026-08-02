@@ -1,225 +1,320 @@
-# Spec: Emit and persist height_dm / weight_hg with stage/tier defaults and clamping
+# Spec: Lock the back sprite to the shared front-frame palette + cross-view shiny consistency
 
 ## Summary
 
-`generate_fakemon` (`fakemon_forge/generator.py`) asks the Mistral model for
-a JSON array of stage dicts and post-processes them through `_normalize`
-before returning. `_normalize` currently only enforces the Gen 3 name
-contract (`fakemon_forge/generator.py:130`). `writer.py` then persists a
-fixed subset of stage keys (`_STATS_KEYS`) to each stage's `stats.json`,
-writing `levitates` defensively via `.get()` so hand-built/partial stage
-dicts still work.
+`fakemon-forge` already produces, per stage, a front sprite `sprite.png` and a
+second front-animation frame `sprite_frame2.png` that **share one exact
+16-colour palette** (frame 2 is palette-locked to frame 1 via
+`quantize_to_reference` / `build_frame2` in `fakemon_forge/sprites.py`), plus
+shiny variants. The **back sprite** (`sprite_back.png`) is the last view still
+carrying its **own adaptive palette**: it is produced by
+`generate_sprite_img2img`, whose final step is `postprocess(candidate)` — an
+*adaptive* 16-colour `quantize` that builds a fresh palette every call.
 
-Gen 3 Pokédex data records height in decimetres and weight in hectograms;
-`fakemon-forge` emits neither today, and `export_ini.py` hardcodes
-`Hght=5`/`Wght=30`. This slice adds two new integer stage fields —
-`height_dm` and `weight_hg` — sourced from the model, defaulted per
-stage/tier when the model omits them, and clamped to safe ranges when
-present but out of bounds. It does **not** touch `export_ini.py`; wiring the
-hardcoded `Hght`/`Wght` lines to the new fields is left to a later slice.
+This slice (4/4 of #1) brings the back sprite into the **same shared palette**
+as the two front frames, completing the authentic Gen-3 model of *one palette
+for the whole sprite set, one rotated palette for the whole shiny set*. It has
+two parts:
 
-"Done and correct" means: every stage dict returned by `generate_fakemon`
-(and by `_normalize` directly) carries an integer `height_dm` in `[1, 999]`
-and an integer `weight_hg` in `[1, 9999]`, regardless of what the model
-returned or omitted; `writer.py` persists both into `stats.json`, defaulting
-to `5`/`30` when a stage dict lacks the keys entirely; and the system prompt
-documents both fields with calibration anchors so the model's own values (the
-common case) are reasonable before any clamping applies.
+1. **`sprites.py`** — give the back-sprite generation path a way to re-quantize
+   its img2img result against a reference `P`-mode image's exact palette
+   (frame 1) instead of an adaptive palette, by adding an optional
+   `reference_path` parameter to `generate_sprite_img2img`. When
+   `reference_path` is given, the raw img2img candidate is locked with the
+   existing `quantize_to_reference(candidate, reference)` rather than
+   `postprocess`. When it is omitted, behaviour is byte-for-byte unchanged
+   (adaptive `postprocess`), so the front-sprite img2img path and all existing
+   tests are untouched.
+2. **`main.py`** — pass `sprite.png` (frame 1, the just-written front sprite) as
+   the back sprite's `reference_path`, so the back sprite locks to frame 1's
+   palette regardless of which image seeded the img2img (the user's drawing in
+   the img2img path, `sprite.png` in the txt2img path).
+
+Because the back sprite then shares frame 1's exact palette, and
+`generate_shiny` is name-keyed and **rotates only the palette** (preserving
+achromatic entries), `sprite_back_shiny.png` — already derived via
+`generate_shiny(back_path, …)` — automatically uses the **same rotated palette**
+as `sprite_shiny.png` and `sprite_frame2_shiny.png`. All three views' shinies
+become consistent for free; no shiny-path change is required.
+
+### Explicitly out of scope
+
+- **`.ini` / writer changes** — verified unnecessary (as in the prior slices).
+  `export_ini` emits Gen 3 data fields, `writer.py` writes only
+  `stats.json` / `entry.md`; neither references sprite filenames.
+- **The img2img call itself** — the pipeline invocation (`_run_img2img`),
+  `strength=0.65`, and `extra_tags=["backside"]` are unchanged. Only the
+  post-generation quantization step gains a reference-locked branch.
+- **Recentering / animation-band logic** — the back sprite is a *different view*,
+  not an animation frame of the front, so `build_frame2` /
+  `recenter_to_anchor` / the acceptance band do **not** apply to it. Only the
+  palette is shared; geometry is whatever img2img produced.
+- **Colour-fidelity guarantees** — the back sprite's colours may degrade when
+  they land far from frame 1's 16 colours. Per the issue this is the authentic
+  Gen-3 constraint and is accepted, not mitigated.
 
 ## Inputs
 
-### `generate_fakemon(description, mode, tier="standard", *, client=None, api_key=None)`
+### Changed: `generate_sprite_img2img(prompt, types, image_path, output_path, *, pipeline, extra_tags=None, seed=None, strength=0.8, reference_path=None)`
 
-Signature is unchanged. The LLM response for each stage dict may now
-optionally include:
+All existing parameters are unchanged. One new keyword-only parameter is added
+at the end (so existing positional/keyword calls are unaffected):
 
-- `height_dm` — int, height in decimetres, model's best guess.
-- `weight_hg` — int, weight in hectograms, model's best guess.
+- `reference_path: str | None = None` (keyword-only) — path to a `P`-mode
+  reference image whose exact 16-colour palette the generated sprite must adopt.
+  When `None` (the default, and every current call except the new back-sprite
+  one), the sprite is quantized adaptively via `postprocess` exactly as today.
+  When set, the raw img2img candidate is locked to that palette via
+  `quantize_to_reference`. **[picked]** name/shape — see Assumptions.
 
-Both are optional from the model's perspective (older/malformed responses
-omitting them must not crash `_normalize`); `mode` (`"single"`/`"line"`) and
-`tier` (`"standard"`/`"pseudo"`/`"legendary"`/`"mythical"`) — both already
-parameters of `generate_fakemon` and already threaded into `_normalize(stages,
-mode, tier)` — select the default when a field is missing.
+### `main.py` per-stage back-sprite call
 
-### `_normalize(stages, mode, tier)`
+No new CLI arguments. Inside the existing
+`for stage, stage_dir in zip(stages, stage_dirs)` loop, the existing back-sprite
+block gains one keyword argument:
 
-Unchanged signature. Behavior extended per stage (see Behavior).
-
-### `writer._write_stats(stage, stage_dir)` / `write_output(stages, base_dir="output")`
-
-Unchanged signatures. `stage` dicts passed in may or may not carry
-`height_dm`/`weight_hg` (e.g. hand-built dicts in tests, or future callers
-that skip `_normalize`).
+- `reference_path = sprite_path` — i.e. `str(stage_dir / "sprite.png")`, the
+  front sprite written earlier in the same loop iteration. This is **always**
+  `sprite.png` (frame 1), independent of `init_image` (which is the user's
+  `args.image` in the img2img path, or `sprite_path` in the txt2img path).
 
 ## Outputs
 
-- Every stage dict returned from `generate_fakemon` (and from `_normalize`
-  called directly) has `stage["height_dm"]` as an `int` in `[1, 999]` and
-  `stage["weight_hg"]` as an `int` in `[1, 9999]`.
-- `stats.json` written by `writer.write_output` includes `"height_dm"` and
-  `"weight_hg"` integer keys alongside the existing persisted fields.
-- `_SYSTEM_PROMPT` contains the `height_dm` / `weight_hg` field
-  documentation with the scale anchors from the issue, so prompt-content
-  tests (`_SYSTEM_PROMPT` string, `messages` sent to the client) can assert
-  on it the same way existing tests assert on e.g. `levitates`.
+- **`generate_sprite_img2img` with `reference_path` set** → returns `None`; side
+  effect is writing a 96×96 `P`-mode PNG at `output_path` whose palette is
+  byte-for-byte equal to the reference image's palette (guaranteed by
+  `quantize_to_reference`).
+- **`generate_sprite_img2img` with `reference_path=None`** → unchanged: a 96×96
+  `P`-mode PNG with an adaptive ≤16-colour palette (via `postprocess`).
+- **`main`** per stage — the same set of files as today
+  (`sprite.png`, `sprite_frame2.png`, `sprite_frame2_shiny.png`,
+  `sprite_back.png`, `sprite_shiny.png`, `sprite_back_shiny.png`), but now:
+  - `sprite_back.png` shares `sprite.png`'s exact 16-colour palette (was: its
+    own adaptive palette).
+  - `sprite_back_shiny.png` uses the same rotated palette as `sprite_shiny.png`
+    and `sprite_frame2_shiny.png` (automatic consequence; no code change in the
+    shiny blocks).
 
 ## Behavior
 
-### `_normalize` — defaulting
+### `generate_sprite_img2img(...)` in `sprites.py`
 
-For each stage, if `"height_dm"` is absent (key not in the dict — not merely
-falsy, since `0` must never be emitted, see Edge cases) or `"weight_hg"` is
-absent, fill it in using this table, keyed by `mode` and, for `mode="single"`,
-`tier`, and for `mode="line"`, `stage["stage"]`:
+1. Run the img2img pipeline exactly as today via the existing internal helper
+   `_run_img2img(prompt, types, image_path, pipeline=…, extra_tags=…, seed=…,
+   strength=…)`, obtaining the raw RGB candidate (`result.images[0]`). This step
+   is unchanged.
+2. Quantize the candidate:
+   - If `reference_path is None`: `sprite = postprocess(candidate)` (adaptive
+     palette) — unchanged from today.
+   - Else: open the reference as a `P`-mode image
+     (`Image.open(reference_path)` — the saved front sprite is already `P`-mode;
+     do **not** convert) and `sprite = quantize_to_reference(candidate,
+     reference)`. `quantize_to_reference` already performs the same
+     resize-to-96×96 + colour/contrast enhance pre-steps as `postprocess`, then
+     `.quantize(palette=reference)`, so both branches feed identical input to
+     quantization and differ only in adaptive-vs-fixed palette.
+3. `sprite.save(output_path)` (PNG inferred from extension) — unchanged.
 
-| Case | height_dm | weight_hg |
-|---|---|---|
-| `mode="line"`, `stage["stage"] == 1` | 5 | 30 |
-| `mode="line"`, `stage["stage"] == 2` | 10 | 150 |
-| `mode="line"`, `stage["stage"] == 3` | 17 | 600 |
-| `mode="single"`, `tier == "standard"` | 10 | 150 |
-| `mode="single"`, `tier in {"pseudo", "legendary", "mythical"}` | 17 | 600 |
+The choice is a single branch on `reference_path`; `_run_img2img`,
+`postprocess`, `quantize_to_reference`, and the module constants are reused
+rather than duplicated.
 
-This mirrors the existing per-stage loop in `_normalize` — no new looping
-construct, just two more assignments (guarded by presence-check) alongside
-the existing `stage["name"] = _repair_name(stage["name"])` line.
+### `main.py` wiring
 
-### `_normalize` — clamping
-
-Independent of defaulting, once each stage has a `height_dm`/`weight_hg`
-value (whether model-supplied or just defaulted), clamp:
-
-- `height_dm` to `[1, 999]`
-- `weight_hg` to `[1, 9999]`
-
-using standard min/max clamping (`max(1, min(999, value))` and
-`max(1, min(9999, value))`). Values already in range pass through unchanged.
-Defaulted values (5/10/17 and 30/150/600) are all inside both ranges, so
-clamping never alters a just-applied default — the two steps compose
-without special-casing.
-
-### `_SYSTEM_PROMPT` — field documentation
-
-Add to the per-stage field list in `_SYSTEM_PROMPT`
-(`fakemon_forge/generator.py:25`), following the existing `field – description`
-style used for `name`, `stage`, `types`, etc.:
+The existing back-sprite block becomes:
 
 ```
-height_dm – height in decimetres (integer).
-weight_hg – weight in hectograms (integer).
-  For scale: a small rodent is ~3 dm / 35 hg, a mid-size quadruped
-  ~10 dm / 300 hg, a large final-stage dragon ~20 dm / 2100 hg.
-  Values must grow across an evolutionary line.
+back_path = str(stage_dir / "sprite_back.png")
+try:
+    init_image = args.image if args.image else sprite_path
+    generate_sprite_img2img(
+        stage["sprite_prompt"], stage["types"], init_image, back_path,
+        pipeline=img2img_pipeline, extra_tags=["backside"], seed=seed,
+        strength=0.65, reference_path=sprite_path,
+    )
+except Exception as exc:
+    print(
+        f"Warning: back sprite generation failed for {stage['name']}: {exc}",
+        file=sys.stderr,
+    )
 ```
 
-This is prompt guidance only — it does not change what `_normalize` accepts
-or how it defaults/clamps; the model is free to (and expected to) return
-values the anchors merely calibrate.
-
-### `writer.py` — persistence
-
-Add `"height_dm"` and `"weight_hg"` to `_STATS_KEYS`
-(`fakemon_forge/writer.py:4`). Extend `_write_stats` following the existing
-`levitates` precedent — excluded from the generic dict comprehension (since
-that comprehension does a required `stage[k]` lookup that would `KeyError`
-on an absent key) and set individually via `.get()` with a flat default:
-
-```python
-data["height_dm"] = stage.get("height_dm", 5)
-data["weight_hg"] = stage.get("weight_hg", 30)
-```
-
-The writer's defaults are flat (`5`/`30`), not stage/tier-scaled — see
-Assumptions.
+Only `reference_path=sprite_path` is added. The block still reaches this code
+only after the front-sprite block succeeded (that block `continue`s on failure),
+so `sprite_path` names an existing `P`-mode `sprite.png`. The back-shiny block
+(`generate_shiny(back_path, stage["name"], back_shiny_path)`) is **unchanged** —
+it now inherits the shared palette automatically.
 
 ## Edge cases
 
-- **Model omits both fields**: `_normalize` fills both from the table; result
-  is already in-range, so clamping is a no-op.
-- **Model returns `height_dm: 0`**: `0` is present (not absent), so no
-  default applies; clamping raises it to `1`. Same for `weight_hg: 0`. This
-  is the mechanism that guarantees the `[1, ...]` floor is never violated by
-  a model-supplied zero — per the issue, downstream treats non-positive as a
-  hard error, so defaulting-on-falsy (which would also catch `0`) is
-  explicitly *not* used; presence, not truthiness, is what's checked.
-- **Model returns a huge value** (e.g. `height_dm: 50000`): present, so no
-  default; clamped down to `999` (`weight_hg` to `9999`).
-- **Model returns a negative value**: present; clamped up to `1` by the same
-  `max(1, ...)` floor that handles `0`.
-- **`mode="line"` but a stage dict's `"stage"` key is missing or outside
-  `{1, 2, 3}`**: out of scope — `_normalize` (and the rest of the pipeline)
-  already assumes `stage["stage"] ∈ {1, 2, 3}` for `mode="line"` and has no
-  existing fallback for a malformed `stage` number; this slice does not add
-  one for height/weight defaulting either.
-- **`_normalize` called directly (as existing tests do) with hand-built
-  stage dicts lacking `height_dm`/`weight_hg`**: defaults apply exactly as
-  in the full `generate_fakemon` path, since `_normalize` is the sole place
-  the table lives.
-- **Writer called with a stage dict that has no `height_dm`/`weight_hg` at
-  all** (e.g. a hand-built dict in a writer test, bypassing `_normalize`):
-  `stats.json` gets the flat `5`/`30` defaults, matching `levitates`' existing
-  `False` fallback pattern.
-- **Writer called with a stage dict that already has valid `height_dm`/
-  `weight_hg`** (the normal `generate_fakemon` → `write_output` path):
-  those exact values are persisted; the writer does not re-clamp (clamping
-  is `_normalize`'s responsibility only, so a stage dict that skipped
-  `_normalize` and carries an out-of-range value would be persisted as-is —
-  consistent with the writer trusting its input the way it already does for
-  every other field).
+- **Front sprite generation failed** → the front-sprite `except` `continue`s to
+  the next stage; the back-sprite block (and its `reference_path`) never runs
+  for that stage, so there is never a missing/absent reference.
+- **img2img returns colours far from frame 1's palette** →
+  `quantize_to_reference` maps each pixel to the nearest of frame 1's 16 colours;
+  the back sprite may look slightly off-palette / posterized. **Accepted** — this
+  is the authentic Gen-3 shared-palette constraint, not a bug.
+- **Back sprite content differs from the front** (it is a rear view) → only the
+  palette is shared, not geometry; no recentering/animation-band logic is applied
+  (that is `build_frame2`'s job for frame 2, not for the back view).
+- **Cross-view shiny consistency** → `sprite.png`, `sprite_frame2.png`, and
+  `sprite_back.png` now share one palette; `generate_shiny` rotates only the
+  palette keyed on `name`, so `sprite_shiny.png`, `sprite_frame2_shiny.png`, and
+  `sprite_back_shiny.png` share one rotated palette automatically.
+- **Line mode (3 stages)** → the back-sprite block is inside the per-stage loop;
+  each stage locks its own back sprite to its own `sprite.png`, and each stage's
+  three shinies stay mutually consistent within that stage.
+- **`reference_path=None` callers** (the front-sprite img2img call, and any other
+  existing caller) → behaviour is identical to today (adaptive `postprocess`).
 
 ## Errors
 
-No new error paths. `_normalize` still cannot fail the way the JSON-parse /
-name-violation retry loop can — it remains pure post-processing with no API
-calls (`test_normalize_makes_no_api_call` already pins this down and
-continues to hold, since defaulting/clamping touch no client). A stage dict
-missing required *existing* fields (e.g. `name`) is already unhandled
-upstream of this change and stays that way.
+- `generate_sprite_img2img` surfaces exceptions to its caller (it does not
+  swallow them); `main` wraps the back-sprite call in the existing try/except and
+  warns `Warning: back sprite generation failed for {name}: {exc}` — unchanged
+  wording and structure.
+- `quantize_to_reference` raises `ValueError` ("palette-mode reference image") if
+  the reference is not `P`-mode. Because `main` always passes the already-saved
+  `P`-mode `sprite.png`, this only fires on misuse and would be caught by the
+  back-sprite `except`.
+- A missing `reference_path` file (e.g. `sprite.png` never written) would raise
+  in `Image.open`; this cannot happen after a successful front-sprite block, and
+  if it somehow did it is caught by the back-sprite `except` (warn-and-continue).
+- No new `sys.exit` paths; pipeline-load failure paths are unchanged.
 
 ## Constraints & dependencies
 
-- No new dependencies. Pure Python arithmetic in `generator.py`; `writer.py`
-  change is the same `.get()`-with-default shape already used for
-  `levitates`.
-- Downstream (a future slice, not this one) treats `height_dm`/`weight_hg` as
-  2-byte unsigned values written into `.ini` `Hght`/`Wght` fields and as
-  hard-error on non-positive — this spec's ranges (`[1, 999]`, `[1, 9999]`)
-  are sized to that constraint but the `.ini` write itself is out of scope
-  here.
-- `export_ini.py`'s hardcoded `Hght=5` / `Wght=30` lines are intentionally
-  untouched by this slice (per the issue's file list) — reading the new
-  `stats.json` keys into the `.ini` export is left to a later slice in #48.
+- The change lives in `fakemon_forge/sprites.py` (`generate_sprite_img2img`) and
+  `fakemon_forge/main.py` (one added kwarg). It reuses the existing
+  `quantize_to_reference`, `_run_img2img`, `postprocess`, and module constants;
+  nothing is hard-coded or duplicated.
+- `generate_sprite_img2img` performs a function-local `import torch` (via
+  `_run_img2img` → `_make_generator`), so **any test that calls it is an `ml`
+  test** and belongs in `tests/test_sprites_ml.py` (or carries
+  `@pytest.mark.ml`), per `CLAUDE.md`'s test-slicing rule. The pure
+  palette-lock/shiny assertions that go in `tests/test_sprites.py` must therefore
+  exercise `quantize_to_reference` / `generate_shiny` **directly**, not through
+  `generate_sprite_img2img`.
+- `main.py` changes touch only the back-sprite call (one kwarg); no import
+  changes, no new CLI args, no signature change to `main`. Because
+  `test_main.py` mocks the sprite functions, the `main` wiring is testable
+  without torch.
+- **Backward compatibility:** the new parameter defaults to `None`, so all
+  current `generate_sprite_img2img` calls and their `ml` tests (96×96, `P`-mode,
+  PNG, single pipeline call, `strength`/`image`/`prompt_embeds` passthrough)
+  must continue to pass unchanged. Only the new back-sprite call passes
+  `reference_path`.
+- Frame 1 (`sprite.png`) is the canonical palette source for the whole set
+  (front frame 1, front frame 2, and back all lock to it). The front sprite
+  itself is never reference-locked (it *defines* the palette).
+
+## Tests
+
+### light (`tests/test_sprites.py`, torch-free)
+
+These exercise the shared-palette lock and shiny consistency **without** calling
+`generate_sprite_img2img` (which would trigger `import torch`). Follow the
+existing `postprocess` / `quantize_to_reference` / helper patterns.
+
+- **Back-sprite palette lock**: given a back RGB image and a `P`-mode reference
+  frame (build via `postprocess(_rgb_image())` / `postprocess(_noisy_image())`),
+  `quantize_to_reference(back_rgb, reference)` yields a `P`-mode 96×96 image
+  whose `getpalette()` equals the reference's exactly. (This is the pure core of
+  the back-sprite lock; `quantize_to_reference` is already well-covered, so this
+  test frames it as the back-sprite scenario and asserts palette equality.)
+- **Cross-view shiny consistency**: build three `P`-mode images that share one
+  palette (stand-ins for frame 1 / frame 2 / back — e.g. quantize three
+  different RGB inputs against one reference so all three share its palette),
+  save each, run `generate_shiny(path, name, out_path)` on each with the **same
+  `name`**, reload the three outputs, and assert their three `getpalette()`
+  results are **identical** to one another. (Optionally also assert each shiny
+  palette differs from the shared original, i.e. rotation happened.)
+
+### ml (`tests/test_sprites_ml.py`, auto-skipped without torch)
+
+Follow the existing `_fake_img2img_pipeline` / `_stub_encode_prompt` patterns;
+build the reference as a real `P`-mode 96×96 file (e.g. via `_frame1_file` /
+`postprocess(_rgb_image())`, as sprites are saved).
+
+- `generate_sprite_img2img(..., reference_path=<P-mode frame path>)` with a mock
+  img2img pipeline writes an output file that is **`P`-mode** and whose
+  `getpalette()` **equals the reference's** (proves the back sprite adopts the
+  shared palette rather than an adaptive one).
+- The saved reference-locked sprite is still 96×96 and PNG.
+- **Regression**: `generate_sprite_img2img` **without** `reference_path`
+  continues to produce a `P`-mode 96×96 PNG via adaptive `postprocess` (existing
+  tests suffice; add one asserting the two branches diverge only in palette if
+  desired — e.g. locked output's palette equals the reference while the
+  unlocked output's need not).
+- The pipeline is still invoked **exactly once** and with the unchanged
+  `strength` / `image` / `prompt_embeds` / `extra_tags` passthrough when
+  `reference_path` is supplied (the reference only affects post-quantization).
+
+### light (`tests/test_main.py`, no torch — sprite fns mocked)
+
+- The back-sprite `generate_sprite_img2img` call receives
+  `reference_path == str(stage_dir / "sprite.png")` (frame 1), in **both** the
+  txt2img path and the img2img path. In the img2img path, assert the back call's
+  positional `image_path` (init) is `args.image` while its `reference_path` is
+  `sprite.png` — i.e. the reference is frame 1 even though the init image is the
+  user's drawing.
+- The existing back-sprite assertions still hold:
+  `extra_tags == ["backside"]`, `strength == 0.65`, and the img2img-path call
+  count (front + back). Distinguish the front call (`reference_path` absent/`None`)
+  from the back call (`reference_path == sprite.png`).
+- The back-shiny wiring is unchanged (`generate_shiny(back_path, name,
+  back_shiny_path)`); the existing shiny-count assertions
+  (`test_generate_shiny_called_three_times_per_stage`,
+  `test_line_mode_frame2_called_three_times`) remain valid, since no shiny call
+  was added or removed — only the back sprite's palette changed.
 
 ## Assumptions
 
-- **[picked]** Writer's absent-key defaults are flat `5`/`30`, not
-  stage/tier-scaled, per the issue's explicit instruction — the writer has
-  no `tier`/`mode` parameter and the scaled table is generator-only.
-- **[picked]** Defaulting is presence-based (`"height_dm" not in stage`), not
-  truthiness-based (`not stage.get("height_dm")`), so that a model-supplied
-  `0` is clamped to `1` rather than silently replaced by the stage/tier
-  default. This is the only reading consistent with the issue's "clamping
-  (not defaulting) is what guarantees the `[1, ...]` floor" statement.
-- **[picked]** Clamping applies uniformly to every stage regardless of
-  whether the value came from the model or from the default table; this is
-  simpler than special-casing "just-defaulted" values and is behaviorally
-  identical since all default values already lie inside both ranges.
-- **[picked]** The `mode="line"` default table is keyed off each stage
-  dict's own `stage["stage"]` field (already guaranteed present and
-  validated as one of the required fields by existing tests/behavior), not
-  off list position — these coincide in practice but keying off the
-  explicit field is more robust and matches how `writer.py` already keys
-  stage directory names off `stage["stage"]`.
-- **[picked]** No new CLI surface, no change to `export_ini.py`, no change
-  to `main.py` — this slice is generator + writer only, matching the issue's
-  file list exactly.
-- **[picked]** `_SYSTEM_PROMPT` field documentation is added as a literal
-  block appended after the existing `levitates` line, preserving the
-  field's declared order in the docstring-style listing; exact prose is
-  taken verbatim from the issue since it was already reviewed/approved
-  there.
-- Scope is limited to this one slice (2/5 of #48) as instructed; broader
-  concerns (`.ini` export wiring, CLI flags to override height/weight,
-  UI/tests around `main.py`) are explicitly deferred to later slices and not
-  addressed here.
+Items marked **[picked]** are defaults chosen here (not confirmed by existing
+code/tests/docs); **[confirmed]** items are grounded in the codebase.
+
+- **[picked]** The lock is added as an optional `reference_path: str = None`
+  keyword parameter on the **existing** `generate_sprite_img2img`, rather than a
+  new dedicated `generate_back_sprite` function. Rationale: it is the minimal,
+  lowest-risk change (existing `reference_path=None` callers and their tests are
+  untouched), keeps the img2img call in one place, and matches how the front
+  frames were locked (via `quantize_to_reference`). The issue explicitly permits
+  either approach. Note: an unused `generate_back_sprite` (txt2img-based) already
+  exists in `sprites.py` but is **not** the back-sprite path `main` uses (`main`
+  calls `generate_sprite_img2img` for the back sprite); it is left untouched to
+  avoid scope creep. **[confirmed]** that `generate_back_sprite` is currently
+  unused by `main.py`.
+- **[picked]** The parameter is a **path** (`reference_path`) rather than a
+  pre-loaded `Image`, matching how `main` already threads file paths
+  (`front_sprite_path`, `image_path`) and letting the function own the
+  `Image.open`. The issue allowed `reference_path`/`reference`; path chosen for
+  consistency.
+- **[picked]** The parameter is placed **last** in the keyword-only signature and
+  defaults to `None`, preserving every existing call site and test.
+- **[picked]** When `reference_path` is set, the reference is opened without a
+  mode conversion (the saved front sprite is already `P`-mode); a non-`P`-mode
+  reference is left to raise via `quantize_to_reference` (caught by `main`'s
+  back-sprite `except`).
+- **[confirmed]** Frame 1 (`sprite.png`) is the canonical palette source: it is
+  generated first in the loop and is saved `P`-mode by `postprocess`'s
+  `.quantize`; front frame 2 already locks to it, and this slice locks the back
+  to it too.
+- **[confirmed]** The reference is always `sprite_path` (frame 1), independent of
+  the img2img init image — in the img2img path the init is the user's drawing
+  (`args.image`) while the palette reference must still be frame 1.
+- **[confirmed]** `quantize_to_reference` already mirrors `postprocess`'s
+  resize + colour/contrast pre-steps, so switching only the palette (adaptive →
+  fixed reference) is the sole behavioural difference between the branches; it
+  does not mutate its inputs.
+- **[confirmed]** `generate_shiny` rotates only the palette keyed on `name` and
+  preserves achromatic entries, so three views sharing one palette yield three
+  identical rotated shiny palettes — `sprite_back_shiny.png` is consistent with
+  `sprite_shiny.png` / `sprite_frame2_shiny.png` with **no** change to the shiny
+  blocks (the back shiny is already `generate_shiny(back_path, …)`).
+- **[confirmed]** `export_ini` / `writer.py` need no changes — they reference no
+  sprite files (Gen 3 data fields / `stats.json` + `entry.md`).
+- **[confirmed]** Anything calling `generate_sprite_img2img` triggers a real
+  `import torch` (via `_run_img2img` → `_make_generator`) and is therefore an
+  `ml` test; the pure palette/shiny assertions in `test_sprites.py` must call
+  `quantize_to_reference` / `generate_shiny` directly, and the `main`-level
+  wiring is torch-free because `test_main.py` mocks the sprite functions.

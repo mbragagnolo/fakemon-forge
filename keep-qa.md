@@ -1,5 +1,0 @@
-- [ ] Generate a single standard Fakemon and confirm its `stats.json` has plausible `height_dm` / `weight_hg` (model-supplied, not the 10/150 default)
-- [ ] Generate a 3-stage line and confirm `height_dm` / `weight_hg` grow from stage 1 → 3 across the three `stats.json` files
-- [ ] Generate a legendary/mythical single and sanity-check its size reads "large" (~17 dm / 600 hg if the model omits the fields)
-- [ ] Confirm every generated `stats.json` has `height_dm` in 1–999 and `weight_hg` in 1–9999, and neither is `0`
-- [ ] Confirm the exported `.ini` still shows the hardcoded `Hght=5` / `Wght=30` — wiring it to the new fields is a later slice, so this is expected
