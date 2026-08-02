@@ -220,3 +220,22 @@ def test_stats_json_defaults_missing_weight_hg_to_thirty(tmp_path):
     dirs = write_output(_SINGLE, base_dir=str(tmp_path))
     data = json.loads((dirs[0] / "stats.json").read_text())
     assert data["weight_hg"] == 30
+
+
+def test_stats_json_does_not_reclamp_out_of_range_values(tmp_path):
+    """Clamping is _normalize's job; the writer trusts its input like every
+    other field, so a dict that bypassed _normalize is persisted as-is."""
+    stage = {**_STAGE_1, "height_dm": 50000, "weight_hg": 0}
+    dirs = write_output([stage], base_dir=str(tmp_path))
+    data = json.loads((dirs[0] / "stats.json").read_text())
+    assert data["height_dm"] == 50000
+    assert data["weight_hg"] == 0
+
+
+def test_stats_json_defaults_height_and_weight_per_stage(tmp_path):
+    """Writer defaults are flat 5/30 — the stage/tier-scaled table is
+    generator-only, so every stage of a line gets the same fallback."""
+    dirs = write_output(_LINE, base_dir=str(tmp_path))
+    for stage_dir in dirs:
+        data = json.loads((stage_dir / "stats.json").read_text())
+        assert (data["height_dm"], data["weight_hg"]) == (5, 30)

@@ -1,7 +1,11 @@
 import json
 from pathlib import Path
 
-_STATS_KEYS = {"name", "stage", "types", "ability", "base_stats", "levitates", "height_dm", "weight_hg"}
+# Keys persisted only if the stage dict carries them, with the fallback used
+# when it does not — hand-built/partial stage dicts must still write cleanly.
+_STATS_DEFAULTS = {"levitates": False, "height_dm": 5, "weight_hg": 30}
+
+_STATS_KEYS = {"name", "stage", "types", "ability", "base_stats", *_STATS_DEFAULTS}
 
 
 def _resolve_dir(name: str, base: Path) -> Path:
@@ -17,10 +21,9 @@ def _resolve_dir(name: str, base: Path) -> Path:
 
 
 def _write_stats(stage: dict, stage_dir: Path) -> None:
-    data = {k: stage[k] for k in _STATS_KEYS if k not in ("levitates", "height_dm", "weight_hg")}
-    data["levitates"] = stage.get("levitates", False)
-    data["height_dm"] = stage.get("height_dm", 5)
-    data["weight_hg"] = stage.get("weight_hg", 30)
+    data = {k: stage[k] for k in _STATS_KEYS if k not in _STATS_DEFAULTS}
+    for key, fallback in _STATS_DEFAULTS.items():
+        data[key] = stage.get(key, fallback)
     (stage_dir / "stats.json").write_text(
         json.dumps(data, indent=2), encoding="utf-8"
     )
