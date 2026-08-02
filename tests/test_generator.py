@@ -168,6 +168,97 @@ def test_prints_raw_response_on_double_failure(capsys):
 
 
 # ---------------------------------------------------------------------------
+# Name normalization (Gen 3 charset + 10-char limit)
+# ---------------------------------------------------------------------------
+
+def test_valid_name_passes_through_in_one_call():
+    client = _make_client(json.dumps([_STAGE_1]))
+    result = generate_fakemon("fire lizard", "single", client=client)
+    assert client.chat.complete.call_count == 1
+    assert result[0]["name"] == "Flamburr"
+
+
+def test_too_long_name_triggers_corrective_retry():
+    too_long = {**_STAGE_1, "name": "Flamburronix"}
+    good = {**_STAGE_1, "name": "Flamburron"}
+    client = _make_client(json.dumps([too_long]), json.dumps([good]))
+    result = generate_fakemon("fire lizard", "single", client=client)
+    assert client.chat.complete.call_count == 2
+    assert result[0]["name"] == "Flamburron"
+    second_call_messages = client.chat.complete.call_args.kwargs["messages"]
+    corrective = second_call_messages[-1]
+    assert corrective["role"] == "user"
+    assert "Flamburronix" in corrective["content"]
+
+
+def test_illegal_char_name_triggers_corrective_retry():
+    illegal = {**_STAGE_1, "name": "Flam@burr"}
+    good = {**_STAGE_1, "name": "Flamburr"}
+    client = _make_client(json.dumps([illegal]), json.dumps([good]))
+    result = generate_fakemon("fire lizard", "single", client=client)
+    assert client.chat.complete.call_count == 2
+    assert result[0]["name"] == "Flamburr"
+    second_call_messages = client.chat.complete.call_args.kwargs["messages"]
+    corrective = second_call_messages[-1]
+    assert corrective["role"] == "user"
+    assert "Flam@burr" in corrective["content"]
+
+
+def test_both_violations_at_once_trigger_single_retry():
+    both_bad = {**_STAGE_1, "name": "Flamburronix@"}
+    good = {**_STAGE_1, "name": "Flamburron"}
+    client = _make_client(json.dumps([both_bad]), json.dumps([good]))
+    result = generate_fakemon("fire lizard", "single", client=client)
+    assert client.chat.complete.call_count == 2
+    assert result[0]["name"] == "Flamburron"
+    second_call_messages = client.chat.complete.call_args.kwargs["messages"]
+    corrective = second_call_messages[-1]
+    assert "Flamburronix@" in corrective["content"]
+
+
+def test_last_resort_repair_truncates_too_long_name():
+    too_long = {**_STAGE_1, "name": "Flamburronix"}
+    still_too_long = {**_STAGE_1, "name": "Flamburronix"}
+    client = _make_client(json.dumps([too_long]), json.dumps([still_too_long]))
+    result = generate_fakemon("fire lizard", "single", client=client)
+    assert client.chat.complete.call_count == 2
+    assert result[0]["name"] == "Flamburronix"[:10]
+    assert len(result[0]["name"]) == 10
+
+
+def test_last_resort_repair_strips_illegal_chars():
+    illegal = {**_STAGE_1, "name": "Flam@burr"}
+    still_illegal = {**_STAGE_1, "name": "Flam@burr"}
+    client = _make_client(json.dumps([illegal]), json.dumps([still_illegal]))
+    result = generate_fakemon("fire lizard", "single", client=client)
+    assert client.chat.complete.call_count == 2
+    assert result[0]["name"] == "Flamburr"
+
+
+def test_last_resort_repair_strips_then_truncates():
+    both_bad = {**_STAGE_1, "name": "Flamburronix@wow"}
+    still_bad = {**_STAGE_1, "name": "Flamburronix@wow"}
+    client = _make_client(json.dumps([both_bad]), json.dumps([still_bad]))
+    result = generate_fakemon("fire lizard", "single", client=client)
+    assert client.chat.complete.call_count == 2
+    stripped = "Flamburronixwow"
+    assert result[0]["name"] == stripped[:10]
+
+
+def test_line_mode_only_names_offending_stages_in_corrective_message():
+    bad_stage2 = {**_STAGE_2, "name": "Flamburronix"}
+    line = [_STAGE_1, bad_stage2, _STAGE_3]
+    good_line = _LINE
+    client = _make_client(json.dumps(line), json.dumps(good_line))
+    result = generate_fakemon("fire lizard", "line", client=client)
+    assert client.chat.complete.call_count == 2
+    assert [s["name"] for s in result] == ["Flamburr", "Flamburro", "Flamburron"]
+    second_call_messages = client.chat.complete.call_args.kwargs["messages"]
+    corrective = second_call_messages[-1]
+    assert "Flamburronix" in corrective["content"]
+
+
+# ---------------------------------------------------------------------------
 # API errors
 # ---------------------------------------------------------------------------
 
