@@ -2,7 +2,7 @@ import json
 import pytest
 from unittest.mock import MagicMock, patch
 
-from fakemon_forge.generator import generate_fakemon, _normalize, _SYSTEM_PROMPT
+from fakemon_forge.generator import generate_fakemon, _normalize, _SYSTEM_PROMPT, _ABILITY_POOL
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -712,3 +712,135 @@ def test_generate_fakemon_always_emits_in_range_height_and_weight():
     for stage in generate_fakemon("fire lizard", "line", client=client):
         assert isinstance(stage["height_dm"], int) and 1 <= stage["height_dm"] <= 999
         assert isinstance(stage["weight_hg"], int) and 1 <= stage["weight_hg"] <= 9999
+
+
+# ---------------------------------------------------------------------------
+# abilities_gen3 pool and system prompt
+# ---------------------------------------------------------------------------
+
+def test_ability_pool_has_76_entries():
+    """Pool excludes index 0 (None) and index 76 (Cacophony) from the 78-entry table."""
+    assert len(_ABILITY_POOL) == 76
+
+
+def test_ability_pool_excludes_none():
+    assert "None" not in _ABILITY_POOL
+
+
+def test_ability_pool_excludes_cacophony():
+    assert "Cacophony" not in _ABILITY_POOL
+
+
+def test_ability_pool_includes_air_lock():
+    """Index 77 (Air Lock) is usable — only indexes 0 and 76 are excluded."""
+    assert "Air Lock" in _ABILITY_POOL
+
+
+def test_system_prompt_mentions_abilities_gen3_field():
+    assert "abilities_gen3" in _SYSTEM_PROMPT
+
+
+def test_system_prompt_lists_real_abilities():
+    assert "Blaze" in _SYSTEM_PROMPT
+    assert "Compound Eyes" in _SYSTEM_PROMPT
+
+
+def test_system_prompt_excludes_cacophony():
+    assert "Cacophony" not in _SYSTEM_PROMPT
+
+
+def test_system_prompt_ability_list_excludes_none_entry():
+    """The embedded pool must not contain the literal "None" ability name."""
+    assert "None" not in _ABILITY_POOL
+
+
+# ---------------------------------------------------------------------------
+# abilities_gen3 validation in _normalize
+# ---------------------------------------------------------------------------
+
+def test_normalize_keeps_valid_ability():
+    stage = {**_STAGE_1, "abilities_gen3": ["Blaze"]}
+    result = _normalize([stage], "single", "standard")
+    assert result[0]["abilities_gen3"] == ["Blaze"]
+
+
+def test_normalize_drops_invalid_ability_keeps_valid():
+    stage = {**_STAGE_1, "abilities_gen3": ["Blaze", "Solar Power"]}
+    result = _normalize([stage], "single", "standard")
+    assert result[0]["abilities_gen3"] == ["Blaze"]
+
+
+def test_normalize_drops_all_invented_abilities():
+    stage = {**_STAGE_1, "abilities_gen3": ["Molten Core", "Ashwalk"]}
+    result = _normalize([stage], "single", "standard")
+    assert result[0]["abilities_gen3"] == []
+
+
+def test_normalize_drops_none_literal():
+    stage = {**_STAGE_1, "abilities_gen3": ["None"]}
+    result = _normalize([stage], "single", "standard")
+    assert result[0]["abilities_gen3"] == []
+
+
+def test_normalize_drops_cacophony_literal():
+    stage = {**_STAGE_1, "abilities_gen3": ["Cacophony"]}
+    result = _normalize([stage], "single", "standard")
+    assert result[0]["abilities_gen3"] == []
+
+
+def test_normalize_missing_key_defaults_to_empty_list():
+    stage = {**_STAGE_1}
+    stage.pop("abilities_gen3", None)
+    result = _normalize([stage], "single", "standard")
+    assert result[0]["abilities_gen3"] == []
+
+
+def test_normalize_empty_list_stays_empty():
+    stage = {**_STAGE_1, "abilities_gen3": []}
+    result = _normalize([stage], "single", "standard")
+    assert result[0]["abilities_gen3"] == []
+
+
+def test_normalize_canonicalizes_casing_and_spacing():
+    stage = {**_STAGE_1, "abilities_gen3": ["compoundeyes"]}
+    result = _normalize([stage], "single", "standard")
+    assert result[0]["abilities_gen3"] == ["Compound Eyes"]
+
+
+def test_normalize_canonicalizes_extra_whitespace():
+    stage = {**_STAGE_1, "abilities_gen3": ["COMPOUND  EYES"]}
+    result = _normalize([stage], "single", "standard")
+    assert result[0]["abilities_gen3"] == ["Compound Eyes"]
+
+
+def test_normalize_collapses_duplicates_different_casing():
+    stage = {**_STAGE_1, "abilities_gen3": ["Compound Eyes", "compoundeyes"]}
+    result = _normalize([stage], "single", "standard")
+    assert result[0]["abilities_gen3"] == ["Compound Eyes"]
+
+
+def test_normalize_dedup_then_cap_keeps_two_distinct():
+    """Cap-then-dedup would wrongly yield only one entry here."""
+    stage = {**_STAGE_1, "abilities_gen3": ["Blaze", "blaze", "Flash Fire"]}
+    result = _normalize([stage], "single", "standard")
+    assert result[0]["abilities_gen3"] == ["Blaze", "Flash Fire"]
+
+
+def test_normalize_caps_three_plus_valid_distinct_to_two():
+    stage = {**_STAGE_1, "abilities_gen3": ["Blaze", "Flash Fire", "Compound Eyes"]}
+    result = _normalize([stage], "single", "standard")
+    assert result[0]["abilities_gen3"] == ["Blaze", "Flash Fire"]
+
+
+def test_normalize_abilities_gen3_makes_no_api_call():
+    client = MagicMock()
+    with patch("fakemon_forge.generator.Mistral", return_value=client):
+        _normalize([{**_STAGE_1, "abilities_gen3": ["blaze"]}], "single", "standard")
+    client.chat.complete.assert_not_called()
+
+
+def test_generate_fakemon_normalizes_abilities_gen3():
+    stage = {**_STAGE_1, "abilities_gen3": ["blaze", "Solar Power"]}
+    client = _make_client(json.dumps([stage]))
+    result = generate_fakemon("fire lizard", "single", client=client)
+    assert result[0]["abilities_gen3"] == ["Blaze"]

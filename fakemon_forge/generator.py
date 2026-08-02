@@ -1,9 +1,25 @@
 import json
 import sys
+from pathlib import Path
 
 from mistralai.client import Mistral
 
 _MODEL = "mistral-large-latest"
+
+_RESOURCES = Path(__file__).parent.parent / "resources"
+
+
+def _normalize_ability_name(name: str) -> str:
+    return "".join(name.split()).lower()
+
+
+_ABILITIES_BY_INDEX: dict[str, str] = json.loads(
+    (_RESOURCES / "gen3_abilities.json").read_text(encoding="utf-8")
+)
+_ABILITY_POOL = [
+    name for idx, name in _ABILITIES_BY_INDEX.items() if idx not in ("0", "76")
+]
+_ABILITY_LOOKUP = {_normalize_ability_name(name): name for name in _ABILITY_POOL}
 
 _MAX_NAME_LEN = 10
 
@@ -22,13 +38,21 @@ _BST_TARGETS = {
     "mythical": {"stage1": 600},
 }
 
-_SYSTEM_PROMPT = """\
+_SYSTEM_PROMPT = f"""\
 You are a Pokémon game designer. Generate Fakemon data as a JSON array.
 Each element represents one evolutionary stage and must have exactly these fields:
   name          – portmanteau-style name (string)
   stage         – stage number as an integer (1, 2, or 3)
   types         – list of 1 or 2 type strings, e.g. ["Fire"] or ["Water", "Flying"]
   ability       – one ability name (string)
+  abilities_gen3 – list of 1 or 2 distinct real Gen 3 ability names, chosen only from this list:
+    {", ".join(_ABILITY_POOL)}
+    Prefer two abilities (authentic Gen 3 species are roughly half dual-ability, and variety
+    is preferred); one is acceptable for a single signature ability.
+    In an evolutionary line, all stages should share the same abilities_gen3; the final stage
+    may add one more.
+    The free-text ability above should express the same concept as the chosen abilities_gen3
+    entries.
   base_stats    – object with integer values for: hp, attack, defense, sp_atk, sp_def, speed
   pokedex_entry – 2 sentence flavour text (string)
   sprite_prompt – visual description for pixel-art sprite generation; max 75 words, lead with the creature's most distinctive shape and colour features (string)
@@ -146,15 +170,32 @@ _SIZE_DEFAULTS_BY_TIER = {
 }
 
 
+def _normalize_abilities_gen3(raw: list) -> list[str]:
+    """Drop entries outside the Gen 3 pool, canonicalize spelling, collapse
+    duplicates (by normalized form), then cap at 2 — in that order, so a
+    dedup-worthy duplicate can't crowd out a later distinct valid entry."""
+    result = []
+    seen = set()
+    for entry in raw:
+        key = _normalize_ability_name(entry)
+        canonical = _ABILITY_LOOKUP.get(key)
+        if canonical is None or key in seen:
+            continue
+        seen.add(key)
+        result.append(canonical)
+    return result[:2]
+
+
 def _normalize(stages: list[dict], mode: str, tier: str) -> list[dict]:
-    """Post-parse cleanup pass: enforces the name contract, and defaults/clamps
-    height_dm and weight_hg.
+    """Post-parse cleanup pass: enforces the name contract, defaults/clamps
+    height_dm and weight_hg, and filters abilities_gen3 to the Gen 3 pool.
 
     Repair is idempotent: a name already inside the Gen 3 contract comes out
     of ``_repair_name`` unchanged, so valid names pass through untouched.
     """
     for stage in stages:
         stage["name"] = _repair_name(stage["name"])
+        stage["abilities_gen3"] = _normalize_abilities_gen3(stage.get("abilities_gen3", []))
 
         if "height_dm" not in stage or "weight_hg" not in stage:
             if mode == "line":
