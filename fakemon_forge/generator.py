@@ -128,12 +128,13 @@ def _repair_name(name: str) -> str:
 
 
 def _normalize(stages: list[dict], mode: str, tier: str) -> list[dict]:
-    """Post-parse cleanup pass. Currently enforces the name contract only."""
-    too_long, illegal = _name_violations(stages)
-    offenders = set(too_long) | set(illegal)
+    """Post-parse cleanup pass. Currently enforces the name contract only.
+
+    Repair is idempotent: a name already inside the Gen 3 contract comes out
+    of ``_repair_name`` unchanged, so valid names pass through untouched.
+    """
     for stage in stages:
-        if stage["name"] in offenders:
-            stage["name"] = _repair_name(stage["name"])
+        stage["name"] = _repair_name(stage["name"])
     return stages
 
 

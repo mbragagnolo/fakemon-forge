@@ -1,0 +1,6 @@
+- [ ] Generate a single Fakemon from a description that invites a long name (e.g. "a molten volcanic dragon lizard") and confirm every generated name is ≤ 10 characters.
+- [ ] Generate a `line` (3 stages) and confirm all three stage names are ≤ 10 characters and the `output/` directory names match the names shown in the CLI output.
+- [ ] Confirm a run where the model gets the name right first time still makes only one API call (no wasted retry) — watch latency or add temporary logging.
+- [ ] Confirm names that legitimately use Gen 3 punctuation/symbols (`Ho-Oh`, `Farfetch'd`, `Mr. Mime`, `é`, `♂`, `♀`) survive to `output/` and the exported `.ini` unmangled.
+- [ ] Force a malformed-JSON response (bad API key or stub) and confirm the pre-existing "malformed JSON after 2 attempts" error and exit code 1 are unchanged.
+- [ ] Spot-check that a retried name looks model-chosen (e.g. `Flamburron`) rather than mechanically chopped (`Flamburro`), confirming the corrective retry — not truncation — is doing the work.
