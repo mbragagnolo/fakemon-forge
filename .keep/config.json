@@ -1,0 +1,9 @@
+{
+  "agent": {
+    "model": "claude-sonnet-5",
+    "phases": {
+      "feature/review": { "model": "claude-opus-5" },
+      "bugfix/review": { "model": "claude-opus-5" }
+    }
+  }
+}
