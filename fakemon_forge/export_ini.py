@@ -86,6 +86,39 @@ def _resolve_ability(name: str) -> int:
     return _ABILITY_FALLBACK.get(lower, 0)
 
 
+def _ability_indexes(data: dict) -> tuple[int, int]:
+    """Resolve the (ability1, ability2) byte indexes for the BaseStats blob.
+
+    Prefers the real Gen 3 names in ``abilities_gen3``; anything malformed
+    (absent, empty, or not a list) falls back to the legacy free-text
+    ``ability`` with an empty second slot.
+    """
+    names = data.get("abilities_gen3")
+    if not isinstance(names, list) or not names:
+        return _resolve_ability(data.get("ability", "")), 0x00
+
+    def idx(pos: int) -> int:
+        if pos < len(names) and isinstance(names[pos], str):
+            return _resolve_ability(names[pos])
+        return 0x00
+
+    return idx(0), idx(1)
+
+
+def _dimension(data: dict, key: str, legacy: int) -> int:
+    """Read a ``Hght``/``Wght`` value, falling back to the legacy literal.
+
+    Keyed on the value's type rather than its truthiness so a legitimate ``0``
+    round-trips; a present-but-non-integer value (malformed file) degrades to
+    the literal rather than writing a junk token into the .ini. Values are
+    already clamped upstream at generation time, so no re-clamping here.
+    """
+    value = data.get(key)
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    return legacy
+
+
 def _dex_number(name: str) -> int:
     return int(hashlib.md5(name.encode()).hexdigest(), 16) % 200 + 1
 
@@ -175,20 +208,14 @@ def export_ini(stage_dir: Path) -> Path:
     data = json.loads((stage_dir / "stats.json").read_text(encoding="utf-8"))
     entry = (stage_dir / "entry.md").read_text(encoding="utf-8").strip()
 
-    abilities_gen3 = data.get("abilities_gen3")
-    if abilities_gen3:
-        ability1_idx = _resolve_ability(abilities_gen3[0])
-        ability2_idx = _resolve_ability(abilities_gen3[1]) if len(abilities_gen3) >= 2 else 0x00
-    else:
-        ability1_idx = _resolve_ability(data.get("ability", ""))
-        ability2_idx = 0x00
+    ability1_idx, ability2_idx = _ability_indexes(data)
 
     dex = _dex_number(data["name"])
     base_stats = _encode_base_stats(data, ability1_idx, ability2_idx)
     moves = _build_moveset(data)
 
-    height_dm = data["height_dm"] if "height_dm" in data else 5
-    weight_hg = data["weight_hg"] if "weight_hg" in data else 30
+    height_dm = _dimension(data, "height_dm", 5)
+    weight_hg = _dimension(data, "weight_hg", 30)
 
     category = data.get("category")
     if isinstance(category, str) and category:

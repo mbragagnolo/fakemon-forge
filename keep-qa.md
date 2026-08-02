@@ -1,0 +1,5 @@
+- [ ] Run `python -m fakemon_forge.export_ini output/<name>/stage1_*` on an **existing** (legacy) stage dir and confirm the `.ini` is unchanged except `PokedexType`, which drops the `" POKEMON"` suffix (e.g. `PokedexType=WATER`) — `Hght=5`, `Wght=30` and the `BaseStats` blob must be byte-identical.
+- [ ] Hand-add `height_dm`, `weight_hg`, `abilities_gen3` (two real Gen 3 names) and `category` to a `stats.json`, re-export, and confirm `Hght`/`Wght`/`PokedexType` reflect them and `category` is emitted verbatim (not upper-cased).
+- [ ] Load a re-exported `.ini` in the Gen 3 editor tooling and confirm it still parses — `BaseStats` is still 56 hex chars and the second ability now shows up on the species.
+- [ ] Export a dir whose `abilities_gen3` has only one entry and confirm the second ability slot reads as empty/None in the editor rather than a stray ability.
+- [ ] Run `export_ini` with no args over a whole `output/` tree and confirm every stage dir exports without a traceback.

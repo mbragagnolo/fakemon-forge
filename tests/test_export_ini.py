@@ -1,6 +1,11 @@
 import json
+import pytest
 
 from fakemon_forge.export_ini import export_ini
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
 
 _ENTRY = "A small fiery creature with a burning tail tip."
 
@@ -15,6 +20,11 @@ _BASE = {
     },
 }
 
+# Canonical indexes from resources/gen3_abilities.json
+_BLAZE = "42"      # 66
+_SAND_VEIL = "08"  # 8
+_NONE = "00"
+
 
 def _write_stage(tmp_path, data, entry=_ENTRY):
     (tmp_path / "stats.json").write_text(json.dumps(data), encoding="utf-8")
@@ -27,104 +37,186 @@ def _read_ini(path):
     return dict(line.split("=", 1) for line in lines if "=" in line)
 
 
+def _export(tmp_path, data, entry=_ENTRY):
+    return _read_ini(export_ini(_write_stage(tmp_path, data, entry)))
+
+
+def _abilities(fields):
+    """(ability1, ability2) hex bytes at offsets 22/23 of the BaseStats blob."""
+    blob = fields["BaseStats"]
+    return blob[44:46], blob[46:48]
+
+
+# ---------------------------------------------------------------------------
+# New-format round trip
+# ---------------------------------------------------------------------------
+
 def test_new_format_round_trip(tmp_path):
-    data = {
+    fields = _export(tmp_path, {
         **_BASE,
         "height_dm": 7,
         "weight_hg": 120,
         "abilities_gen3": ["Blaze", "Sand Veil"],
         "category": "Flame",
-    }
-    stage_dir = _write_stage(tmp_path, data)
-    out = export_ini(stage_dir)
-    fields = _read_ini(out)
+    })
 
     assert fields["Hght"] == "7"
     assert fields["Wght"] == "120"
     assert fields["PokedexType"] == "Flame"
+    assert _abilities(fields) == (_BLAZE, _SAND_VEIL)
 
-    base_stats = fields["BaseStats"]
-    ability1 = base_stats[44:46]
-    ability2 = base_stats[46:48]
-    assert ability1 == f"{66:02X}"  # Blaze
-    assert ability2 == f"{8:02X}"   # Sand Veil
 
+def test_output_path_and_blob_length_unchanged(tmp_path):
+    stage_dir = _write_stage(tmp_path, {**_BASE, "abilities_gen3": ["Blaze", "Sand Veil"]})
+    out = export_ini(stage_dir)
+
+    assert out == stage_dir / "Flamburr.ini"
+    # 28-byte BaseStats blob; the ability2 byte must not have grown the record.
+    assert len(_read_ini(out)["BaseStats"]) == 56
+
+
+# ---------------------------------------------------------------------------
+# Legacy fallback
+# ---------------------------------------------------------------------------
 
 def test_legacy_fallback(tmp_path):
-    stage_dir = _write_stage(tmp_path, dict(_BASE))
-    out = export_ini(stage_dir)
-    fields = _read_ini(out)
+    fields = _export(tmp_path, dict(_BASE))
 
     assert fields["Hght"] == "5"
     assert fields["Wght"] == "30"
+    assert _abilities(fields) == (_BLAZE, _NONE)
+    # PokedexType keeps the type-word derivation, minus the dropped suffix.
+    assert fields["PokedexType"] == "FIRE"
     assert " POKEMON" not in fields["PokedexType"]
 
-    base_stats = fields["BaseStats"]
-    ability2 = base_stats[46:48]
-    assert ability2 == "00"
+
+def test_legacy_missing_ability_key_resolves_to_zero(tmp_path):
+    data = {k: v for k, v in _BASE.items() if k != "ability"}
+    assert _abilities(_export(tmp_path, data)) == (_NONE, _NONE)
 
 
-def test_height_and_weight_independent_fallback(tmp_path):
-    data = {**_BASE, "height_dm": 0}
-    stage_dir = _write_stage(tmp_path, data)
-    out = export_ini(stage_dir)
-    fields = _read_ini(out)
+# ---------------------------------------------------------------------------
+# Height / weight
+# ---------------------------------------------------------------------------
 
-    assert fields["Hght"] == "0"
-    assert fields["Wght"] == "30"
+def test_zero_height_round_trips(tmp_path):
+    """0 is falsy but present — it must not fall back to the legacy literal."""
+    assert _export(tmp_path, {**_BASE, "height_dm": 0})["Hght"] == "0"
 
+
+@pytest.mark.parametrize("data, hght, wght", [
+    ({"height_dm": 7}, "7", "30"),
+    ({"weight_hg": 120}, "5", "120"),
+])
+def test_height_and_weight_fall_back_independently(tmp_path, data, hght, wght):
+    fields = _export(tmp_path, {**_BASE, **data})
+    assert (fields["Hght"], fields["Wght"]) == (hght, wght)
+
+
+@pytest.mark.parametrize("bad", [None, "tall", True, [7], {"dm": 7}])
+def test_non_integer_dimensions_fall_back(tmp_path, bad):
+    """A malformed value degrades to the legacy literal, never a junk token."""
+    fields = _export(tmp_path, {**_BASE, "height_dm": bad, "weight_hg": bad})
+    assert (fields["Hght"], fields["Wght"]) == ("5", "30")
+
+
+# ---------------------------------------------------------------------------
+# Ability bytes
+# ---------------------------------------------------------------------------
 
 def test_abilities_gen3_single_entry(tmp_path):
-    data = {**_BASE, "abilities_gen3": ["Blaze"]}
-    stage_dir = _write_stage(tmp_path, data)
-    out = export_ini(stage_dir)
-    fields = _read_ini(out)
-
-    base_stats = fields["BaseStats"]
-    ability1 = base_stats[44:46]
-    ability2 = base_stats[46:48]
-    assert ability1 == f"{66:02X}"
-    assert ability2 == "00"
+    fields = _export(tmp_path, {**_BASE, "abilities_gen3": ["Sand Veil"]})
+    assert _abilities(fields) == (_SAND_VEIL, _NONE)
 
 
-def test_abilities_gen3_empty_falls_back_to_ability(tmp_path):
-    data = {**_BASE, "abilities_gen3": []}
-    stage_dir = _write_stage(tmp_path, data)
-    out = export_ini(stage_dir)
-    fields = _read_ini(out)
+def test_abilities_gen3_takes_precedence_over_free_text_ability(tmp_path):
+    """ability1 comes from abilities_gen3, not data["ability"], when present."""
+    fields = _export(tmp_path, {**_BASE, "abilities_gen3": ["Sand Veil"]})
+    ability1, _ = _abilities(fields)
+    assert ability1 == _SAND_VEIL != _BLAZE
 
-    base_stats = fields["BaseStats"]
-    ability1 = base_stats[44:46]
-    ability2 = base_stats[46:48]
-    assert ability1 == f"{66:02X}"  # from data["ability"] == "Blaze"
-    assert ability2 == "00"
 
+def test_unresolvable_abilities_gen3_entry_resolves_to_zero(tmp_path):
+    """No canonical match and no _ABILITY_FALLBACK entry → index 0, no raise."""
+    fields = _export(tmp_path, {**_BASE, "abilities_gen3": ["Not An Ability", "Blaze"]})
+    assert _abilities(fields) == (_NONE, _BLAZE)
+
+
+@pytest.mark.parametrize("value", [[], None])
+def test_absent_or_empty_abilities_gen3_falls_back_to_ability(tmp_path, value):
+    data = {**_BASE, "abilities_gen3": value} if value is not None else dict(_BASE)
+    assert _abilities(_export(tmp_path, data)) == (_BLAZE, _NONE)
+
+
+@pytest.mark.parametrize("bad", ["Blaze", 42, {"1": "Blaze"}])
+def test_non_list_abilities_gen3_falls_back_to_ability(tmp_path, bad):
+    """A malformed abilities_gen3 is treated as absent rather than raising."""
+    assert _abilities(_export(tmp_path, {**_BASE, "abilities_gen3": bad})) == (_BLAZE, _NONE)
+
+
+@pytest.mark.parametrize("entries, expected", [
+    ([None, "Sand Veil"], (_NONE, _SAND_VEIL)),
+    (["Blaze", 42], (_BLAZE, _NONE)),
+])
+def test_non_string_abilities_gen3_entries_resolve_to_zero(tmp_path, entries, expected):
+    assert _abilities(_export(tmp_path, {**_BASE, "abilities_gen3": entries})) == expected
+
+
+def test_ability_moves_stay_keyed_on_free_text_ability(tmp_path):
+    """_ABILITY_MOVES is not consulted for abilities_gen3 (out of scope per spec)."""
+    custom = {**_BASE, "ability": "Steam Engine"}
+    legacy = _export(tmp_path, custom)
+
+    with_gen3 = _export(tmp_path, {**custom, "abilities_gen3": ["Sand Veil"]})
+
+    # Same movepool (still driven by "Steam Engine")...
+    assert with_gen3["LevelUpAttacksOriginal"] == legacy["LevelUpAttacksOriginal"]
+    # ...but the ability byte now comes from abilities_gen3, not the fallback map.
+    assert _abilities(with_gen3)[0] == _SAND_VEIL
+    assert _abilities(legacy)[0] == f"{33:02X}"  # _ABILITY_FALLBACK["steam engine"]
+
+
+# ---------------------------------------------------------------------------
+# PokedexType
+# ---------------------------------------------------------------------------
 
 def test_pokedex_type_from_category(tmp_path):
-    data = {**_BASE, "category": "Flame"}
-    stage_dir = _write_stage(tmp_path, data)
-    out = export_ini(stage_dir)
-    fields = _read_ini(out)
-
+    fields = _export(tmp_path, {**_BASE, "category": "Flame"})
     assert fields["PokedexType"] == "Flame"
     assert " POKEMON" not in fields["PokedexType"]
 
 
-def test_pokedex_type_falls_back_to_type_word(tmp_path):
-    data = {**_BASE, "category": ""}
-    stage_dir = _write_stage(tmp_path, data)
-    out = export_ini(stage_dir)
-    fields = _read_ini(out)
+def test_pokedex_type_category_emitted_verbatim(tmp_path):
+    """Free-text category is passed through, not upper-cased."""
+    assert _export(tmp_path, {**_BASE, "category": "Sea Otter"})["PokedexType"] == "Sea Otter"
 
+
+@pytest.mark.parametrize("category", ["", None, 42, ["Flame"]])
+def test_pokedex_type_falls_back_to_type_word(tmp_path, category):
+    fields = _export(tmp_path, {**_BASE, "category": category})
     assert fields["PokedexType"] == "FIRE"
     assert " POKEMON" not in fields["PokedexType"]
 
 
-def test_pokedex_type_non_string_category_falls_back(tmp_path):
-    data = {**_BASE, "category": 42}
-    stage_dir = _write_stage(tmp_path, data)
-    out = export_ini(stage_dir)
-    fields = _read_ini(out)
+def test_pokedex_type_uses_primary_type_of_dual_type(tmp_path):
+    fields = _export(tmp_path, {**_BASE, "types": ["Water", "Flying"]})
+    assert fields["PokedexType"] == "WATER"
 
-    assert fields["PokedexType"] == "FIRE"
-    assert " POKEMON" not in fields["PokedexType"]
+
+# ---------------------------------------------------------------------------
+# Errors — unchanged propagation for genuinely missing input
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("missing", ["stats.json", "entry.md"])
+def test_missing_input_file_raises(tmp_path, missing):
+    _write_stage(tmp_path, dict(_BASE))
+    (tmp_path / missing).unlink()
+    with pytest.raises(FileNotFoundError):
+        export_ini(tmp_path)
+
+
+@pytest.mark.parametrize("key", ["name", "types", "base_stats"])
+def test_missing_required_legacy_key_raises(tmp_path, key):
+    data = {k: v for k, v in _BASE.items() if k != key}
+    with pytest.raises(KeyError):
+        export_ini(_write_stage(tmp_path, data))
