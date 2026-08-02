@@ -22,6 +22,7 @@ _ABILITY_POOL = [
 _ABILITY_LOOKUP = {_normalize_ability_name(name): name for name in _ABILITY_POOL}
 
 _MAX_NAME_LEN = 10
+_MAX_CATEGORY_LEN = 11
 
 _ALLOWED_NAME_CHARS = set(
     "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
@@ -44,6 +45,9 @@ Each element represents one evolutionary stage and must have exactly these field
   name          – portmanteau-style name (string)
   stage         – stage number as an integer (1, 2, or 3)
   types         – list of 1 or 2 type strings, e.g. ["Fire"] or ["Water", "Flying"]
+  category      – Pokédex category noun in caps, max 11 characters, e.g. "SEED",
+    "MOUSE", "TINY TURTLE". Describes what the creature *is*, not its type —
+    never "FIRE" or "WATER". No trailing "POKEMON".
   ability       – one ability name (string)
   abilities_gen3 – list of 1 or 2 distinct real Gen 3 ability names, chosen only from this list:
     {", ".join(_ABILITY_POOL)}
@@ -186,6 +190,20 @@ def _normalize_abilities_gen3(raw: list) -> list[str]:
     return result[:2]
 
 
+def _normalize_category(raw, types: list[str]) -> str:
+    """Uppercase/truncate/strip-trailing-"POKEMON" for the Pokédex category
+    noun; falls back to the primary type word when raw is missing, empty,
+    non-str, or cleans away to nothing. Truncation is immediate — unlike
+    ``name``, an over-long category never triggers a retry."""
+    if not isinstance(raw, str) or not raw:
+        return types[0].upper()
+    cleaned = "".join(ch for ch in raw if ch in _ALLOWED_NAME_CHARS)
+    if cleaned.upper().endswith(" POKEMON"):
+        cleaned = cleaned[: -len(" POKEMON")]
+    result = cleaned.upper()[:_MAX_CATEGORY_LEN]
+    return result or types[0].upper()
+
+
 def _normalize(stages: list[dict], mode: str, tier: str) -> list[dict]:
     """Post-parse cleanup pass: enforces the name contract, defaults/clamps
     height_dm and weight_hg, and filters abilities_gen3 to the Gen 3 pool.
@@ -196,6 +214,7 @@ def _normalize(stages: list[dict], mode: str, tier: str) -> list[dict]:
     for stage in stages:
         stage["name"] = _repair_name(stage["name"])
         stage["abilities_gen3"] = _normalize_abilities_gen3(stage.get("abilities_gen3", []))
+        stage["category"] = _normalize_category(stage.get("category"), stage["types"])
 
         if "height_dm" not in stage or "weight_hg" not in stage:
             if mode == "line":

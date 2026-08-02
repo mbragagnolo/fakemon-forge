@@ -928,3 +928,165 @@ def test_generate_fakemon_emits_abilities_gen3_on_every_stage():
     client = _make_client(json.dumps(_LINE))
     result = generate_fakemon("fire lizard", "line", client=client)
     assert [s["abilities_gen3"] for s in result] == [[], [], []]
+
+
+# ---------------------------------------------------------------------------
+# category field: prompt
+# ---------------------------------------------------------------------------
+
+def test_system_prompt_mentions_category_field():
+    assert "category" in _SYSTEM_PROMPT
+
+
+def test_system_prompt_category_gives_examples():
+    assert '"SEED"' in _SYSTEM_PROMPT
+    assert '"MOUSE"' in _SYSTEM_PROMPT
+    assert '"TINY TURTLE"' in _SYSTEM_PROMPT
+
+
+def test_system_prompt_category_forbids_type_word():
+    assert "not its type" in _SYSTEM_PROMPT.lower()
+    assert '"FIRE"' in _SYSTEM_PROMPT or '"WATER"' in _SYSTEM_PROMPT
+
+
+def test_system_prompt_category_forbids_trailing_pokemon():
+    assert "POKEMON" in _SYSTEM_PROMPT
+    assert "No trailing" in _SYSTEM_PROMPT
+
+
+def test_system_prompt_category_states_max_length():
+    assert "11 characters" in _SYSTEM_PROMPT
+
+
+# ---------------------------------------------------------------------------
+# category field: normalization in _normalize
+# ---------------------------------------------------------------------------
+
+def test_normalize_uppercases_lowercase_category():
+    stage = {**_STAGE_1, "category": "seed"}
+    result = _normalize([stage], "single", "standard")
+    assert result[0]["category"] == "SEED"
+
+
+def test_normalize_uppercases_mixed_case_category():
+    stage = {**_STAGE_1, "category": "Tiny Turtle"}
+    result = _normalize([stage], "single", "standard")
+    assert result[0]["category"] == "TINY TURTLE"
+
+
+def test_normalize_category_exactly_eleven_chars_passes_through():
+    """`> 11` is the failure condition, not `>= 11`."""
+    stage = {**_STAGE_1, "category": "TINY TURTLE"}
+    assert len("TINY TURTLE") == 11
+    result = _normalize([stage], "single", "standard")
+    assert result[0]["category"] == "TINY TURTLE"
+
+
+def test_normalize_category_over_eleven_chars_truncated_no_retry():
+    stage = {**_STAGE_1, "category": "TINY TURTLES"}
+    assert len("TINY TURTLES") == 12
+    result = _normalize([stage], "single", "standard")
+    assert result[0]["category"] == "TINY TURTLE"
+    assert len(result[0]["category"]) == 11
+
+
+def test_normalize_category_truncation_makes_no_api_call():
+    client = MagicMock()
+    stage = {**_STAGE_1, "category": "WAY TOO LONG NOUN HERE"}
+    with patch("fakemon_forge.generator.Mistral", return_value=client):
+        _normalize([stage], "single", "standard")
+    client.chat.complete.assert_not_called()
+
+
+def test_normalize_category_strips_illegal_chars():
+    stage = {**_STAGE_1, "category": "SE@ED"}
+    result = _normalize([stage], "single", "standard")
+    assert result[0]["category"] == "SEED"
+
+
+def test_normalize_category_strips_illegal_chars_then_truncates():
+    stage = {**_STAGE_1, "category": "TINY@ TURTLE!!!!"}
+    result = _normalize([stage], "single", "standard")
+    stripped = "TINY TURTLE!!!!"
+    assert result[0]["category"] == stripped.upper()[:11]
+
+
+def test_normalize_category_strips_trailing_pokemon_case_insensitive():
+    stage = {**_STAGE_1, "category": "Seed Pokemon"}
+    result = _normalize([stage], "single", "standard")
+    assert result[0]["category"] == "SEED"
+
+
+def test_normalize_category_keeps_pokemon_as_mid_word_substring():
+    """Only an exact trailing " POKEMON" token is stripped."""
+    stage = {**_STAGE_1, "category": "Seedmon"}
+    result = _normalize([stage], "single", "standard")
+    assert result[0]["category"] == "SEEDMON"
+
+
+def test_normalize_category_strip_pokemon_before_truncate():
+    long_with_suffix = "A VERY LONG SEED POKEMON"
+    stage = {**_STAGE_1, "category": long_with_suffix}
+    result = _normalize([stage], "single", "standard")
+    expected = long_with_suffix.upper()[: -len(" POKEMON")][:11]
+    assert result[0]["category"] == expected
+
+
+def test_normalize_category_missing_falls_back_to_type_word():
+    stage = {**_STAGE_1}
+    stage.pop("category", None)
+    result = _normalize([stage], "single", "standard")
+    assert result[0]["category"] == "FIRE"
+
+
+def test_normalize_category_empty_string_falls_back_to_type_word():
+    stage = {**_STAGE_1, "category": ""}
+    result = _normalize([stage], "single", "standard")
+    assert result[0]["category"] == "FIRE"
+
+
+@pytest.mark.parametrize("bad_value", [None, 42, ["Seed"], {"noun": "Seed"}])
+def test_normalize_category_non_string_falls_back_to_type_word(bad_value):
+    stage = {**_STAGE_1, "category": bad_value}
+    result = _normalize([stage], "single", "standard")
+    assert result[0]["category"] == "FIRE"
+
+
+def test_normalize_category_all_illegal_chars_falls_back_to_type_word():
+    stage = {**_STAGE_1, "category": "\n\t"}
+    result = _normalize([stage], "single", "standard")
+    assert result[0]["category"] == "FIRE"
+
+
+def test_normalize_category_uses_second_type_never_used():
+    """Fallback always uses the primary (first) type, not any secondary type."""
+    stage = {**_STAGE_1, "types": ["Water", "Flying"]}
+    stage.pop("category", None)
+    result = _normalize([stage], "single", "standard")
+    assert result[0]["category"] == "WATER"
+
+
+def test_normalize_validates_category_independently_per_stage():
+    stages = [
+        {**_STAGE_1, "category": "seed"},
+        {**_STAGE_2, "category": ""},
+        {**_STAGE_3, "category": "TALL SEED PODS"},
+    ]
+    result = _normalize(stages, "line", "standard")
+    assert result[0]["category"] == "SEED"
+    assert result[1]["category"] == "FIRE"
+    assert result[2]["category"] == "TALL SEED P"
+
+
+def test_generate_fakemon_emits_category_when_model_omits_it():
+    assert all("category" not in s for s in _LINE)
+    client = _make_client(json.dumps(_LINE))
+    result = generate_fakemon("fire lizard", "line", client=client)
+    assert [s["category"] for s in result] == ["FIRE", "FIRE", "FIRE"]
+
+
+def test_generate_fakemon_normalizes_category():
+    stage = {**_STAGE_1, "category": "seed"}
+    client = _make_client(json.dumps([stage]))
+    result = generate_fakemon("fire lizard", "single", client=client)
+    assert result[0]["category"] == "SEED"
