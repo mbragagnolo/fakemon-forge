@@ -1,5 +1,6 @@
 import json
 import pytest
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from fakemon_forge.generator import generate_fakemon, _normalize, _SYSTEM_PROMPT, _ABILITY_POOL
@@ -718,9 +719,31 @@ def test_generate_fakemon_always_emits_in_range_height_and_weight():
 # abilities_gen3 pool and system prompt
 # ---------------------------------------------------------------------------
 
-def test_ability_pool_has_76_entries():
-    """Pool excludes index 0 (None) and index 76 (Cacophony) from the 78-entry table."""
-    assert len(_ABILITY_POOL) == 76
+def _ability_table() -> dict:
+    """The resource table read straight from disk.
+
+    Expectations are derived from the file, never a hardcoded count or copied
+    list — the table has drifted before and the pool must track it.
+    """
+    path = Path(__file__).parent.parent / "resources" / "gen3_abilities.json"
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _prompt_ability_list_items() -> list[str]:
+    """The comma-separated items of the closed set embedded in the prompt."""
+    joined = ", ".join(_ABILITY_POOL)
+    line = next(l for l in _SYSTEM_PROMPT.splitlines() if joined in l)
+    return [item.strip() for item in line.split(",")]
+
+
+def test_ability_pool_is_the_table_minus_indexes_0_and_76():
+    table = _ability_table()
+    assert _ABILITY_POOL == [n for i, n in table.items() if i not in ("0", "76")]
+
+
+def test_ability_pool_drops_exactly_two_entries():
+    """Whatever the table's size, indexes 0 and 76 are the only exclusions."""
+    assert len(_ABILITY_POOL) == len(_ability_table()) - 2
 
 
 def test_ability_pool_excludes_none():
@@ -749,9 +772,33 @@ def test_system_prompt_excludes_cacophony():
     assert "Cacophony" not in _SYSTEM_PROMPT
 
 
-def test_system_prompt_ability_list_excludes_none_entry():
-    """The embedded pool must not contain the literal "None" ability name."""
-    assert "None" not in _ABILITY_POOL
+def test_system_prompt_embeds_the_whole_pool():
+    """The prompt lists the pool verbatim as the closed set to choose from."""
+    assert ", ".join(_ABILITY_POOL) in _SYSTEM_PROMPT
+
+
+def test_system_prompt_ability_list_excludes_index_0_and_76_names():
+    """Whatever those two indexes are named in the table, they stay out."""
+    table = _ability_table()
+    items = _prompt_ability_list_items()
+    assert table["0"] not in items
+    assert table["76"] not in items
+
+
+def test_system_prompt_states_one_or_two_distinct():
+    assert "1 or 2 distinct" in _SYSTEM_PROMPT
+
+
+def test_system_prompt_prefers_two_abilities():
+    assert "Prefer two abilities" in _SYSTEM_PROMPT
+
+
+def test_system_prompt_states_line_sharing_convention():
+    assert "all stages should share the same abilities_gen3" in _SYSTEM_PROMPT
+
+
+def test_system_prompt_ties_free_text_ability_to_abilities_gen3():
+    assert "free-text ability above should express the same concept" in _SYSTEM_PROMPT
 
 
 # ---------------------------------------------------------------------------
@@ -813,6 +860,14 @@ def test_normalize_canonicalizes_extra_whitespace():
     assert result[0]["abilities_gen3"] == ["Compound Eyes"]
 
 
+def test_normalize_canonicalizes_tabs_and_newlines():
+    """The contract is "".join(name.split()).lower() — a plain
+    .replace(" ", "") would leave the tab/newline in and fail to match."""
+    stage = {**_STAGE_1, "abilities_gen3": ["Compound\tEyes", " blaze\n"]}
+    result = _normalize([stage], "single", "standard")
+    assert result[0]["abilities_gen3"] == ["Compound Eyes", "Blaze"]
+
+
 def test_normalize_collapses_duplicates_different_casing():
     stage = {**_STAGE_1, "abilities_gen3": ["Compound Eyes", "compoundeyes"]}
     result = _normalize([stage], "single", "standard")
@@ -832,6 +887,27 @@ def test_normalize_caps_three_plus_valid_distinct_to_two():
     assert result[0]["abilities_gen3"] == ["Blaze", "Flash Fire"]
 
 
+def test_normalize_leaves_free_text_ability_untouched():
+    """`ability` stays creative flavour even when it isn't a real Gen 3 name."""
+    stage = {**_STAGE_1, "ability": "Molten Core", "abilities_gen3": ["blaze"]}
+    result = _normalize([stage], "single", "standard")
+    assert result[0]["ability"] == "Molten Core"
+
+
+def test_normalize_validates_each_stage_independently():
+    """No cross-stage repair: a stage's invalid entries don't borrow from its
+    siblings, and a valid pair on the final stage survives."""
+    stages = [
+        {**_STAGE_1, "abilities_gen3": ["Blaze"]},
+        {**_STAGE_2, "abilities_gen3": ["Ashwalk"]},
+        {**_STAGE_3, "abilities_gen3": ["Blaze", "Flash Fire"]},
+    ]
+    result = _normalize(stages, "line", "standard")
+    assert [s["abilities_gen3"] for s in result] == [
+        ["Blaze"], [], ["Blaze", "Flash Fire"],
+    ]
+
+
 def test_normalize_abilities_gen3_makes_no_api_call():
     client = MagicMock()
     with patch("fakemon_forge.generator.Mistral", return_value=client):
@@ -844,3 +920,11 @@ def test_generate_fakemon_normalizes_abilities_gen3():
     client = _make_client(json.dumps([stage]))
     result = generate_fakemon("fire lizard", "single", client=client)
     assert result[0]["abilities_gen3"] == ["Blaze"]
+
+
+def test_generate_fakemon_emits_abilities_gen3_on_every_stage():
+    """Even when the model omits the field entirely, every stage carries it."""
+    assert all("abilities_gen3" not in s for s in _LINE)
+    client = _make_client(json.dumps(_LINE))
+    result = generate_fakemon("fire lizard", "line", client=client)
+    assert [s["abilities_gen3"] for s in result] == [[], [], []]
