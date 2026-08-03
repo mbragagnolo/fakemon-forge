@@ -29,6 +29,15 @@ from fakemon_forge.cries import generate_cry
 # proportions (big head / small body) from img2img before committing to these.
 _CHIBI_TAGS = ["chibi", "big head", "small body"]
 
+# Footprint size by line length -> stage number. A 2-stage line reuses the
+# 3-stage line's endpoints; any length not listed (a single form) falls through
+# to the full-size footprint.
+_FULL_FOOTPRINT = 0.9
+_FOOTPRINT_FRACTIONS = {
+    2: {1: 0.6, 2: 0.9},
+    3: {1: 0.6, 2: 0.75, 3: 0.9},
+}
+
 
 def main(argv=None):
     args = parse_args(argv)
@@ -51,7 +60,12 @@ def main(argv=None):
     parts = [p for p in [vision_desc, args.description] if p]
     combined = "\n\n".join(parts)
 
-    stages = generate_fakemon(combined, args.mode, tier=args.tier, client=client)
+    # `forms` holds the stage dicts that came back; `args.stages` is how many
+    # were asked for. Naming the local `stages` would shadow the count — the
+    # same collision that silently broke the generator before it was caught.
+    forms = generate_fakemon(
+        combined, args.mode, tier=args.tier, stages=args.stages, client=client
+    )
 
     if args.image:
         pipeline = load_img2img_pipeline()
@@ -60,16 +74,16 @@ def main(argv=None):
         pipeline = load_txt2img_pipeline()
         img2img_pipeline = make_img2img_pipeline(pipeline)
 
-    stage_dirs = write_output(stages)
+    stage_dirs = write_output(forms)
 
-    for stage, stage_dir in zip(stages, stage_dirs):
+    for stage, stage_dir in zip(forms, stage_dirs):
         seed = random.randint(0, 2**32 - 1)
 
         # Audio does not depend on the sprites — generate it before the sprite
         # block so a sprite failure (which `continue`s) can't skip the cry.
         try:
             generate_cry(
-                stages[0]["name"],   # line_name — stage 1's name, shared by the whole line
+                forms[0]["name"],   # line_name — stage 1's name, shared by the whole line
                 stage["stage"],
                 stage["types"],
                 str(stage_dir / "cry.wav"),
@@ -182,12 +196,14 @@ def main(argv=None):
                 file=sys.stderr,
             )
 
-        # Footprint size scales with the stage's position in a 3-stage line;
-        # single forms (any tier) always use the full-size footprint.
-        if len(stages) == 3:
-            size_fraction = {1: 0.6, 2: 0.75, 3: 0.9}.get(stage["stage"], 0.9)
-        else:
-            size_fraction = 0.9
+        # Footprint size scales with the stage's position in its line; single
+        # forms (any tier) always use the full-size footprint. A 2-stage line
+        # takes the first and last fractions and skips the middle, mirroring
+        # its height/weight defaults, where the final form takes the stage-3
+        # row — otherwise a 2-stage juvenile would print a full-size footprint.
+        size_fraction = _FOOTPRINT_FRACTIONS.get(len(forms), {}).get(
+            stage["stage"], _FULL_FOOTPRINT
+        )
 
         footprint_path = str(stage_dir / "footprint.png")
         try:

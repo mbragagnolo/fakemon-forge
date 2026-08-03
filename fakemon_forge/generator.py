@@ -32,11 +32,23 @@ _ALLOWED_NAME_CHARS = set(
     ".,'-…!?/()\":;"
 )
 
+# Base-stat-total targets, keyed tier -> stage count -> per-stage targets.
+# A stage count of 1 is a standalone species, not a juvenile: `standard` 1 is
+# deliberately far above `standard` 3's opening stage (issue #48 settled the
+# same reading for height/weight).
+#
+# Every value is the median of its observed Gen 3 band -- one rule, no
+# exceptions, so any number here can be re-derived and checked. The bands live
+# in tests/fixtures/gen3_bst_bands.json and tests/test_bst_targets.py enforces
+# the correspondence; nothing at runtime reads that file.
+#
+# `pseudo` has no 2-stage row on purpose -- every pseudo-legendary line is three
+# stages, and the CLI rejects the combination.
 _BST_TARGETS = {
-    "standard": {"stage1": 300, "stage2": 420, "stage3": 520},
-    "pseudo":   {"stage1": 300, "stage2": 420, "stage3": 600},
-    "legendary":{"stage1": 580},
-    "mythical": {"stage1": 600},
+    "standard":  {1: (430,), 2: (305, 468), 3: (295, 405, 518)},
+    "pseudo":    {3: (300, 420, 600)},
+    "legendary": {1: (580,)},
+    "mythical":  {1: (600,)},
 }
 
 _SYSTEM_PROMPT = f"""\
@@ -59,7 +71,10 @@ Each element represents one evolutionary stage and must have exactly these field
     The free-text ability above should express the same concept as the chosen abilities_gen3
     entries.
   base_stats    – object with integer values for: hp, attack, defense, sp_atk, sp_def, speed
-  pokedex_entry – 2 sentence flavour text (string)
+  pokedex_entry – 2 sentence flavour text (string); at most 130 characters, and
+    use only straight quotes and hyphens (' " -), never curly quotes or dashes.
+    The display window fits 4 lines of 40 characters — anything past that is cut
+    mid-sentence, so keep it comfortably short.
   sprite_prompt – visual description for pixel-art sprite generation; max 75 words, lead with the creature's most distinctive shape and colour features (string)
   levitates     – boolean; true only if the creature levitates, is bodiless/gaseous/amorphous, or otherwise never touches the ground (e.g. floating orbs, ghosts, cloud/gas creatures); otherwise false
   height_dm – height in decimetres (integer).
@@ -83,6 +98,24 @@ signature features emerging, power becoming apparent.
 with a different silhouette from stage 1, design complexity at its peak.\
 """
 
+# A 2-stage line goes juvenile -> adult with no middle form. Describing an
+# adolescent stage here would ask for a form that is never generated.
+_EVO_PROGRESSION_2 = """\
+
+Evolutionary progression — each stage must look and feel visually distinct:
+  Stage 1: juvenile/child form — small and simple, cute or curious expression, \
+limited limbs or features, undeveloped power.
+  Stage 2: adult/final form — fully developed, imposing presence, complex design \
+with a different silhouette from stage 1, design complexity at its peak.\
+"""
+
+_EVO_PROGRESSION_BY_COUNT = {2: _EVO_PROGRESSION_2, 3: _EVO_PROGRESSION}
+
+_STAGE_COUNT_WORDING = {
+    2: "two evolutionary stages (stages 1 and 2)",
+    3: "three evolutionary stages (stages 1, 2, and 3)",
+}
+
 _TIER_NOTES = {
     "pseudo":    "\nThis is a pseudo-legendary line: the final form should rival legendary "
                  "Pokémon in visual impact and raw power.",
@@ -92,21 +125,40 @@ _TIER_NOTES = {
 }
 
 
-def _user_prompt(description: str, mode: str, tier: str) -> str:
-    targets = _BST_TARGETS[tier]
+def _bst_row(tier: str, stage_count: int) -> tuple[int, ...]:
+    """Per-stage BST targets for one tier and stage count.
 
+    A tier without a row for the requested count falls back to the one row it
+    does have, trimmed to the count asked for. That keeps
+    ``--tier pseudo --mode single`` prompting the value it prompted before #59:
+    pseudo has only a 3-stage row, and single mode reads the first entry. The
+    combination is already documented as line-only and the CLI rejects it;
+    until then it must not raise.
+    """
+    rows = _BST_TARGETS[tier]
+    row = rows.get(stage_count)
+    if row is None:
+        row = next(iter(rows.values()))[:stage_count]
+    return row
+
+
+def _user_prompt(description: str, mode: str, tier: str, stage_count: int = 3) -> str:
+    # Single mode is one stage by definition; any requested count is ignored
+    # rather than allowed to contradict the mode.
     if mode == "single":
+        stage_count = 1
+
+    row = _bst_row(tier, stage_count)
+
+    if stage_count == 1:
         count = "one stage (stage 1 only)"
-        bst_hint = f"BST target: ~{targets['stage1']}."
+        bst_hint = f"BST target: ~{row[0]}."
         evo_text = ""
     else:
-        count = "three evolutionary stages (stages 1, 2, and 3)"
-        bst_hint = (
-            f"BST targets: stage 1 ~{targets['stage1']}, "
-            f"stage 2 ~{targets['stage2']}, "
-            f"stage 3 ~{targets['stage3']}."
-        )
-        evo_text = _EVO_PROGRESSION
+        count = _STAGE_COUNT_WORDING[stage_count]
+        targets = ", ".join(f"stage {i} ~{v}" for i, v in enumerate(row, start=1))
+        bst_hint = f"BST targets: {targets}."
+        evo_text = _EVO_PROGRESSION_BY_COUNT[stage_count]
 
     tier_note = _TIER_NOTES.get(tier, "")
 
@@ -163,10 +215,85 @@ def _repair_name(name) -> str:
     return cleaned[:_MAX_NAME_LEN]
 
 
-_SIZE_DEFAULTS_BY_LINE_STAGE = {
-    1: (5, 30),
-    2: (10, 150),
-    3: (17, 600),
+#: Typographic characters a language model reaches for that fall outside the
+#: Gen 3 text contract, mapped to the equivalents that are inside it. Folding
+#: beats dropping: "It's" reads correctly, "Its" does not.
+_PUNCTUATION_FOLD = {
+    "‘": "'", "’": "'", "‚": "'",
+    "“": '"', "”": '"', "„": '"',
+    "–": "-", "—": "-", "−": "-",
+    " ": " ", "​": "",
+}
+
+#: Gen 3 renders flavour text in a fixed window: this many lines of this many
+#: characters, greedily word-wrapped. Text past the window is not shown at all,
+#: so an entry that overruns is cut mid-sentence rather than scrolled.
+_ENTRY_LINE_WIDTH = 40
+_ENTRY_MAX_LINES = 4
+
+
+def _wrap_entry(entry: str) -> list[str]:
+    """Greedy word-wrap ``entry`` into ``_ENTRY_LINE_WIDTH``-char lines."""
+    lines: list[str] = []
+    current = ""
+    for word in entry.split():
+        candidate = f"{current} {word}".strip()
+        if len(candidate) <= _ENTRY_LINE_WIDTH:
+            current = candidate
+        else:
+            if current:
+                lines.append(current)
+            current = word
+    if current:
+        lines.append(current)
+    return lines
+
+
+def _entry_fits_budget(entry: str) -> bool:
+    """Whether ``entry`` fits the flavour-text window without being cut."""
+    return len(_wrap_entry(entry)) <= _ENTRY_MAX_LINES
+
+
+def _repair_entry(entry) -> str:
+    """Bring flavour text inside the Gen 3 text contract.
+
+    Folds typographic punctuation to its in-contract equivalent, drops
+    characters the contract has no glyph for, and trims to the display window
+    on a word boundary so the result reads as a finished sentence rather than
+    stopping mid-word.
+    """
+    folded = "".join(_PUNCTUATION_FOLD.get(ch, ch) for ch in str(entry))
+    cleaned = "".join(ch for ch in folded if ch in _ALLOWED_NAME_CHARS)
+    cleaned = " ".join(cleaned.split())
+    if _entry_fits_budget(cleaned):
+        return cleaned
+
+    # Prefer dropping whole sentences: an entry that stops at a full stop still
+    # reads as written, where one cut at a word boundary trails off on a
+    # fragment ("...disrupting nearby electronics. Often.").
+    sentences = [s.strip() for s in cleaned.split(".") if s.strip()]
+    while len(sentences) > 1:
+        sentences.pop()
+        candidate = ". ".join(sentences) + "."
+        if _entry_fits_budget(candidate):
+            return candidate
+
+    # One sentence, still too long: fall back to dropping whole words.
+    words = cleaned.split()
+    while words and not _entry_fits_budget(" ".join(words)):
+        words.pop()
+    trimmed = " ".join(words).rstrip(" ,;:-")
+    if trimmed and not trimmed.endswith(".") and _entry_fits_budget(trimmed + "."):
+        trimmed += "."
+    return trimmed
+
+
+# Per-stage size fallbacks, keyed stage count -> stage number. A 2-stage line's
+# stage 2 is a *final* form, so it takes the same row a 3-stage final does —
+# reusing the 3-stage middle row would under-size it.
+_SIZE_DEFAULTS_BY_LINE = {
+    2: {1: (5, 30), 2: (17, 600)},
+    3: {1: (5, 30), 2: (10, 150), 3: (17, 600)},
 }
 
 _SIZE_DEFAULTS_BY_TIER = {
@@ -261,16 +388,20 @@ def _normalize_category(raw, types) -> str:
     return result or _type_word(types)
 
 
-def _size_defaults(stage: dict, mode: str, tier: str) -> tuple[int, int]:
+def _size_defaults(
+    stage: dict, mode: str, tier: str, stage_count: int = 3
+) -> tuple[int, int]:
     """Stage/tier-scaled (height_dm, weight_hg) fallbacks.
 
     An off-spec stage number — missing, out of range, or a JSON string — falls
     through to the tier table rather than raising KeyError, matching how
-    ``main.py`` already reads the same field for its sprite size fraction.
+    ``main.py`` already reads the same field for its sprite size fraction. An
+    unrecognised stage count degrades to the 3-stage rows the same way.
     """
     if mode == "line":
+        rows = _SIZE_DEFAULTS_BY_LINE.get(stage_count, _SIZE_DEFAULTS_BY_LINE[3])
         try:
-            return _SIZE_DEFAULTS_BY_LINE_STAGE[int(stage.get("stage"))]
+            return rows[int(stage.get("stage"))]
         except (TypeError, ValueError, KeyError):
             pass
     return _SIZE_DEFAULTS_BY_TIER.get(tier, _SIZE_DEFAULTS_BY_TIER["standard"])
@@ -292,19 +423,27 @@ def _clamp_dimension(value, upper: int, fallback: int) -> int:
     return max(1, min(upper, value))
 
 
-def _normalize(stages: list[dict], mode: str, tier: str) -> list[dict]:
+def _normalize(
+    stages: list[dict], mode: str, tier: str, stage_count: int = 3
+) -> list[dict]:
     """Post-parse cleanup pass: enforces the name contract, defaults/clamps
     height_dm and weight_hg, and filters abilities_gen3 to the Gen 3 pool.
 
     Repair is idempotent: a name already inside the Gen 3 contract comes out
     of ``_repair_name`` unchanged, so valid names pass through untouched.
+
+    ``stages`` is the parsed list of stage dicts; ``stage_count`` is how many
+    were *requested*. They are deliberately different things — the model may
+    return a different number than was asked for, which is accepted.
     """
     for stage in stages:
         stage["name"] = _repair_name(stage["name"])
+        if "pokedex_entry" in stage:
+            stage["pokedex_entry"] = _repair_entry(stage["pokedex_entry"])
         stage["abilities_gen3"] = _normalize_abilities_gen3(stage.get("abilities_gen3", []))
         stage["category"] = _normalize_category(stage.get("category"), stage.get("types"))
 
-        height_default, weight_default = _size_defaults(stage, mode, tier)
+        height_default, weight_default = _size_defaults(stage, mode, tier, stage_count)
         stage["height_dm"] = _clamp_dimension(stage.get("height_dm"), 999, height_default)
         stage["weight_hg"] = _clamp_dimension(stage.get("weight_hg"), 9999, weight_default)
     return stages
@@ -315,15 +454,22 @@ def generate_fakemon(
     mode: str,
     tier: str = "standard",
     *,
+    stages: int = 3,
     client=None,
     api_key: str = None,
 ) -> list[dict]:
+    """Generate one Fakemon's stages.
+
+    ``stages`` is how many evolutionary stages to ask for; it applies to
+    ``mode="line"`` and is ignored for ``mode="single"``. The default of 3
+    is what keeps an existing ``--mode line`` invocation unchanged.
+    """
     if client is None:
         client = Mistral(api_key=api_key)
 
     messages = [
         {"role": "system", "content": _SYSTEM_PROMPT},
-        {"role": "user", "content": _user_prompt(description, mode, tier)},
+        {"role": "user", "content": _user_prompt(description, mode, tier, stages)},
     ]
 
     raw = None
@@ -331,7 +477,10 @@ def generate_fakemon(
         try:
             response = client.chat.complete(model=_MODEL, messages=messages)
             raw = response.choices[0].message.content
-            stages = json.loads(_strip_fences(raw))
+            # Named `parsed`, not `stages`: `stages` is the requested *count*
+            # parameter, and reusing the name would shadow it before
+            # `_normalize` below can be told how many stages were asked for.
+            parsed = json.loads(_strip_fences(raw))
         except json.JSONDecodeError:
             if attempt == 1:
                 print(
@@ -349,7 +498,7 @@ def generate_fakemon(
             )
             sys.exit(1)
 
-        too_long, illegal = _name_violations(stages)
+        too_long, illegal = _name_violations(parsed)
         if (too_long or illegal) and attempt == 0:
             # The offending array has to be in the conversation for "return the
             # full array again" to mean anything — without it the model rebuilds
@@ -358,4 +507,4 @@ def generate_fakemon(
             messages.append({"role": "user", "content": _corrective_message(too_long, illegal)})
             continue
 
-        return _normalize(stages, mode, tier)
+        return _normalize(parsed, mode, tier, stages)

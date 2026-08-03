@@ -104,6 +104,34 @@ def _rgb_distance(a, b) -> float:
     return ((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2) ** 0.5
 
 
+def _display_key(color) -> tuple[int, int, int]:
+    """The colour as Gen 3 actually displays it: 5 bits per channel.
+
+    Anything below that depth is invisible, so ``(4, 0, 0)`` and ``(0, 0, 0)``
+    are one colour on screen even though they differ as 8-bit RGB.
+    """
+    return tuple(channel >> 3 for channel in color)
+
+
+def _dedupe_by_display_depth(colors, reserved) -> list:
+    """``colors`` minus any entry already shown by ``reserved`` or an earlier one.
+
+    The palette holds 16 slots and the creature's share is small, so two slots
+    that render as the same colour cost real detail for nothing. Compared at
+    display depth rather than as 8-bit RGB, which is what the eye — and the
+    hardware — actually sees.
+    """
+    seen = {_display_key(color) for color in reserved}
+    kept = []
+    for color in colors:
+        key = _display_key(color)
+        if key in seen:
+            continue
+        seen.add(key)
+        kept.append(color)
+    return kept
+
+
 def _border_ring(image: Image.Image) -> list[tuple[int, int, int]]:
     """The pixels of the 1-px outer ring (top/bottom rows, left/right columns)."""
     w, h = image.size
@@ -237,7 +265,9 @@ def _quantize_gen3(image: Image.Image, size: int | None = None) -> Image.Image:
     # off). The key is index 0 with no duplicate, so background pixels resolve to
     # index 0; creature pixels near pure black/white legitimately snap to the
     # reserved slots without spending creature budget.
-    palette_colors = [_KEY_COLOR, (0, 0, 0), (255, 255, 255)] + creature_colors
+    reserved = [_KEY_COLOR, (0, 0, 0), (255, 255, 255)]
+    creature_colors = _dedupe_by_display_depth(creature_colors, reserved)
+    palette_colors = reserved + creature_colors
     flat_palette = [channel for color in palette_colors for channel in color]
     reference = Image.new("P", (1, 1))
     reference.putpalette(flat_palette)
