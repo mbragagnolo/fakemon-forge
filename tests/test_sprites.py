@@ -991,3 +991,54 @@ def test_spritesheet_downscale_introduces_no_new_colors(tmp_path):
     sheet_colors = set(Image.open(out).convert("RGB").get_flattened_data())
     allowed = set(_VIEW_COLORS.values()) | {_KEY_COLOR}
     assert sheet_colors <= allowed
+
+
+# --------------------------------------------------------------------------
+# Display-depth palette dedupe (Gen 3 shows 5 bits per channel)
+# --------------------------------------------------------------------------
+
+def test_display_key_collapses_channel_detail_below_5_bits():
+    from fakemon_forge.sprites import _display_key
+    assert _display_key((0, 0, 0)) == _display_key((4, 0, 0))
+    assert _display_key((0, 0, 0)) == _display_key((0, 0, 7))
+    assert _display_key((255, 255, 255)) == _display_key((248, 248, 248))
+    assert _display_key((0, 0, 0)) != _display_key((8, 0, 0))
+
+
+def test_dedupe_by_display_depth_drops_colors_reserved_slots_already_show():
+    from fakemon_forge.sprites import _dedupe_by_display_depth, _KEY_COLOR
+    reserved = [_KEY_COLOR, (0, 0, 0), (255, 255, 255)]
+    # (4,0,0) is reserved black on hardware; (250,250,250) is reserved white.
+    creature = [(4, 0, 0), (250, 250, 250), (120, 64, 32)]
+    kept = _dedupe_by_display_depth(creature, reserved)
+    assert kept == [(120, 64, 32)]
+
+
+def test_dedupe_by_display_depth_drops_creature_colors_that_match_each_other():
+    from fakemon_forge.sprites import _dedupe_by_display_depth
+    kept = _dedupe_by_display_depth([(120, 64, 32), (121, 65, 33), (200, 8, 8)], [])
+    assert kept == [(120, 64, 32), (200, 8, 8)]
+
+
+def test_quantized_palette_has_no_two_slots_showing_one_color(tmp_path):
+    """A palette entry pair indistinguishable on hardware wastes a slot.
+
+    Two 8-bit-distinct colours that collapse to the same displayed colour
+    would occupy two of the 16 slots while rendering identically.
+    """
+    from PIL import Image
+    from fakemon_forge.sprites import postprocess, _display_key
+
+    # A gradient rich in near-black tones: exactly what produced duplicate
+    # displayed colours before the dedupe.
+    img = Image.new("RGB", (64, 64), (255, 255, 255))
+    for y in range(64):
+        for x in range(32):
+            img.putpixel((x, y), (x // 4, y // 8, (x + y) // 6))
+
+    out = postprocess(img)
+    palette = out.getpalette()
+    used = sorted({idx for _, idx in out.getcolors(maxcolors=4096)})
+    colors = [tuple(palette[i * 3:i * 3 + 3]) for i in used]
+    keys = [_display_key(c) for c in colors]
+    assert len(keys) == len(set(keys)), colors

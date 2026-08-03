@@ -1567,3 +1567,57 @@ def test_stages_is_keyword_only():
     client = _make_client(json.dumps(_LINE))
     with pytest.raises(TypeError):
         generate_fakemon("fire lizard", "line", "standard", 2, client=client)
+
+
+# --------------------------------------------------------------------------
+# Pokedex entry: charset + display budget (Gen 3 text contract)
+# --------------------------------------------------------------------------
+
+def test_repair_entry_folds_typographic_punctuation_to_ascii():
+    from fakemon_forge.generator import _repair_entry
+    out = _repair_entry("Glitchick\u2019s wings \u2014 a \u201cmess\u201d \u2013 of code\u2026")
+    assert "\u2019" not in out and "\u201c" not in out and "\u2014" not in out
+    assert out.startswith("Glitchick's wings - a \"mess\" - of code")
+
+
+def test_repair_entry_drops_characters_outside_the_contract():
+    from fakemon_forge.generator import _repair_entry, _ALLOWED_NAME_CHARS
+    out = _repair_entry("Bug\u4e2dbit \u2603 glows")
+    assert all(ch in _ALLOWED_NAME_CHARS for ch in out)
+    assert "Bugbit" in out
+
+
+def test_repair_entry_trims_to_the_display_budget_at_a_word_boundary():
+    from fakemon_forge.generator import _repair_entry, _entry_fits_budget
+    long_entry = (
+        "Corrupto's body is a swirling mass of digital static and code "
+        "fragments. It phases in and out of reality, leaving behind corrupted "
+        "data trails. Entire networks shut down in its presence."
+    )
+    out = _repair_entry(long_entry)
+    assert _entry_fits_budget(out)
+    # Trimmed at a word boundary, not mid-word.
+    assert long_entry.startswith(out.rstrip("."))
+
+
+def test_repair_entry_leaves_a_conforming_entry_untouched():
+    from fakemon_forge.generator import _repair_entry
+    entry = "A small bug that clings to wires. It hums when startled."
+    assert _repair_entry(entry) == entry
+
+
+def test_entry_fits_budget_rejects_five_lines():
+    from fakemon_forge.generator import _entry_fits_budget
+    assert _entry_fits_budget("short one")
+    assert not _entry_fits_budget(" ".join(["wordy"] * 60))
+
+
+def test_normalize_repairs_the_pokedex_entry():
+    from fakemon_forge.generator import _normalize
+    stages = [{
+        "name": "Bugbit", "types": ["Bug"],
+        "pokedex_entry": "It\u2019s a bug.",
+        "base_stats": {}, "abilities_gen3": [],
+    }]
+    out = _normalize(stages, "line", "standard", 1)
+    assert out[0]["pokedex_entry"] == "It's a bug."

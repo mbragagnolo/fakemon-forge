@@ -71,7 +71,10 @@ Each element represents one evolutionary stage and must have exactly these field
     The free-text ability above should express the same concept as the chosen abilities_gen3
     entries.
   base_stats    – object with integer values for: hp, attack, defense, sp_atk, sp_def, speed
-  pokedex_entry – 2 sentence flavour text (string)
+  pokedex_entry – 2 sentence flavour text (string); at most 130 characters, and
+    use only straight quotes and hyphens (' " -), never curly quotes or dashes.
+    The display window fits 4 lines of 40 characters — anything past that is cut
+    mid-sentence, so keep it comfortably short.
   sprite_prompt – visual description for pixel-art sprite generation; max 75 words, lead with the creature's most distinctive shape and colour features (string)
   levitates     – boolean; true only if the creature levitates, is bodiless/gaseous/amorphous, or otherwise never touches the ground (e.g. floating orbs, ghosts, cloud/gas creatures); otherwise false
   height_dm – height in decimetres (integer).
@@ -210,6 +213,79 @@ def _corrective_message(too_long: list[str], illegal: list[str]) -> str:
 def _repair_name(name) -> str:
     cleaned = "".join(ch for ch in str(name) if ch in _ALLOWED_NAME_CHARS)
     return cleaned[:_MAX_NAME_LEN]
+
+
+#: Typographic characters a language model reaches for that fall outside the
+#: Gen 3 text contract, mapped to the equivalents that are inside it. Folding
+#: beats dropping: "It's" reads correctly, "Its" does not.
+_PUNCTUATION_FOLD = {
+    "‘": "'", "’": "'", "‚": "'",
+    "“": '"', "”": '"', "„": '"',
+    "–": "-", "—": "-", "−": "-",
+    " ": " ", "​": "",
+}
+
+#: Gen 3 renders flavour text in a fixed window: this many lines of this many
+#: characters, greedily word-wrapped. Text past the window is not shown at all,
+#: so an entry that overruns is cut mid-sentence rather than scrolled.
+_ENTRY_LINE_WIDTH = 40
+_ENTRY_MAX_LINES = 4
+
+
+def _wrap_entry(entry: str) -> list[str]:
+    """Greedy word-wrap ``entry`` into ``_ENTRY_LINE_WIDTH``-char lines."""
+    lines: list[str] = []
+    current = ""
+    for word in entry.split():
+        candidate = f"{current} {word}".strip()
+        if len(candidate) <= _ENTRY_LINE_WIDTH:
+            current = candidate
+        else:
+            if current:
+                lines.append(current)
+            current = word
+    if current:
+        lines.append(current)
+    return lines
+
+
+def _entry_fits_budget(entry: str) -> bool:
+    """Whether ``entry`` fits the flavour-text window without being cut."""
+    return len(_wrap_entry(entry)) <= _ENTRY_MAX_LINES
+
+
+def _repair_entry(entry) -> str:
+    """Bring flavour text inside the Gen 3 text contract.
+
+    Folds typographic punctuation to its in-contract equivalent, drops
+    characters the contract has no glyph for, and trims to the display window
+    on a word boundary so the result reads as a finished sentence rather than
+    stopping mid-word.
+    """
+    folded = "".join(_PUNCTUATION_FOLD.get(ch, ch) for ch in str(entry))
+    cleaned = "".join(ch for ch in folded if ch in _ALLOWED_NAME_CHARS)
+    cleaned = " ".join(cleaned.split())
+    if _entry_fits_budget(cleaned):
+        return cleaned
+
+    # Prefer dropping whole sentences: an entry that stops at a full stop still
+    # reads as written, where one cut at a word boundary trails off on a
+    # fragment ("...disrupting nearby electronics. Often.").
+    sentences = [s.strip() for s in cleaned.split(".") if s.strip()]
+    while len(sentences) > 1:
+        sentences.pop()
+        candidate = ". ".join(sentences) + "."
+        if _entry_fits_budget(candidate):
+            return candidate
+
+    # One sentence, still too long: fall back to dropping whole words.
+    words = cleaned.split()
+    while words and not _entry_fits_budget(" ".join(words)):
+        words.pop()
+    trimmed = " ".join(words).rstrip(" ,;:-")
+    if trimmed and not trimmed.endswith(".") and _entry_fits_budget(trimmed + "."):
+        trimmed += "."
+    return trimmed
 
 
 # Per-stage size fallbacks, keyed stage count -> stage number. A 2-stage line's
@@ -362,6 +438,8 @@ def _normalize(
     """
     for stage in stages:
         stage["name"] = _repair_name(stage["name"])
+        if "pokedex_entry" in stage:
+            stage["pokedex_entry"] = _repair_entry(stage["pokedex_entry"])
         stage["abilities_gen3"] = _normalize_abilities_gen3(stage.get("abilities_gen3", []))
         stage["category"] = _normalize_category(stage.get("category"), stage.get("types"))
 
