@@ -59,6 +59,20 @@ Three integration snags were solved on the way (all captured in `gen_noobai.py`)
   On NoobAI output the delta is smaller (its pixels are already near
   grid-aligned) but still positive. No regression observed anywhere.
 
+## Follow-up spike: frame-2 on the NoobAI backend
+
+Question: does the production frame-2 recipe (low-strength img2img, "open
+mouth" tag, `build_frame2` acceptance band) transfer to the new backend?
+
+**Yes — 5/5 ACCEPTED.** `StableDiffusionXLImg2ImgPipeline` + same LoRA on the
+NoobAI front half at production strength 0.35: difference ratios 0.079–0.215
+(band is [0.02, 0.30]), ~8s per frame (23s first incl. warmup), peak 5.42 GiB.
+Visually (`out/frame2_strip.png`, `out/*_anim.gif`): identity held, motion
+reads as subtle pose/shading shifts — the intended breathing-frame feel. The
+procedural-squash fallback was never needed. The XL img2img call takes plain
+`prompt=` (no compel/`prompt_embeds`), so the SD1.5 `_encode_prompt` path
+does not carry over.
+
 ## Recommendation
 
 There is no spec for this feature yet — the research doc
@@ -72,9 +86,9 @@ write the real spec:
    and what replaces the backside img2img path (delete vs fallback).
 2. **Adopt k-centroid for the 768→64 downscale** (Tier 0 confirmed) —
    independent, zero-risk, also improves any remaining SD1.5 outputs.
-3. Open question for the spec: frame-2 animation with the new backend
-   (low-strength img2img on the NoobAI front half? unchanged procedural
-   squash fallback?) — untested in this spike.
+3. Frame-2: keep the production recipe unchanged on the new backend (verified
+   working, see follow-up spike) — only the pipeline class and prompt encoding
+   change (XL img2img, plain `prompt=`, no compel).
 4. License note for the public README: NoobAI base carries a
    no-commercialisation clause (fine for the portfolio; SDXL-variant LoRA is
    the documented fallback).
