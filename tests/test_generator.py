@@ -3,7 +3,14 @@ import pytest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from fakemon_forge.generator import generate_fakemon, _normalize, _SYSTEM_PROMPT, _ABILITY_POOL
+from fakemon_forge.generator import (
+    generate_fakemon,
+    _normalize,
+    _corrective_message,
+    _ALLOWED_NAME_CHARS,
+    _SYSTEM_PROMPT,
+    _ABILITY_POOL,
+)
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -355,6 +362,68 @@ def test_normalize_makes_no_api_call():
     with patch("fakemon_forge.generator.Mistral", return_value=client):
         _normalize([{**_STAGE_1, "name": "Flamburronix"}], "single", "standard")
     client.chat.complete.assert_not_called()
+
+
+# --- the prompt states the contract before the retry has to enforce it -------
+
+def test_system_prompt_states_the_name_length_limit():
+    """The retry is the fallback; the prompt is the first line of defence."""
+    assert "max 10 characters" in _SYSTEM_PROMPT
+
+
+@pytest.mark.parametrize("char", ["♂", "♀"])
+def test_system_prompt_states_the_name_charset(char):
+    """The gendered signs are the charset's least guessable members, and the
+    name spec is the only place they appear — so they pin the whole table."""
+    assert char in _SYSTEM_PROMPT
+
+
+def test_corrective_message_names_the_allowed_extras():
+    """The illegal-char corrective must not under-describe the charset — é/♂/♀
+    are legal, and a corrective that omits them makes the model over-restrict."""
+    message = _corrective_message([], ["Flam@burr"])
+    for char in "é♂♀":
+        assert char in message
+
+
+# --- the retry carries the offending array with it ---------------------------
+
+def test_corrective_retry_includes_the_offending_response():
+    raw = json.dumps([{**_STAGE_1, "name": "Flamburronix"}])
+    client = _make_client(raw, json.dumps([{**_STAGE_1, "name": "Flamburron"}]))
+    generate_fakemon("fire lizard", "single", client=client)
+    messages = client.chat.complete.call_args.kwargs["messages"]
+    assert [m["role"] for m in messages] == ["system", "user", "assistant", "user"]
+    assert messages[2]["content"] == raw
+
+
+def test_corrective_retry_keeps_valid_sibling_names_in_context():
+    """In line mode the two already-valid names must still be visible to the
+    model, or "return the full array again" silently rebuilds the whole line."""
+    bad_line = json.dumps([_STAGE_1, {**_STAGE_2, "name": "Infernodrake"}, _STAGE_3])
+    client = _make_client(bad_line, json.dumps(_LINE))
+    generate_fakemon("fire lizard", "line", client=client)
+    assistant = client.chat.complete.call_args.kwargs["messages"][2]
+    assert "Flamburr" in assistant["content"]
+    assert "Flamburron" in assistant["content"]
+
+
+# --- malformed model output degrades instead of raising ----------------------
+
+@pytest.mark.parametrize("bad_name", [42, None, 7.5, ["Flamburr"]])
+def test_non_string_name_is_repaired_not_raised(bad_name):
+    """`_normalize` never raises — a non-string name degrades to its str()
+    form, repaired against the same charset as any other name."""
+    result = _normalize([{**_STAGE_1, "name": bad_name}], "single", "standard")
+    assert isinstance(result[0]["name"], str)
+    assert len(result[0]["name"]) <= 10
+    assert all(ch in _ALLOWED_NAME_CHARS for ch in result[0]["name"])
+
+
+def test_non_string_name_does_not_crash_generate_fakemon():
+    client = _make_client(json.dumps([{**_STAGE_1, "name": 12345678901234}]))
+    result = generate_fakemon("fire lizard", "single", client=client)
+    assert result[0]["name"] == "1234567890"
 
 
 # ---------------------------------------------------------------------------
@@ -928,3 +997,122 @@ def test_generate_fakemon_emits_abilities_gen3_on_every_stage():
     client = _make_client(json.dumps(_LINE))
     result = generate_fakemon("fire lizard", "line", client=client)
     assert [s["abilities_gen3"] for s in result] == [[], [], []]
+
+
+# --- malformed abilities_gen3 degrades instead of raising --------------------
+
+@pytest.mark.parametrize("entry", [42, None, 7.5, ["Blaze"], {"name": "Blaze"}])
+def test_non_string_ability_entry_is_dropped_not_raised(entry):
+    """A non-string entry hit _normalize_ability_name's .split() and raised
+    AttributeError out of _normalize, which runs outside the try/except."""
+    stage = {**_STAGE_1, "abilities_gen3": [entry]}
+    result = _normalize([stage], "single", "standard")
+    assert result[0]["abilities_gen3"] == []
+
+
+def test_non_string_entry_does_not_hide_valid_siblings():
+    stage = {**_STAGE_1, "abilities_gen3": [None, "Blaze", 42, "Flash Fire"]}
+    result = _normalize([stage], "single", "standard")
+    assert result[0]["abilities_gen3"] == ["Blaze", "Flash Fire"]
+
+
+@pytest.mark.parametrize("raw", ["Blaze", 42, None, {"1": "Blaze"}])
+def test_non_list_abilities_gen3_is_treated_as_absent(raw):
+    """Matches export_ini's reading of the same field — a bare string must not
+    be iterated character by character."""
+    stage = {**_STAGE_1, "abilities_gen3": raw}
+    result = _normalize([stage], "single", "standard")
+    assert result[0]["abilities_gen3"] == []
+
+
+def test_generate_fakemon_survives_malformed_abilities_gen3():
+    stages = [{**_STAGE_1, "abilities_gen3": [{"name": "Blaze"}, 7]}]
+    client = _make_client(json.dumps(stages))
+    result = generate_fakemon("fire lizard", "single", client=client)
+    assert result[0]["abilities_gen3"] == []
+
+
+# ---------------------------------------------------------------------------
+# Off-spec stage numbers and dimension types degrade instead of raising
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("stage_no", [4, 0, -1, None, "one", [1], {"stage": 1}])
+def test_off_spec_stage_number_falls_back_to_the_tier_table(stage_no):
+    """A hallucinated stage number must not KeyError out of _normalize, which
+    runs outside generate_fakemon's try/except."""
+    stage = {**_STAGE_1, "stage": stage_no}
+    stage.pop("height_dm", None)
+    stage.pop("weight_hg", None)
+    result = _normalize([stage], "line", "standard")
+    assert (result[0]["height_dm"], result[0]["weight_hg"]) == (10, 150)
+
+
+@pytest.mark.parametrize("stage_no", ["3", 3.0])
+def test_coercible_stage_number_recovers_the_line_table(stage_no):
+    """A stage number the model wrote as a string still resolves to its own
+    row — falling back to the tier table there would lose real information.
+    Stage 3 is deliberately chosen: its (17, 600) differs from the standard
+    tier fallback, so the assertion can't pass by coincidence."""
+    stage = {**_STAGE_1, "stage": stage_no}
+    stage.pop("height_dm", None)
+    stage.pop("weight_hg", None)
+    result = _normalize([stage], "line", "standard")
+    assert (result[0]["height_dm"], result[0]["weight_hg"]) == (17, 600)
+
+
+def test_missing_stage_key_falls_back_to_the_tier_table():
+    stage = {k: v for k, v in _STAGE_1.items() if k != "stage"}
+    result = _normalize([stage], "line", "pseudo")
+    assert (result[0]["height_dm"], result[0]["weight_hg"]) == (17, 600)
+
+
+def test_off_spec_stage_number_still_uses_the_line_table_when_valid():
+    """The fallback must not swallow the stage table for well-formed input."""
+    stage = {**_STAGE_1, "stage": 3}
+    stage.pop("height_dm", None)
+    stage.pop("weight_hg", None)
+    result = _normalize([stage], "line", "standard")
+    assert (result[0]["height_dm"], result[0]["weight_hg"]) == (17, 600)
+
+
+@pytest.mark.parametrize("value, expected", [
+    ("12", 12),        # JSON string instead of a number
+    (7.8, 7),          # float truncates rather than persisting a non-integer
+    (True, 5),         # bool is not a measurement
+    (None, 5),
+    ("tall", 5),
+    ([7], 5),
+    ({"dm": 7}, 5),
+])
+def test_non_integer_height_degrades_to_default_or_coerces(value, expected):
+    stage = {**_STAGE_1, "height_dm": value, "weight_hg": 30}
+    result = _normalize([stage], "line", "standard")
+    assert result[0]["height_dm"] == expected
+    assert isinstance(result[0]["height_dm"], int)
+
+
+@pytest.mark.parametrize("value, expected", [
+    ("400", 400),
+    (149.9, 149),
+    ("heavy", 30),
+    (None, 30),
+])
+def test_non_integer_weight_degrades_to_default_or_coerces(value, expected):
+    stage = {**_STAGE_1, "height_dm": 5, "weight_hg": value}
+    result = _normalize([stage], "line", "standard")
+    assert result[0]["weight_hg"] == expected
+    assert isinstance(result[0]["weight_hg"], int)
+
+
+def test_coerced_string_dimension_is_still_clamped():
+    """Coercion happens before the bounds check, not instead of it."""
+    stage = {**_STAGE_1, "height_dm": "50000", "weight_hg": "0"}
+    result = _normalize([stage], "line", "standard")
+    assert (result[0]["height_dm"], result[0]["weight_hg"]) == (999, 1)
+
+
+def test_generate_fakemon_survives_fully_off_spec_sizes():
+    stages = [{**_STAGE_1, "stage": 9, "height_dm": "big", "weight_hg": None}]
+    client = _make_client(json.dumps(stages))
+    result = generate_fakemon("fire lizard", "line", client=client)
+    assert (result[0]["height_dm"], result[0]["weight_hg"]) == (10, 150)
