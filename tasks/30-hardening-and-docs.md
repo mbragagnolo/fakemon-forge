@@ -1,6 +1,6 @@
 # Task 30 — Hardening, e2e, and docs
 
-- **Status:** pending
+- **Status:** done
 - **Wave:** 3
 - **Owns (the only files/dirs this task may create or modify):**
   - `README.md`
@@ -72,15 +72,31 @@ of a 2-stage line alongside the existing examples.
 
 ## Acceptance criteria (Definition of Done)
 
-- [ ] 2-stage and 3-stage happy paths both pass end to end through `main`.
-- [ ] The structure-identical default prompt is pinned at full-prompt level.
-- [ ] Both CLI rejections are exercised through `main`.
-- [ ] The "model returns the wrong stage count" non-goal is pinned as accepted.
-- [ ] A species-data leak check covers `tests/fixtures/`.
-- [ ] `README.md` documents `--stages`, and no longer claims a line is always
+- [x] 2-stage and 3-stage happy paths both pass end to end through `main`.
+- [x] The structure-identical default prompt is pinned at full-prompt level.
+- [x] Both CLI rejections are exercised through `main`.
+- [x] The "model returns the wrong stage count" non-goal is pinned as accepted.
+- [x] A species-data leak check covers `tests/fixtures/`.
+- [x] `README.md` documents `--stages`, and no longer claims a line is always
       3 stages in any of the listed places.
-- [ ] No production file (`generator.py`, `cli.py`, `main.py`) was modified.
-- [ ] Full suite green: `pytest` from the repo root.
+- [x] No production file (`generator.py`, `cli.py`, `main.py`) was modified.
+- [x] Full suite green: `pytest` from the repo root — 660 passed (648 before).
+
+## Outcome
+
+No defect surfaced: all 12 e2e tests passed on first run, as this task
+predicted. Because "already green" is not evidence a test discriminates, each
+was checked against a deliberately broken build and confirmed to go red:
+dropping `stages=` from `main`'s generator call, rewording the BST hint,
+disabling each of the two CLI guards, and removing the `.ini` export step. The
+fixtures leak check was probed with six leak shapes (species name as a key, an
+ID list, an offset as an int, an offset inside a comment, free text, and a
+non-JSON file) and caught all six.
+
+Two docs fixes beyond the listed lines, both in this task's owned `README.md`:
+the tier table's BST numbers were stale (`~520` predates the corrected `518`),
+and it now names the per-stage-count finals; the hardcoded "113 tests" count
+was dropped rather than re-pinned to 660, since it goes stale on every commit.
 
 ## Notes / assumptions
 

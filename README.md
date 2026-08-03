@@ -1,6 +1,6 @@
 # fakemon-forge
 
-A CLI tool that turns a child's drawing and/or a text description into a complete Fakemon — a Pokémon-like creature with a GBA-style pixel-art sprite, base stats, typing, ability, and Pokédex entry. Optionally generates a full 3-stage evolutionary line.
+A CLI tool that turns a child's drawing and/or a text description into a complete Fakemon — a Pokémon-like creature with a GBA-style pixel-art sprite, base stats, typing, ability, and Pokédex entry. Optionally generates a 2- or 3-stage evolutionary line.
 
 ## How it works
 
@@ -20,7 +20,7 @@ output/
       entry.md        # Pokédex flavour text
     stage2_<Name2>/   # only with --mode line
       ...
-    stage3_<Name3>/   # only with --mode line
+    stage3_<Name3>/   # only with --mode line --stages 3
       ...
 ```
 
@@ -87,7 +87,7 @@ On a CUDA GPU the image generation step takes roughly 10–30 seconds per stage.
 ## Usage
 
 ```
-fakemon-forge [--image PATH] [--description TEXT] [--mode {single,line}] [--tier {standard,pseudo,legendary,mythical}]
+fakemon-forge [--image PATH] [--description TEXT] [--mode {single,line}] [--stages {2,3}] [--tier {standard,pseudo,legendary,mythical}]
 ```
 
 At least one of `--image` or `--description` must be provided.
@@ -96,15 +96,20 @@ At least one of `--image` or `--description` must be provided.
 |------|---------|-------------|
 | `--image PATH` | — | Path to a JPG or PNG drawing of the creature |
 | `--description TEXT` | — | Free-text description ("breathes fire, three tails") |
-| `--mode` | `single` | `single` — one form; `line` — full 3-stage evolutionary line |
+| `--mode` | `single` | `single` — one form; `line` — an evolutionary line, whose length `--stages` sets |
+| `--stages` | `3` | Number of stages in an evolutionary line. Only valid with `--mode line`; a single form is one stage by definition |
 | `--tier` | `standard` | Power tier controlling BST targets and lore tone (see below) |
 
 ### Power tiers
 
-| Tier | Stage 3 BST | Notes |
+Base-stat-total targets are the medians of the observed Gen 3 distributions for
+lines of that length, so a 2-stage final form is built as a *final* form rather
+than as a middle stage that stopped early.
+
+| Tier | Final BST | Notes |
 |------|------------|-------|
-| `standard` | ~520 | Typical fully-evolved Pokémon |
-| `pseudo` | ~600 | Pseudo-legendary feel; only valid with `--mode line` |
+| `standard` | ~518 (3-stage), ~468 (2-stage), ~430 (single) | Typical fully-evolved Pokémon |
+| `pseudo` | ~600 | Pseudo-legendary feel; only valid with `--mode line` at `--stages 3` |
 | `legendary` | ~580 | Single form only; awe-inspiring, lore-significant |
 | `mythical` | ~600 | Single form only; mysterious, tied to ancient legend |
 
@@ -114,8 +119,11 @@ At least one of `--image` or `--description` must be provided.
 # Text only, single form
 fakemon-forge --description "a small ghost made of old clockwork gears"
 
-# Drawing + description, full evolutionary line
+# Drawing + description, full 3-stage evolutionary line
 fakemon-forge --image my_drawing.png --description "fire lizard with three tails" --mode line
+
+# Two-stage line from text
+fakemon-forge --description "a mossy stone golem" --mode line --stages 2
 
 # Legendary from a drawing
 fakemon-forge --image titan_sketch.png --tier legendary
@@ -131,7 +139,7 @@ pip install pytest
 pytest
 ```
 
-The test suite (113 tests) mocks all external API and model calls, so no API key or GPU is needed to run them.
+The test suite mocks all external API and model calls, so no API key or GPU is needed to run them.
 
 ## Dependencies
 
