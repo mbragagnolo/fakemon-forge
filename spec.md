@@ -1,320 +1,248 @@
-# Spec: Lock the back sprite to the shared front-frame palette + cross-view shiny consistency
+# Spec: Update README and sweep for leftover SD1.5 references
 
 ## Summary
 
-`fakemon-forge` already produces, per stage, a front sprite `sprite.png` and a
-second front-animation frame `sprite_frame2.png` that **share one exact
-16-colour palette** (frame 2 is palette-locked to frame 1 via
-`quantize_to_reference` / `build_frame2` in `fakemon_forge/sprites.py`), plus
-shiny variants. The **back sprite** (`sprite_back.png`) is the last view still
-carrying its **own adaptive palette**: it is produced by
-`generate_sprite_img2img`, whose final step is `postprocess(candidate)` — an
-*adaptive* 16-colour `quantize` that builds a fresh palette every call.
+Final slice (9/9) of the #61 sprite-generation retooling. All code for the
+NoobAI-XL + back&front LoRA backend, k-centroid downscaling, connectivity-based
+keying, content-aware front/back split, squash-init frame 2, ported chibi icon,
+and `--image` mode is already merged (verified in `fakemon_forge/sprites.py`
+and elsewhere — see Assumptions). This slice is documentation-only: bring
+`README.md`'s "Sprite generation" section, its Dependencies table, and its
+"first run downloads" note in line with what's actually shipped, and confirm
+(via grep) that no leftover SD1.5-era identifiers survive anywhere the earlier
+slices should have removed them from.
 
-This slice (4/4 of #1) brings the back sprite into the **same shared palette**
-as the two front frames, completing the authentic Gen-3 model of *one palette
-for the whole sprite set, one rotated palette for the whole shiny set*. It has
-two parts:
-
-1. **`sprites.py`** — give the back-sprite generation path a way to re-quantize
-   its img2img result against a reference `P`-mode image's exact palette
-   (frame 1) instead of an adaptive palette, by adding an optional
-   `reference_path` parameter to `generate_sprite_img2img`. When
-   `reference_path` is given, the raw img2img candidate is locked with the
-   existing `quantize_to_reference(candidate, reference)` rather than
-   `postprocess`. When it is omitted, behaviour is byte-for-byte unchanged
-   (adaptive `postprocess`), so the front-sprite img2img path and all existing
-   tests are untouched.
-2. **`main.py`** — pass `sprite.png` (frame 1, the just-written front sprite) as
-   the back sprite's `reference_path`, so the back sprite locks to frame 1's
-   palette regardless of which image seeded the img2img (the user's drawing in
-   the img2img path, `sprite.png` in the txt2img path).
-
-Because the back sprite then shares frame 1's exact palette, and
-`generate_shiny` is name-keyed and **rotates only the palette** (preserving
-achromatic entries), `sprite_back_shiny.png` — already derived via
-`generate_shiny(back_path, …)` — automatically uses the **same rotated palette**
-as `sprite_shiny.png` and `sprite_frame2_shiny.png`. All three views' shinies
-become consistent for free; no shiny-path change is required.
-
-### Explicitly out of scope
-
-- **`.ini` / writer changes** — verified unnecessary (as in the prior slices).
-  `export_ini` emits Gen 3 data fields, `writer.py` writes only
-  `stats.json` / `entry.md`; neither references sprite filenames.
-- **The img2img call itself** — the pipeline invocation (`_run_img2img`),
-  `strength=0.65`, and `extra_tags=["backside"]` are unchanged. Only the
-  post-generation quantization step gains a reference-locked branch.
-- **Recentering / animation-band logic** — the back sprite is a *different view*,
-  not an animation frame of the front, so `build_frame2` /
-  `recenter_to_anchor` / the acceptance band do **not** apply to it. Only the
-  palette is shared; geometry is whatever img2img produced.
-- **Colour-fidelity guarantees** — the back sprite's colours may degrade when
-  they land far from frame 1's 16 colours. Per the issue this is the authentic
-  Gen-3 constraint and is accepted, not mitigated.
+"Done and correct" means: `README.md` describes the NoobAI-XL 1.1 + back&front
+LoRA pipeline end-to-end (model, one-call front+back generation, k-centroid
+downscale, manual LoRA download step, license note), the Dependencies table
+matches `pyproject.toml`, and a repo-wide grep for the old-backend identifiers
+listed in the issue turns up nothing outside git history and the one
+intentionally-historical research document.
 
 ## Inputs
 
-### Changed: `generate_sprite_img2img(prompt, types, image_path, output_path, *, pipeline, extra_tags=None, seed=None, strength=0.8, reference_path=None)`
-
-All existing parameters are unchanged. One new keyword-only parameter is added
-at the end (so existing positional/keyword calls are unaffected):
-
-- `reference_path: str | None = None` (keyword-only) — path to a `P`-mode
-  reference image whose exact 16-colour palette the generated sprite must adopt.
-  When `None` (the default, and every current call except the new back-sprite
-  one), the sprite is quantized adaptively via `postprocess` exactly as today.
-  When set, the raw img2img candidate is locked to that palette via
-  `quantize_to_reference`. **[picked]** name/shape — see Assumptions.
-
-### `main.py` per-stage back-sprite call
-
-No new CLI arguments. Inside the existing
-`for stage, stage_dir in zip(stages, stage_dirs)` loop, the existing back-sprite
-block gains one keyword argument:
-
-- `reference_path = sprite_path` — i.e. `str(stage_dir / "sprite.png")`, the
-  front sprite written earlier in the same loop iteration. This is **always**
-  `sprite.png` (frame 1), independent of `init_image` (which is the user's
-  `args.image` in the img2img path, or `sprite_path` in the txt2img path).
+- Current `README.md` (root).
+- Current `pyproject.toml` `[project.dependencies]`.
+- Current `fakemon_forge/sprites.py` (source of truth for what the shipped
+  backend actually does — model id, LoRA path/scale, generation entry points).
+- `.gitignore` (confirms `models/` — and therefore the LoRA weight file — is
+  never committed).
+- The issue's list of grep targets: `dreamshaper`, `pksp768`, `compel`,
+  `_TYPE_TAGS`, `_encode_prompt`, `lambdalabs/sd-pokemon-diffusers`,
+  `DPMSolverMultistepScheduler`, and the literal path
+  `models/loras/pksp768_V2-1.safetensors`.
 
 ## Outputs
 
-- **`generate_sprite_img2img` with `reference_path` set** → returns `None`; side
-  effect is writing a 96×96 `P`-mode PNG at `output_path` whose palette is
-  byte-for-byte equal to the reference image's palette (guaranteed by
-  `quantize_to_reference`).
-- **`generate_sprite_img2img` with `reference_path=None`** → unchanged: a 96×96
-  `P`-mode PNG with an adaptive ≤16-colour palette (via `postprocess`).
-- **`main`** per stage — the same set of files as today
-  (`sprite.png`, `sprite_frame2.png`, `sprite_frame2_shiny.png`,
-  `sprite_back.png`, `sprite_shiny.png`, `sprite_back_shiny.png`), but now:
-  - `sprite_back.png` shares `sprite.png`'s exact 16-colour palette (was: its
-    own adaptive palette).
-  - `sprite_back_shiny.png` uses the same rotated palette as `sprite_shiny.png`
-    and `sprite_frame2_shiny.png` (automatic consequence; no code change in the
-    shiny blocks).
+- `README.md`, edited in place:
+  - "How it works" step 3 ("Sprite generation") rewritten to describe the
+    shipped backend.
+  - A new subsection (or paragraph under Installation) documenting the manual
+    LoRA download step.
+  - A new license note about NoobAI-XL's Fair-AI/no-commercialisation clause.
+  - The "Dependencies" table's `diffusers` row reworded if "Stable Diffusion"
+    is misleading; `compel` row removal (see Edge cases — already absent).
+  - The "first run downloads ~1.7GB" note updated to the real model identity
+    and size.
+- No other files are modified by this slice — the grep sweep is a
+  verification pass, expected to be a no-op against `fakemon_forge/`,
+  `tests/`, and `pyproject.toml` (see Behavior). If it is *not* a no-op
+  against actual code, that finding is in-scope to fix here (see Edge cases).
 
 ## Behavior
 
-### `generate_sprite_img2img(...)` in `sprites.py`
+### 1. Rewrite "Sprite generation" (README.md step 3, currently line 9)
 
-1. Run the img2img pipeline exactly as today via the existing internal helper
-   `_run_img2img(prompt, types, image_path, pipeline=…, extra_tags=…, seed=…,
-   strength=…)`, obtaining the raw RGB candidate (`result.images[0]`). This step
-   is unchanged.
-2. Quantize the candidate:
-   - If `reference_path is None`: `sprite = postprocess(candidate)` (adaptive
-     palette) — unchanged from today.
-   - Else: open the reference as a `P`-mode image
-     (`Image.open(reference_path)` — the saved front sprite is already `P`-mode;
-     do **not** convert) and `sprite = quantize_to_reference(candidate,
-     reference)`. `quantize_to_reference` already performs the same
-     resize-to-96×96 + colour/contrast enhance pre-steps as `postprocess`, then
-     `.quantize(palette=reference)`, so both branches feed identical input to
-     quantization and differ only in adaptive-vs-fixed palette.
-3. `sprite.save(output_path)` (PNG inferred from extension) — unchanged.
+Replace the `lambdalabs/sd-pokemon-diffusers` / "downsampled to 96×96" description
+with a description matching `fakemon_forge/sprites.py`'s actual pipeline:
 
-The choice is a single branch on `reference_path`; `_run_img2img`,
-`postprocess`, `quantize_to_reference`, and the module constants are reused
-rather than duplicated.
+- Base model: NoobAI-XL 1.1 (`Laxhar/noobai-XL-1.1` — `_BASE_MODEL_ID`).
+- LoRA: the Pokemon Sprite XL PixelArt **back&front** LoRA, fused at scale 0.7
+  (`_LORA_SCALE`), loaded from `models/loras/pkspbf_nb_v1.safetensors`.
+- One `txt2img` call renders a single `1536×768` canvas (`_PAIR_WIDTH` ×
+  `_GEN_SIZE`) with the front sprite on the left half and the back sprite on
+  the right half (per `generate_sprite_pair`), rather than the old separate
+  front-generation + img2img-backside chain.
+- The canvas is split content-aware (`split_front_back_canvas`, with a reroll
+  + naive-midline fallback), then each half is downscaled to the final sprite
+  size via **k-centroid** downscaling (`k_centroid`, not nearest-neighbour),
+  which is what actually produces the Gen-3-style palette/pixel-grid look —
+  not "downsampled to 96×96" as the current text implies for the whole
+  pipeline (the native render/working size is 768; only `stitch_spritesheet`'s
+  64px sheet cells are an actual downscale in the current code).
+- Palette-quantised to 16 colours via the Gen-3 contract (`_quantize_gen3`) —
+  this part of the existing description is still accurate and should be kept.
 
-### `main.py` wiring
+### 2. Document the LoRA manual-download step
 
-The existing back-sprite block becomes:
+State, near Installation (or as its own subsection under "Installation"):
 
-```
-back_path = str(stage_dir / "sprite_back.png")
-try:
-    init_image = args.image if args.image else sprite_path
-    generate_sprite_img2img(
-        stage["sprite_prompt"], stage["types"], init_image, back_path,
-        pipeline=img2img_pipeline, extra_tags=["backside"], seed=seed,
-        strength=0.65, reference_path=sprite_path,
-    )
-except Exception as exc:
-    print(
-        f"Warning: back sprite generation failed for {stage['name']}: {exc}",
-        file=sys.stderr,
-    )
-```
+- The LoRA weight file is **not** auto-downloaded by `pip install` or by the
+  tool at runtime, and it is **never committed** to the repo (`models/` is
+  gitignored — cite `.gitignore` line `models/`).
+- It must be downloaded manually from Civitai, model id **378602** ("back&front
+  Noob v1"), which requires a Civitai login.
+- It must be placed at `models/loras/pkspbf_nb_v1.safetensors` (relative to
+  the repo root — matches `_LORA_PATH = Path(__file__).parent.parent / "models"
+  / "loras" / "pkspbf_nb_v1.safetensors"`) before running the tool.
+- Running without the file present fails at pipeline-load time (`_apply_lora`
+  calls `StableDiffusionXLLoraLoaderMixin.lora_state_dict` against a
+  nonexistent path) — worth one sentence so the failure mode is legible to a
+  first-time reader, but no new error handling is being added in this slice.
 
-Only `reference_path=sprite_path` is added. The block still reaches this code
-only after the front-sprite block succeeded (that block `continue`s on failure),
-so `sprite_path` names an existing `P`-mode `sprite.png`. The back-shiny block
-(`generate_shiny(back_path, stage["name"], back_shiny_path)`) is **unchanged** —
-it now inherits the shared palette automatically.
+### 3. Add a license note
+
+Plainly state:
+
+- NoobAI-XL is distributed under a Fair-AI license carrying a
+  no-commercialisation clause.
+- This is acceptable for this project because fakemon-forge is a
+  non-monetised public portfolio project.
+- If that clause is ever a problem, the documented fallback is the SDXL-base
+  LoRA variant published on the same Civitai model page (378602) — no code
+  change is implied or required by mentioning this; it's a documented escape
+  hatch, not a supported `--flag`.
+
+Do not claim GPL/MIT/OpenRAIL-equivalent freedom, and do not imply the tool
+itself is licensed any differently — this note is scoped to the model/LoRA
+weights only. Keep the project's own `LICENSE` section untouched.
+
+### 4. Update "Dependencies" table and "~1.7GB" download note
+
+- Re-verify against `pyproject.toml`: current dependencies are `mistralai`,
+  `diffusers`, `transformers`, `accelerate`, `Pillow`, `torch` — no `compel`
+  entry exists in `pyproject.toml` or in the current README table (see Edge
+  cases: this part of the issue is already satisfied, not a new removal).
+  Leave the row-removal a no-op; do not delete any row that's already gone.
+- Reword the `diffusers` row's "Purpose" cell (currently "Stable Diffusion
+  sprite generation") to name the actual pipeline, e.g. something like "SDXL
+  sprite generation (NoobAI-XL + LoRA)" — exact wording is an implementation
+  choice for whoever writes the prose, not fixed by this spec.
+- Update the "first run downloads ~1.7 GB" sentence (currently referencing
+  `lambdalabs/sd-pokemon-diffusers`) to name `Laxhar/noobai-XL-1.1` and its
+  real download size. The exact GB figure for an SDXL base checkpoint is not
+  independently confirmed by anything in this repo (no fixture pins it) — see
+  Assumptions for the placeholder figure to use and how to hedge it.
+
+### 5. Grep sweep (verification, not a rewrite)
+
+Grep the whole repo (tracked files) for each of:
+`dreamshaper`, `pksp768`, `compel`, `_TYPE_TAGS`, `_encode_prompt`,
+`lambdalabs/sd-pokemon-diffusers`, `DPMSolverMultistepScheduler`, and the
+literal string `models/loras/pksp768_V2-1.safetensors`.
+
+Already confirmed by investigation for this spec (re-run as part of
+implementation to catch drift, but no further code fix is expected):
+
+- **Zero hits** in `fakemon_forge/*.py`, `tests/*.py`, and `pyproject.toml`
+  for every one of the above identifiers. The old backend is fully gone from
+  code.
+- **Two hits in `README.md`** for `lambdalabs/sd-pokemon-diffusers` (the two
+  lines this slice rewrites — see Behavior §1 and §4).
+- **Hits in `research-sprite-generation.md`** for `dreamshaper` and
+  `pksp768` (as `pksp768_V2-1`, `pksp768`) — this is the dated discovery
+  document that *kicked off* issue #61 by describing the old stack as
+  historical context at time of writing (2026-08-03). It is not code, README,
+  or `pyproject.toml`, and rewriting a dated research artifact to describe a
+  stack it predates would falsify the historical record. Per the issue's own
+  scope ("code, comments, README, or pyproject.toml"), this file is out of
+  scope — see Assumptions.
+- **One hit in `spec.md`** itself (this file, prior slice's leftover content,
+  referencing `_stub_encode_prompt` — a *test helper* naming pattern, not the
+  real `_encode_prompt` the issue asks about, and this file is about to be
+  fully overwritten by this slice's own spec anyway).
+
+If a fresh run of the sweep at implementation time turns up any hit inside
+`fakemon_forge/` (an actual code path, not docs/comments) that this
+investigation missed, fix it in that same slice and call it out explicitly in
+the PR body, per the issue's instructions — do not silently leave it.
 
 ## Edge cases
 
-- **Front sprite generation failed** → the front-sprite `except` `continue`s to
-  the next stage; the back-sprite block (and its `reference_path`) never runs
-  for that stage, so there is never a missing/absent reference.
-- **img2img returns colours far from frame 1's palette** →
-  `quantize_to_reference` maps each pixel to the nearest of frame 1's 16 colours;
-  the back sprite may look slightly off-palette / posterized. **Accepted** — this
-  is the authentic Gen-3 shared-palette constraint, not a bug.
-- **Back sprite content differs from the front** (it is a rear view) → only the
-  palette is shared, not geometry; no recentering/animation-band logic is applied
-  (that is `build_frame2`'s job for frame 2, not for the back view).
-- **Cross-view shiny consistency** → `sprite.png`, `sprite_frame2.png`, and
-  `sprite_back.png` now share one palette; `generate_shiny` rotates only the
-  palette keyed on `name`, so `sprite_shiny.png`, `sprite_frame2_shiny.png`, and
-  `sprite_back_shiny.png` share one rotated palette automatically.
-- **Line mode (3 stages)** → the back-sprite block is inside the per-stage loop;
-  each stage locks its own back sprite to its own `sprite.png`, and each stage's
-  three shinies stay mutually consistent within that stage.
-- **`reference_path=None` callers** (the front-sprite img2img call, and any other
-  existing caller) → behaviour is identical to today (adaptive `postprocess`).
+- **`compel` row already absent from both files.** The issue says "remove the
+  `compel` row if one still exists" — it doesn't, in either `pyproject.toml`
+  or `README.md`'s current Dependencies table. Treat this as already done;
+  no edit needed for it specifically (distinct from the `diffusers` row
+  reword, which *is* still needed).
+- **`models/loras/pksp768_V2-1.safetensors` path.** Confirmed absent from
+  every tracked file (only the bare model name `pksp768_V2-1`, no path,
+  appears in `research-sprite-generation.md`). The issue frames this as "a
+  check for stray path references, not a file deletion" — the check passes;
+  nothing to change.
+- **`research-sprite-generation.md`'s historical references.** See Behavior
+  §5 — treated as intentionally out of scope. Flagged explicitly rather than
+  silently skipped, per the "Assumptions" instruction below.
+- **Public-repo wording constraint.** The new README prose must not imply
+  real Pokémon sprites/assets are shipped, referenced as training data
+  provenance for the user, or bundled — stay within the existing "GBA-style" /
+  "Pokémon-like" framing already used elsewhere in the README. The LoRA name
+  ("Pokemon Sprite XL PixelArt") and Civitai model name are third-party
+  proper nouns being cited for attribution/download purposes, not a claim
+  about this repo's own outputs — write around them carefully (e.g. don't
+  say "generates Pokémon sprites"; keep saying it generates original
+  creatures in a Pokémon-*like* GBA style).
 
 ## Errors
 
-- `generate_sprite_img2img` surfaces exceptions to its caller (it does not
-  swallow them); `main` wraps the back-sprite call in the existing try/except and
-  warns `Warning: back sprite generation failed for {name}: {exc}` — unchanged
-  wording and structure.
-- `quantize_to_reference` raises `ValueError` ("palette-mode reference image") if
-  the reference is not `P`-mode. Because `main` always passes the already-saved
-  `P`-mode `sprite.png`, this only fires on misuse and would be caught by the
-  back-sprite `except`.
-- A missing `reference_path` file (e.g. `sprite.png` never written) would raise
-  in `Image.open`; this cannot happen after a successful front-sprite block, and
-  if it somehow did it is caught by the back-sprite `except` (warn-and-continue).
-- No new `sys.exit` paths; pipeline-load failure paths are unchanged.
+Not applicable — this slice changes no runtime code path, so no new error
+conditions are introduced. (The existing `_apply_lora` failure when the LoRA
+file is missing already exists in shipped code from an earlier slice; this
+slice only documents that precondition in prose, per Behavior §2.)
 
 ## Constraints & dependencies
 
-- The change lives in `fakemon_forge/sprites.py` (`generate_sprite_img2img`) and
-  `fakemon_forge/main.py` (one added kwarg). It reuses the existing
-  `quantize_to_reference`, `_run_img2img`, `postprocess`, and module constants;
-  nothing is hard-coded or duplicated.
-- `generate_sprite_img2img` performs a function-local `import torch` (via
-  `_run_img2img` → `_make_generator`), so **any test that calls it is an `ml`
-  test** and belongs in `tests/test_sprites_ml.py` (or carries
-  `@pytest.mark.ml`), per `CLAUDE.md`'s test-slicing rule. The pure
-  palette-lock/shiny assertions that go in `tests/test_sprites.py` must therefore
-  exercise `quantize_to_reference` / `generate_shiny` **directly**, not through
-  `generate_sprite_img2img`.
-- `main.py` changes touch only the back-sprite call (one kwarg); no import
-  changes, no new CLI args, no signature change to `main`. Because
-  `test_main.py` mocks the sprite functions, the `main` wiring is testable
-  without torch.
-- **Backward compatibility:** the new parameter defaults to `None`, so all
-  current `generate_sprite_img2img` calls and their `ml` tests (96×96, `P`-mode,
-  PNG, single pipeline call, `strength`/`image`/`prompt_embeds` passthrough)
-  must continue to pass unchanged. Only the new back-sprite call passes
-  `reference_path`.
-- Frame 1 (`sprite.png`) is the canonical palette source for the whole set
-  (front frame 1, front frame 2, and back all lock to it). The front sprite
-  itself is never reference-locked (it *defines* the palette).
-
-## Tests
-
-### light (`tests/test_sprites.py`, torch-free)
-
-These exercise the shared-palette lock and shiny consistency **without** calling
-`generate_sprite_img2img` (which would trigger `import torch`). Follow the
-existing `postprocess` / `quantize_to_reference` / helper patterns.
-
-- **Back-sprite palette lock**: given a back RGB image and a `P`-mode reference
-  frame (build via `postprocess(_rgb_image())` / `postprocess(_noisy_image())`),
-  `quantize_to_reference(back_rgb, reference)` yields a `P`-mode 96×96 image
-  whose `getpalette()` equals the reference's exactly. (This is the pure core of
-  the back-sprite lock; `quantize_to_reference` is already well-covered, so this
-  test frames it as the back-sprite scenario and asserts palette equality.)
-- **Cross-view shiny consistency**: build three `P`-mode images that share one
-  palette (stand-ins for frame 1 / frame 2 / back — e.g. quantize three
-  different RGB inputs against one reference so all three share its palette),
-  save each, run `generate_shiny(path, name, out_path)` on each with the **same
-  `name`**, reload the three outputs, and assert their three `getpalette()`
-  results are **identical** to one another. (Optionally also assert each shiny
-  palette differs from the shared original, i.e. rotation happened.)
-
-### ml (`tests/test_sprites_ml.py`, auto-skipped without torch)
-
-Follow the existing `_fake_img2img_pipeline` / `_stub_encode_prompt` patterns;
-build the reference as a real `P`-mode 96×96 file (e.g. via `_frame1_file` /
-`postprocess(_rgb_image())`, as sprites are saved).
-
-- `generate_sprite_img2img(..., reference_path=<P-mode frame path>)` with a mock
-  img2img pipeline writes an output file that is **`P`-mode** and whose
-  `getpalette()` **equals the reference's** (proves the back sprite adopts the
-  shared palette rather than an adaptive one).
-- The saved reference-locked sprite is still 96×96 and PNG.
-- **Regression**: `generate_sprite_img2img` **without** `reference_path`
-  continues to produce a `P`-mode 96×96 PNG via adaptive `postprocess` (existing
-  tests suffice; add one asserting the two branches diverge only in palette if
-  desired — e.g. locked output's palette equals the reference while the
-  unlocked output's need not).
-- The pipeline is still invoked **exactly once** and with the unchanged
-  `strength` / `image` / `prompt_embeds` / `extra_tags` passthrough when
-  `reference_path` is supplied (the reference only affects post-quantization).
-
-### light (`tests/test_main.py`, no torch — sprite fns mocked)
-
-- The back-sprite `generate_sprite_img2img` call receives
-  `reference_path == str(stage_dir / "sprite.png")` (frame 1), in **both** the
-  txt2img path and the img2img path. In the img2img path, assert the back call's
-  positional `image_path` (init) is `args.image` while its `reference_path` is
-  `sprite.png` — i.e. the reference is frame 1 even though the init image is the
-  user's drawing.
-- The existing back-sprite assertions still hold:
-  `extra_tags == ["backside"]`, `strength == 0.65`, and the img2img-path call
-  count (front + back). Distinguish the front call (`reference_path` absent/`None`)
-  from the back call (`reference_path == sprite.png`).
-- The back-shiny wiring is unchanged (`generate_shiny(back_path, name,
-  back_shiny_path)`); the existing shiny-count assertions
-  (`test_generate_shiny_called_three_times_per_stage`,
-  `test_line_mode_frame2_called_three_times`) remain valid, since no shiny call
-  was added or removed — only the back sprite's palette changed.
+- No implementation code changes are expected. If the grep sweep at
+  implementation time finds a genuine leftover code path, fixing it is
+  in-scope for *that* slice's implementation phase, but is not anticipated by
+  this investigation (see Behavior §5).
+- Must not alter `LICENSE` (project license) — only add a note about the
+  *model weights'* license inside the README body.
+- Must not change any test file; no test in the suite parses or asserts on
+  README content (confirmed: the two `README` mentions in `tests/` are
+  descriptive comments only, not assertions against the file).
+- Table/prose wording choices (exact GB figure, exact "Purpose" cell text)
+  are left to implementation-time judgement within the constraints stated
+  above — this spec fixes the *facts* that must appear, not the exact prose.
 
 ## Assumptions
 
-Items marked **[picked]** are defaults chosen here (not confirmed by existing
-code/tests/docs); **[confirmed]** items are grounded in the codebase.
-
-- **[picked]** The lock is added as an optional `reference_path: str = None`
-  keyword parameter on the **existing** `generate_sprite_img2img`, rather than a
-  new dedicated `generate_back_sprite` function. Rationale: it is the minimal,
-  lowest-risk change (existing `reference_path=None` callers and their tests are
-  untouched), keeps the img2img call in one place, and matches how the front
-  frames were locked (via `quantize_to_reference`). The issue explicitly permits
-  either approach. Note: an unused `generate_back_sprite` (txt2img-based) already
-  exists in `sprites.py` but is **not** the back-sprite path `main` uses (`main`
-  calls `generate_sprite_img2img` for the back sprite); it is left untouched to
-  avoid scope creep. **[confirmed]** that `generate_back_sprite` is currently
-  unused by `main.py`.
-- **[picked]** The parameter is a **path** (`reference_path`) rather than a
-  pre-loaded `Image`, matching how `main` already threads file paths
-  (`front_sprite_path`, `image_path`) and letting the function own the
-  `Image.open`. The issue allowed `reference_path`/`reference`; path chosen for
-  consistency.
-- **[picked]** The parameter is placed **last** in the keyword-only signature and
-  defaults to `None`, preserving every existing call site and test.
-- **[picked]** When `reference_path` is set, the reference is opened without a
-  mode conversion (the saved front sprite is already `P`-mode); a non-`P`-mode
-  reference is left to raise via `quantize_to_reference` (caught by `main`'s
-  back-sprite `except`).
-- **[confirmed]** Frame 1 (`sprite.png`) is the canonical palette source: it is
-  generated first in the loop and is saved `P`-mode by `postprocess`'s
-  `.quantize`; front frame 2 already locks to it, and this slice locks the back
-  to it too.
-- **[confirmed]** The reference is always `sprite_path` (frame 1), independent of
-  the img2img init image — in the img2img path the init is the user's drawing
-  (`args.image`) while the palette reference must still be frame 1.
-- **[confirmed]** `quantize_to_reference` already mirrors `postprocess`'s
-  resize + colour/contrast pre-steps, so switching only the palette (adaptive →
-  fixed reference) is the sole behavioural difference between the branches; it
-  does not mutate its inputs.
-- **[confirmed]** `generate_shiny` rotates only the palette keyed on `name` and
-  preserves achromatic entries, so three views sharing one palette yield three
-  identical rotated shiny palettes — `sprite_back_shiny.png` is consistent with
-  `sprite_shiny.png` / `sprite_frame2_shiny.png` with **no** change to the shiny
-  blocks (the back shiny is already `generate_shiny(back_path, …)`).
-- **[confirmed]** `export_ini` / `writer.py` need no changes — they reference no
-  sprite files (Gen 3 data fields / `stats.json` + `entry.md`).
-- **[confirmed]** Anything calling `generate_sprite_img2img` triggers a real
-  `import torch` (via `_run_img2img` → `_make_generator`) and is therefore an
-  `ml` test; the pure palette/shiny assertions in `test_sprites.py` must call
-  `quantize_to_reference` / `generate_shiny` directly, and the `main`-level
-  wiring is torch-free because `test_main.py` mocks the sprite functions.
+- **Slices 1-8 are fully merged into the working tree as given.** Verified by
+  reading `fakemon_forge/sprites.py` directly rather than trusting the issue
+  text: `_BASE_MODEL_ID = "Laxhar/noobai-XL-1.1"`, `_LORA_PATH` pointing at
+  `pkspbf_nb_v1.safetensors`, `_LORA_SCALE = 0.7`, `k_centroid`,
+  `generate_sprite_pair` / `split_front_back_canvas`, `procedural_squash` /
+  `build_frame2`, and `_flatten_background_to_key` (connectivity-based keying)
+  are all present and match the issue's description of what should already be
+  shipped.
+- **`research-sprite-generation.md` is out of scope for editing.** Assumption,
+  not confirmed by the issue text (which doesn't mention this file at all).
+  Chosen because the file is explicitly dated/historical ("discovery,
+  2026-08-03") and predates the retooling it describes; treating dated
+  research notes as a live-documentation surface would be inconsistent with
+  the file's own stated purpose ("Pure discovery, no spec/code"). If this
+  assumption is wrong, the fix is a one-line scope addition, not a design
+  change.
+- **Exact "~X GB" download-size figure for `Laxhar/noobai-XL-1.1`.** Nothing
+  in this repo (fixtures, tests, comments) pins the real download size of the
+  NoobAI-XL 1.1 checkpoint. Default: state it as "several GB" or carry over
+  a close approximate figure for a standard SDXL-family checkpoint (typically
+  ~6.5-7 GB for the base UNet+VAE+encoders in fp32, less if only fp16 shards
+  download) rather than inventing false precision. Whoever implements this
+  slice should independently confirm the real Hugging Face repo size if
+  precision matters more than this spec assumes; using a hedge word ("about")
+  is an acceptable default rather than blocking the slice on an unverifiable
+  number.
+- **"Sprite generation" step numbering/heading stays at position 3** in "How
+  it works" — this slice only rewrites step 3's body text, not the surrounding
+  structure (steps 1, 2, 4 are untouched and don't reference the sprite
+  backend).
+- **New LoRA-download and license-note content are placed under
+  "Installation"**, either as new paragraphs or a small new subsection (e.g.
+  "### LoRA weights" / "### License note on model weights"), rather than
+  inline in "How it works" step 3 — keeps step 3 focused on describing the
+  pipeline and keeps the actionable "you must do this before running" content
+  next to the rest of the setup instructions. This is a structural default,
+  not dictated by the issue text.
+- **This is a single coherent slice**, not something to split further — it's
+  a documentation-only change plus a verification grep with no code-path
+  fallout found, well within one focused change.
