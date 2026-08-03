@@ -1,6 +1,6 @@
 # Task 10 — Thread `stages` through the generator
 
-- **Status:** pending
+- **Status:** done
 - **Wave:** 1
 - **Owns (the only files/dirs this task may create or modify):**
   - `fakemon_forge/generator.py` — everything **except** the `_BST_TARGETS` constant (owned by task 00)
@@ -93,16 +93,17 @@ out explicitly in the handoff.
 
 ## Acceptance criteria (Definition of Done)
 
-- [ ] `generate_fakemon` accepts keyword-only `stages: int = 3`.
-- [ ] `--mode line` with no `stages` produces a prompt identical in structure and
-      wording to before, differing only in the corrected BST numbers.
-- [ ] Prompt carries 1 / 2 / 3 BST targets for single / 2-stage / 3-stage.
-- [ ] 2-stage progression wording is distinct from the 3-stage wording.
-- [ ] A 2-stage final takes the stage-3 size row; 3-stage sizes are unchanged.
-- [ ] `stages` has no effect in single mode.
-- [ ] `_BST_TARGETS` was not reshaped or re-valued by this task.
-- [ ] `stats.json` keys and the `stageN_<name>` layout are unchanged.
-- [ ] Full suite green: `pytest` from the repo root.
+- [x] `generate_fakemon` accepts keyword-only `stages: int = 3`.
+- [x] `--mode line` with no `stages` produces a prompt identical in structure and
+      wording to before, differing only in the corrected BST numbers — asserted
+      as full-string equality against the verbatim pre-#59 prompt.
+- [x] Prompt carries 1 / 2 / 3 BST targets for single / 2-stage / 3-stage.
+- [x] 2-stage progression wording is distinct from the 3-stage wording.
+- [x] A 2-stage final takes the stage-3 size row; 3-stage sizes are unchanged.
+- [x] `stages` has no effect in single mode.
+- [x] `_BST_TARGETS` was not reshaped or re-valued by this task.
+- [x] `stats.json` keys and the `stageN_<name>` layout are unchanged.
+- [x] Full suite green: `pytest` from the repo root — 601 passed (was 576).
 
 ## Notes / assumptions
 
@@ -112,3 +113,20 @@ out explicitly in the handoff.
   retry budget is spent on the name contract. Do not add a retry here.
 - If task 00 left a temporary adapter in `_user_prompt` to keep the suite green,
   remove it as part of this task.
+
+### Outcomes worth carrying forward
+
+- **A shadowing bug was caught by the tests, not by review.** Inside
+  `generate_fakemon` the local `stages = json.loads(...)` shadowed the new
+  `stages: int` parameter, so by the time `_normalize` needed the requested
+  count it held the parsed *list*. The local is now `parsed`.
+  **Task 20 faces the identical collision in `main.py`**, where a local `stages`
+  holds the returned list while `args.stages` is the count — its task file
+  already flags this.
+- `_bst_row` was generalised rather than removed, and now trims a fallback row
+  to the requested count. `--tier pseudo --mode single` still prompts ~300.
+- `_SIZE_DEFAULTS_BY_LINE_STAGE` became `_SIZE_DEFAULTS_BY_LINE`, keyed
+  stage-count → stage-number. No test referenced the old name.
+- The structure-identical guarantee is pinned against the **verbatim pre-#59
+  prompt string** held in the test file, not a snapshot of current behaviour —
+  so it keeps its meaning even if someone regenerates expectations later.

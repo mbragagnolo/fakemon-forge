@@ -95,6 +95,24 @@ signature features emerging, power becoming apparent.
 with a different silhouette from stage 1, design complexity at its peak.\
 """
 
+# A 2-stage line goes juvenile -> adult with no middle form. Describing an
+# adolescent stage here would ask for a form that is never generated.
+_EVO_PROGRESSION_2 = """\
+
+Evolutionary progression — each stage must look and feel visually distinct:
+  Stage 1: juvenile/child form — small and simple, cute or curious expression, \
+limited limbs or features, undeveloped power.
+  Stage 2: adult/final form — fully developed, imposing presence, complex design \
+with a different silhouette from stage 1, design complexity at its peak.\
+"""
+
+_EVO_PROGRESSION_BY_COUNT = {2: _EVO_PROGRESSION_2, 3: _EVO_PROGRESSION}
+
+_STAGE_COUNT_WORDING = {
+    2: "two evolutionary stages (stages 1 and 2)",
+    3: "three evolutionary stages (stages 1, 2, and 3)",
+}
+
 _TIER_NOTES = {
     "pseudo":    "\nThis is a pseudo-legendary line: the final form should rival legendary "
                  "Pokémon in visual impact and raw power.",
@@ -108,29 +126,36 @@ def _bst_row(tier: str, stage_count: int) -> tuple[int, ...]:
     """Per-stage BST targets for one tier and stage count.
 
     A tier without a row for the requested count falls back to the one row it
-    does have. That keeps `--tier pseudo --mode single` prompting the value it
-    prompts today: pseudo has only a 3-stage row, and single mode reads the
-    first entry. The combination is already documented as line-only, and task 11
-    rejects it at the CLI; until then it must not crash.
+    does have, trimmed to the count asked for. That keeps
+    ``--tier pseudo --mode single`` prompting the value it prompted before #59:
+    pseudo has only a 3-stage row, and single mode reads the first entry. The
+    combination is already documented as line-only and the CLI rejects it;
+    until then it must not raise.
     """
     rows = _BST_TARGETS[tier]
-    return rows.get(stage_count) or next(iter(rows.values()))
+    row = rows.get(stage_count)
+    if row is None:
+        row = next(iter(rows.values()))[:stage_count]
+    return row
 
 
-def _user_prompt(description: str, mode: str, tier: str) -> str:
+def _user_prompt(description: str, mode: str, tier: str, stage_count: int = 3) -> str:
+    # Single mode is one stage by definition; any requested count is ignored
+    # rather than allowed to contradict the mode.
     if mode == "single":
+        stage_count = 1
+
+    row = _bst_row(tier, stage_count)
+
+    if stage_count == 1:
         count = "one stage (stage 1 only)"
-        bst_hint = f"BST target: ~{_bst_row(tier, 1)[0]}."
+        bst_hint = f"BST target: ~{row[0]}."
         evo_text = ""
     else:
-        row = _bst_row(tier, 3)
-        count = "three evolutionary stages (stages 1, 2, and 3)"
-        bst_hint = (
-            f"BST targets: stage 1 ~{row[0]}, "
-            f"stage 2 ~{row[1]}, "
-            f"stage 3 ~{row[2]}."
-        )
-        evo_text = _EVO_PROGRESSION
+        count = _STAGE_COUNT_WORDING[stage_count]
+        targets = ", ".join(f"stage {i} ~{v}" for i, v in enumerate(row, start=1))
+        bst_hint = f"BST targets: {targets}."
+        evo_text = _EVO_PROGRESSION_BY_COUNT[stage_count]
 
     tier_note = _TIER_NOTES.get(tier, "")
 
@@ -187,10 +212,12 @@ def _repair_name(name) -> str:
     return cleaned[:_MAX_NAME_LEN]
 
 
-_SIZE_DEFAULTS_BY_LINE_STAGE = {
-    1: (5, 30),
-    2: (10, 150),
-    3: (17, 600),
+# Per-stage size fallbacks, keyed stage count -> stage number. A 2-stage line's
+# stage 2 is a *final* form, so it takes the same row a 3-stage final does —
+# reusing the 3-stage middle row would under-size it.
+_SIZE_DEFAULTS_BY_LINE = {
+    2: {1: (5, 30), 2: (17, 600)},
+    3: {1: (5, 30), 2: (10, 150), 3: (17, 600)},
 }
 
 _SIZE_DEFAULTS_BY_TIER = {
@@ -285,16 +312,20 @@ def _normalize_category(raw, types) -> str:
     return result or _type_word(types)
 
 
-def _size_defaults(stage: dict, mode: str, tier: str) -> tuple[int, int]:
+def _size_defaults(
+    stage: dict, mode: str, tier: str, stage_count: int = 3
+) -> tuple[int, int]:
     """Stage/tier-scaled (height_dm, weight_hg) fallbacks.
 
     An off-spec stage number — missing, out of range, or a JSON string — falls
     through to the tier table rather than raising KeyError, matching how
-    ``main.py`` already reads the same field for its sprite size fraction.
+    ``main.py`` already reads the same field for its sprite size fraction. An
+    unrecognised stage count degrades to the 3-stage rows the same way.
     """
     if mode == "line":
+        rows = _SIZE_DEFAULTS_BY_LINE.get(stage_count, _SIZE_DEFAULTS_BY_LINE[3])
         try:
-            return _SIZE_DEFAULTS_BY_LINE_STAGE[int(stage.get("stage"))]
+            return rows[int(stage.get("stage"))]
         except (TypeError, ValueError, KeyError):
             pass
     return _SIZE_DEFAULTS_BY_TIER.get(tier, _SIZE_DEFAULTS_BY_TIER["standard"])
@@ -316,19 +347,25 @@ def _clamp_dimension(value, upper: int, fallback: int) -> int:
     return max(1, min(upper, value))
 
 
-def _normalize(stages: list[dict], mode: str, tier: str) -> list[dict]:
+def _normalize(
+    stages: list[dict], mode: str, tier: str, stage_count: int = 3
+) -> list[dict]:
     """Post-parse cleanup pass: enforces the name contract, defaults/clamps
     height_dm and weight_hg, and filters abilities_gen3 to the Gen 3 pool.
 
     Repair is idempotent: a name already inside the Gen 3 contract comes out
     of ``_repair_name`` unchanged, so valid names pass through untouched.
+
+    ``stages`` is the parsed list of stage dicts; ``stage_count`` is how many
+    were *requested*. They are deliberately different things — the model may
+    return a different number than was asked for, which is accepted.
     """
     for stage in stages:
         stage["name"] = _repair_name(stage["name"])
         stage["abilities_gen3"] = _normalize_abilities_gen3(stage.get("abilities_gen3", []))
         stage["category"] = _normalize_category(stage.get("category"), stage.get("types"))
 
-        height_default, weight_default = _size_defaults(stage, mode, tier)
+        height_default, weight_default = _size_defaults(stage, mode, tier, stage_count)
         stage["height_dm"] = _clamp_dimension(stage.get("height_dm"), 999, height_default)
         stage["weight_hg"] = _clamp_dimension(stage.get("weight_hg"), 9999, weight_default)
     return stages
@@ -339,15 +376,22 @@ def generate_fakemon(
     mode: str,
     tier: str = "standard",
     *,
+    stages: int = 3,
     client=None,
     api_key: str = None,
 ) -> list[dict]:
+    """Generate one Fakemon's stages.
+
+    ``stages`` is how many evolutionary stages to ask for; it applies to
+    ``mode="line"`` and is ignored for ``mode="single"``. The default of 3
+    is what keeps an existing ``--mode line`` invocation unchanged.
+    """
     if client is None:
         client = Mistral(api_key=api_key)
 
     messages = [
         {"role": "system", "content": _SYSTEM_PROMPT},
-        {"role": "user", "content": _user_prompt(description, mode, tier)},
+        {"role": "user", "content": _user_prompt(description, mode, tier, stages)},
     ]
 
     raw = None
@@ -355,7 +399,10 @@ def generate_fakemon(
         try:
             response = client.chat.complete(model=_MODEL, messages=messages)
             raw = response.choices[0].message.content
-            stages = json.loads(_strip_fences(raw))
+            # Named `parsed`, not `stages`: `stages` is the requested *count*
+            # parameter, and reusing the name would shadow it before
+            # `_normalize` below can be told how many stages were asked for.
+            parsed = json.loads(_strip_fences(raw))
         except json.JSONDecodeError:
             if attempt == 1:
                 print(
@@ -373,7 +420,7 @@ def generate_fakemon(
             )
             sys.exit(1)
 
-        too_long, illegal = _name_violations(stages)
+        too_long, illegal = _name_violations(parsed)
         if (too_long or illegal) and attempt == 0:
             # The offending array has to be in the conversation for "return the
             # full array again" to mean anything — without it the model rebuilds
@@ -382,4 +429,4 @@ def generate_fakemon(
             messages.append({"role": "user", "content": _corrective_message(too_long, illegal)})
             continue
 
-        return _normalize(stages, mode, tier)
+        return _normalize(parsed, mode, tier, stages)

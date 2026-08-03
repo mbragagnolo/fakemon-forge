@@ -7,6 +7,8 @@ from fakemon_forge.generator import (
     generate_fakemon,
     _normalize,
     _corrective_message,
+    _size_defaults,
+    _user_prompt,
     _ALLOWED_NAME_CHARS,
     _SYSTEM_PROMPT,
     _ABILITY_POOL,
@@ -1373,3 +1375,195 @@ def test_valid_category_survives_off_spec_types():
     stage = {**_STAGE_1, "types": [], "category": "seed"}
     result = _normalize([stage], "single", "standard")
     assert result[0]["category"] == "SEED"
+
+
+# ---------------------------------------------------------------------------
+# Stage count: 2-stage lines (#59)
+# ---------------------------------------------------------------------------
+
+# The prompts as they read before #59, verbatim. The structure-identical
+# guarantee is asserted against these with only the BST numbers substituted --
+# literal byte-identity is impossible, since correcting those numbers is the
+# point of the issue.
+_PRE_59_LINE_PROMPT = (
+    "Generate three evolutionary stages (stages 1, 2, and 3) for a Fakemon "
+    "based on this description:\n"
+    "\n"
+    "DESC\n"
+    "\n"
+    "BST targets: stage 1 ~300, stage 2 ~420, stage 3 ~520.\n"
+    "Evolutionary progression — each stage must look and feel visually "
+    "distinct:\n"
+    "  Stage 1: juvenile/child form — small and simple, cute or curious "
+    "expression, limited limbs or features, undeveloped power.\n"
+    "  Stage 2: adolescent/teenage form — noticeably larger, silhouette more "
+    "defined, signature features emerging, power becoming apparent.\n"
+    "  Stage 3: adult/final form — fully developed, imposing presence, complex "
+    "design with a different silhouette from stage 1, design complexity at its "
+    "peak."
+)
+
+_PRE_59_SINGLE_PROMPT = (
+    "Generate one stage (stage 1 only) for a Fakemon based on this "
+    "description:\n"
+    "\n"
+    "DESC\n"
+    "\n"
+    "BST target: ~300."
+)
+
+
+def _bst_line(prompt: str) -> str:
+    return next(l for l in prompt.splitlines() if l.startswith("BST"))
+
+
+# --- the structure-identical guarantee ---------------------------------------
+
+def test_default_line_prompt_is_structure_identical_to_pre_59():
+    """`--mode line` with no `stages` must differ from the pre-#59 prompt in
+    the corrected BST numbers and nothing else. Full-string equality, so a
+    reworded hint, a reordered section or a lost line all fail."""
+    expected = _PRE_59_LINE_PROMPT.replace(
+        "stage 1 ~300, stage 2 ~420, stage 3 ~520",
+        "stage 1 ~295, stage 2 ~405, stage 3 ~518",
+    )
+    assert _user_prompt("DESC", "line", "standard") == expected
+
+
+def test_default_single_prompt_is_structure_identical_to_pre_59():
+    expected = _PRE_59_SINGLE_PROMPT.replace("~300.", "~430.")
+    assert _user_prompt("DESC", "single", "standard") == expected
+
+
+def test_explicit_three_stages_matches_the_default():
+    """Passing the default explicitly must change nothing."""
+    assert (
+        _user_prompt("DESC", "line", "standard", 3)
+        == _user_prompt("DESC", "line", "standard")
+    )
+
+
+# --- BST target counts and values --------------------------------------------
+
+@pytest.mark.parametrize("mode, stage_count, expected", [
+    ("single", 1, "BST target: ~430."),
+    ("line", 2, "BST targets: stage 1 ~305, stage 2 ~468."),
+    ("line", 3, "BST targets: stage 1 ~295, stage 2 ~405, stage 3 ~518."),
+])
+def test_bst_hint_matches_the_stage_count(mode, stage_count, expected):
+    prompt = _user_prompt("DESC", mode, "standard", stage_count)
+    assert _bst_line(prompt) == expected
+
+
+def test_two_stage_prompt_names_two_stages():
+    prompt = _user_prompt("DESC", "line", "standard", 2)
+    assert "three evolutionary stages" not in prompt
+    assert "stages 1 and 2" in prompt
+
+
+# --- progression wording ------------------------------------------------------
+
+def test_two_stage_progression_omits_the_adolescent_middle():
+    """A 2-stage line goes juvenile -> adult; describing a middle form would
+    ask for a stage that is not being generated."""
+    prompt = _user_prompt("DESC", "line", "standard", 2)
+    assert "Stage 1:" in prompt
+    assert "Stage 2:" in prompt
+    assert "Stage 3:" not in prompt
+    assert "adolescent" not in prompt
+
+
+def test_three_stage_progression_keeps_the_adolescent_middle():
+    prompt = _user_prompt("DESC", "line", "standard", 3)
+    assert "adolescent" in prompt
+    assert "Stage 3:" in prompt
+
+
+def test_single_mode_has_no_progression_text():
+    prompt = _user_prompt("DESC", "single", "standard", 1)
+    assert "Evolutionary progression" not in prompt
+
+
+# --- stage count is ignored in single mode ------------------------------------
+
+@pytest.mark.parametrize("stage_count", [1, 2, 3])
+def test_stage_count_is_ignored_in_single_mode(stage_count):
+    assert (
+        _user_prompt("DESC", "single", "standard", stage_count)
+        == _user_prompt("DESC", "single", "standard")
+    )
+
+
+# --- pseudo + single is preserved until task 11 rejects it --------------------
+
+def test_pseudo_single_still_prompts_its_pre_59_value():
+    """pseudo has only a 3-stage row now; `_bst_row`'s fallback keeps this
+    combination working rather than raising. README calls it line-only and
+    task 11 rejects it at the CLI -- until then it must not crash."""
+    assert _bst_line(_user_prompt("DESC", "single", "pseudo")) == "BST target: ~300."
+
+
+def test_pseudo_line_is_unchanged():
+    assert (
+        _bst_line(_user_prompt("DESC", "line", "pseudo"))
+        == "BST targets: stage 1 ~300, stage 2 ~420, stage 3 ~600."
+    )
+
+
+# --- size defaults ------------------------------------------------------------
+
+def test_two_stage_final_takes_the_stage_three_size_row():
+    """A 2-stage stage 2 is a final form. Reusing the 3-stage middle row
+    (10 dm / 150 hg) would under-size it."""
+    assert _size_defaults({"stage": 2}, "line", "standard", 2) == (17, 600)
+
+
+def test_two_stage_base_takes_the_stage_one_size_row():
+    assert _size_defaults({"stage": 1}, "line", "standard", 2) == (5, 30)
+
+
+@pytest.mark.parametrize("stage_no, expected", [
+    (1, (5, 30)), (2, (10, 150)), (3, (17, 600)),
+])
+def test_three_stage_size_defaults_are_unchanged(stage_no, expected):
+    assert _size_defaults({"stage": stage_no}, "line", "standard", 3) == expected
+    assert _size_defaults({"stage": stage_no}, "line", "standard") == expected
+
+
+def test_off_spec_stage_number_still_falls_back_with_a_stage_count():
+    """The #55 fallback must survive the new parameter."""
+    assert _size_defaults({"stage": 9}, "line", "standard", 2) == (10, 150)
+    assert _size_defaults({"stage": "x"}, "line", "standard", 2) == (10, 150)
+
+
+def test_generate_fakemon_applies_two_stage_size_defaults():
+    stages = [
+        {k: v for k, v in _STAGE_1.items()},
+        {**_STAGE_2, "stage": 2},
+    ]
+    client = _make_client(json.dumps(stages))
+    result = generate_fakemon("fire lizard", "line", client=client, stages=2)
+    assert [(s["height_dm"], s["weight_hg"]) for s in result] == [(5, 30), (17, 600)]
+
+
+# --- the public keyword -------------------------------------------------------
+
+def test_generate_fakemon_accepts_stages_keyword():
+    client = _make_client(json.dumps([_STAGE_1, _STAGE_2]))
+    generate_fakemon("fire lizard", "line", client=client, stages=2)
+    text = _get_prompt_text(client)
+    assert "BST targets: stage 1 ~305, stage 2 ~468." in text
+
+
+def test_generate_fakemon_defaults_to_three_stages():
+    client = _make_client(json.dumps(_LINE))
+    generate_fakemon("fire lizard", "line", client=client)
+    text = _get_prompt_text(client)
+    assert "BST targets: stage 1 ~295, stage 2 ~405, stage 3 ~518." in text
+
+
+def test_stages_is_keyword_only():
+    """Positional passing must not silently land on `tier`."""
+    client = _make_client(json.dumps(_LINE))
+    with pytest.raises(TypeError):
+        generate_fakemon("fire lizard", "line", "standard", 2, client=client)
