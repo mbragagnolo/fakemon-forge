@@ -1,6 +1,6 @@
 # Task 11 — `--stages` flag and its two validations
 
-- **Status:** pending
+- **Status:** done
 - **Wave:** 1
 - **Owns (the only files/dirs this task may create or modify):**
   - `fakemon_forge/cli.py`
@@ -57,14 +57,16 @@ should produce exactly one message, and always the same one).
 
 ## Acceptance criteria (Definition of Done)
 
-- [ ] `--stages` accepts only `2` and `3`, defaults to `3`, and yields an int.
-- [ ] `--stages` with `--mode single` exits 1 with a clear stderr message.
-- [ ] `--tier pseudo --stages 2` exits 1 with a clear stderr message.
-- [ ] `--tier pseudo` with 3 stages (explicit or default) is accepted.
-- [ ] `--stages 1` is rejected — not treated as `--mode single`.
-- [ ] The existing legendary/mythical rejection is unchanged.
-- [ ] `--mode` choices are unchanged (`single`, `line`).
-- [ ] Full suite green: `pytest` from the repo root.
+- [x] `--stages` accepts only `2` and `3`, defaults to `3`, and yields an int.
+- [x] `--stages` with `--mode single` exits 1 with a clear stderr message —
+      including an explicit `--stages 3`, since the fault is supplying a flag
+      that does not apply to the mode.
+- [x] `--tier pseudo --stages 2` exits 1 with a clear stderr message.
+- [x] `--tier pseudo` with 3 stages (explicit or default) is accepted.
+- [x] `--stages 1` is rejected — not treated as `--mode single`.
+- [x] The existing legendary/mythical rejection is unchanged.
+- [x] `--mode` choices are unchanged (`single`, `line`).
+- [x] Full suite green: `pytest` from the repo root — 630 passed (was 601).
 
 ## Notes / assumptions
 
@@ -78,3 +80,23 @@ should produce exactly one message, and always the same one).
   that decision.
 - Do not touch `fakemon_forge/generator.py` — task 10 owns it, and these two run
   in the same wave.
+
+### Outcomes worth carrying forward
+
+- **`args.stages_given` was added** alongside `args.stages`. `--stages` parses
+  with `default=None` so the flag's *presence* can be distinguished from its
+  value; `parse_args` records the flag then fills in the default, keeping the
+  frozen contract (`args.stages` is always an int, default 3) intact. Without
+  it the single-mode rejection could not tell an explicit `--stages 3` from the
+  default and would have fired on every single-mode run.
+- **`--tier pseudo --mode single` is now rejected** — scope beyond the spec,
+  invited by this task's Notes. `README.md:107` and `--tier`'s own help already
+  called pseudo a line, but nothing enforced it; it produced a standalone form
+  carrying a juvenile's BST, the exact inconsistency #59 removes for the
+  standard tier. **`generator._bst_row`'s fallback is now unreachable for
+  pseudo but still guards other tiers — do not remove it.**
+- **Validation order is pinned by test**, not incidental: unusable run →
+  flag-does-not-apply-to-mode → tier/mode → tier/stage-count. Exactly one
+  message is emitted when several rules could fire.
+- **`--mode`'s help text no longer says "3-stage"**, since a line can now be
+  either length. `README.md` still does — that is task 30's.
