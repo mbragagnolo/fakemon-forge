@@ -22,6 +22,7 @@ from fakemon_forge.sprites import (
     difference_ratio,
     build_frame2,
     stitch_spritesheet,
+    k_centroid,
     _background_index,
     _flatten_background_to_key,
     _quantize_gen3,
@@ -984,13 +985,39 @@ def test_spritesheet_cell_size_override(tmp_path):
 
 
 def test_spritesheet_downscale_introduces_no_new_colors(tmp_path):
-    # NEAREST downscale must only drop pixels, never blend new colours in.
+    # k_centroid downscale must only pick existing tile colours, never blend
+    # new ones in — each view fixture is solid-colour, so every cell's
+    # dominant colour is exactly that view's colour.
     stage = _make_stage_dir(tmp_path)
     out = tmp_path / "spritesheet.png"
     stitch_spritesheet(str(stage), str(out))
     sheet_colors = set(Image.open(out).convert("RGB").get_flattened_data())
     allowed = set(_VIEW_COLORS.values()) | {_KEY_COLOR}
     assert sheet_colors <= allowed
+
+
+# --------------------------------------------------------------------------
+# k_centroid() — dominant-colour-per-tile RGB downscale
+# --------------------------------------------------------------------------
+
+def test_k_centroid_output_size_and_mode():
+    img = Image.new("RGB", (12, 12), (10, 20, 30))
+    out = k_centroid(img, 4, 3)
+    assert out.size == (4, 3)
+    assert out.mode == "RGB"
+
+
+def test_k_centroid_hard_edge_introduces_no_new_colors():
+    # Two solid-colour halves: every output pixel must be one of the two
+    # source colours, never a blend (unlike LANCZOS ringing at hard edges).
+    red, blue = (255, 0, 0), (0, 0, 255)
+    img = Image.new("RGB", (12, 12), red)
+    for x in range(6, 12):
+        for y in range(12):
+            img.putpixel((x, y), blue)
+    out = k_centroid(img, 6, 6)
+    out_colors = set(out.get_flattened_data())
+    assert out_colors <= {red, blue}
 
 
 # --------------------------------------------------------------------------

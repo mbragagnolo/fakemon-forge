@@ -56,6 +56,33 @@ def _encode_prompt(prompt: str, pipeline):
     return compel(prompt)
 
 
+def k_centroid(image: Image.Image, width: int, height: int, centroids: int = 2) -> Image.Image:
+    """Downscale ``image`` to ``width`` x ``height`` by per-tile dominant colour.
+
+    For each output pixel, clusters the corresponding source tile into
+    ``centroids`` colours (k-means quantize) and keeps the largest cluster's
+    colour. Unlike ``NEAREST`` (picks one arbitrary source pixel per tile) or
+    blended filters like ``LANCZOS`` (can synthesize colours absent from the
+    tile via ringing at hard edges), this always emits a colour that actually
+    occurs in the tile, aligned with the tile's dominant content — the
+    property pixel-art downscaling needs. MIT-licensed algorithm ported from
+    Astropulse's "pixeldetector". Does not mutate ``image``.
+    """
+    image = image.convert("RGB")
+    out = Image.new("RGB", (width, height))
+    wf = image.width / width
+    hf = image.height / height
+    for x in range(width):
+        for y in range(height):
+            tile = image.crop((int(x * wf), int(y * hf), int((x + 1) * wf), int((y + 1) * hf)))
+            tile = tile.quantize(colors=centroids, method=1, kmeans=centroids)
+            counts = tile.getcolors()
+            idx = max(counts, key=lambda c: c[0])[1]
+            pal = tile.getpalette()
+            out.putpixel((x, y), tuple(pal[idx * 3:idx * 3 + 3]))
+    return out
+
+
 def postprocess(image: Image.Image, size: int | None = None) -> Image.Image:
     """Turn a raw SD RGB image into a ``P``-mode Gen-3-contract sprite.
 
@@ -571,9 +598,9 @@ def stitch_spritesheet(stage_dir: str, output_path: str, *, cell_size: int = 64)
     leaves its cell on the key rather than failing — mirroring how sprite
     generation degrades per-view. The individual views are kept at the native
     SD render size (``_SPRITE_SIZE``), so the default 64px cell is a **single**
-    NEAREST downscale (768/64 = an exact /12) — one resample from full detail,
-    never a chain — and NEAREST drops pixels without blending new colours into
-    the palette.
+    ``k_centroid`` downscale (768/64 = an exact /12) — one resample from full
+    detail, never a chain — which picks each cell's dominant tile colour
+    without blending new colours into the palette.
     """
     sheet = Image.new("RGB", (4 * cell_size, 2 * cell_size), _KEY_COLOR)
     for name, col, row in _SHEET_LAYOUT:
@@ -582,7 +609,7 @@ def stitch_spritesheet(stage_dir: str, output_path: str, *, cell_size: int = 64)
             continue
         cell = Image.open(path).convert("RGB")
         if cell.size != (cell_size, cell_size):
-            cell = cell.resize((cell_size, cell_size), Image.NEAREST)
+            cell = k_centroid(cell, cell_size, cell_size)
         sheet.paste(cell, (col * cell_size, row * cell_size))
     sheet.save(output_path)
 

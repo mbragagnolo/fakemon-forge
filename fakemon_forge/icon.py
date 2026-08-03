@@ -14,7 +14,7 @@ repo): 32x64, all pixels opaque, <= 16 distinct colours, teal-green background
 
 from PIL import Image
 
-from fakemon_forge.sprites import _KEY_COLOR, _KEY_TOLERANCE, _rgb_distance
+from fakemon_forge.sprites import _KEY_COLOR, _KEY_TOLERANCE, _rgb_distance, k_centroid
 
 # Party-menu icon background — an *opaque* teal-green that dominates the image
 # and is forced onto palette index 0 (unlike the sprites' transparency key,
@@ -107,13 +107,15 @@ def _creature_palette(rgb32: Image.Image, bg_mask: Image.Image) -> list[tuple[in
 def _build_frame1(source: Image.Image) -> Image.Image:
     """Return a 32x32 opaque ``P``-mode frame with teal forced onto index 0.
 
-    Single high-quality downscale (RGB, one LANCZOS 768 -> 32 so a 1px outline is
-    never chained through multiple resamples), then quantize the creature region
-    to up to 15 colours against a palette whose index 0 is the teal background.
-    Every background pixel is forced to index 0, so the result is opaque with no
+    Single high-quality downscale (RGB, one k_centroid 768 -> 32 so a 1px
+    outline is never chained through multiple resamples, and each output pixel
+    keeps a colour that actually occurs in its source tile rather than a
+    blended/ringing artifact), then quantize the creature region to up to 15
+    colours against a palette whose index 0 is the teal background. Every
+    background pixel is forced to index 0, so the result is opaque with no
     alpha holes. Assumes ``source`` is ``P``-mode; does not mutate it.
     """
-    rgb32 = source.convert("RGB").resize((_ICON_SIZE, _ICON_SIZE), Image.LANCZOS)
+    rgb32 = k_centroid(source.convert("RGB"), _ICON_SIZE, _ICON_SIZE)
     bg_mask = _background_mask(source, rgb32)
     creature_colors = _creature_palette(rgb32, bg_mask)
 
