@@ -6,7 +6,7 @@ A CLI tool that turns a child's drawing and/or a text description into a complet
 
 1. **Vision** (if `--image` provided) — the drawing is sent to a Mistral vision model, which extracts a plain-English description of the creature's appearance, colours, and features.
 2. **LLM generation** — Mistral Large invents the Fakemon: name, type(s), ability, base stats, Pokédex entry, and a visual prompt for each stage.
-3. **Sprite generation** — `lambdalabs/sd-pokemon-diffusers` renders a 512×512 image, which is then downsampled to 96×96 and palette-quantised to 16 colours to approximate a GBA sprite.
+3. **Sprite generation** — NoobAI-XL 1.1 with the Pokemon Sprite XL PixelArt back&front LoRA fused in renders a single 1536×768 canvas in one `txt2img` call, front sprite on the left half and back sprite on the right. The canvas is split content-aware into the two halves, each of which is downscaled to the final sprite size with k-centroid downscaling and palette-quantised to 16 colours to approximate a GBA sprite.
 4. **Output** — stats, entry text, and sprite are written to an `output/` folder tree.
 
 ## Outputs
@@ -78,7 +78,20 @@ set MISTRAL_API_KEY=your_key_here
 export MISTRAL_API_KEY=your_key_here
 ```
 
-The first run will download the `lambdalabs/sd-pokemon-diffusers` model weights from Hugging Face (~1.7 GB). They are cached locally afterwards.
+The first run will download the `Laxhar/noobai-XL-1.1` base model weights from Hugging Face (an SDXL checkpoint, about 6-7 GB). They are cached locally afterwards.
+
+### LoRA weights
+
+Sprite generation also requires the Pokemon Sprite XL PixelArt **back&front** LoRA. Unlike the base model, it is not auto-downloaded — it must be fetched manually:
+
+1. Download it from [Civitai model 378602](https://civitai.com/models/378602) ("back&front Noob v1"). A Civitai login is required.
+2. Place the file at `models/loras/pkspbf_nb_v1.safetensors` (relative to the repo root). `models/` is gitignored, so this file is never committed and each clone needs its own copy.
+
+Running the tool without the LoRA file in place fails when the sprite pipeline loads, since it tries to read LoRA weights from a path that doesn't exist.
+
+### A note on the LoRA's license
+
+NoobAI-XL is distributed under a Fair-AI license that includes a no-commercialisation clause. That's fine here — fakemon-forge is a non-monetised public portfolio project. If that clause is ever a problem for your use case, the same Civitai model page (378602) also publishes an SDXL-base LoRA variant as a documented fallback.
 
 ### GPU vs CPU
 
@@ -146,7 +159,7 @@ The test suite mocks all external API and model calls, so no API key or GPU is n
 | Package | Purpose |
 |---------|---------|
 | `mistralai` | LLM generation and image vision |
-| `diffusers` | Stable Diffusion sprite generation |
+| `diffusers` | SDXL sprite generation (NoobAI-XL + LoRA) |
 | `transformers` | Model loading support |
 | `accelerate` | Device placement / mixed precision |
 | `Pillow` | Downsampling and palette quantisation |
