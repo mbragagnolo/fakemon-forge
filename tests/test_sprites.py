@@ -27,6 +27,7 @@ from fakemon_forge.sprites import (
     _flatten_background_to_key,
     _quantize_gen3,
     _rgb_distance,
+    split_front_back_canvas,
     _KEY_COLOR,
     _MAX_CREATURE_COLORS,
     _KEY_COLLISION_DISTANCE,
@@ -752,6 +753,68 @@ def test_background_index_is_most_common_index():
     bg = _background_index(frame1)
     counts = {i: c for c, i in frame1.getcolors()}
     assert bg == max(counts, key=counts.get)
+
+
+# ---------------------------------------------------------------------------
+# split_front_back_canvas()
+# ---------------------------------------------------------------------------
+# All canvases below are 200x100 RGB, background (250, 250, 250). The middle
+# 20% search window is columns [80, 120) (`int(0.4 * 200)` to `int(0.6 * 200)`).
+
+_SPLIT_BG = (250, 250, 250)
+_SPLIT_FRONT_COLOR = (30, 60, 90)
+_SPLIT_BACK_COLOR = (90, 30, 60)
+
+
+def test_split_clean_centered_gap_cuts_at_gap_centre():
+    # Front square at columns 30-94 (rows 20-79), back square at columns
+    # 105-170 (rows 20-79): the only full-height background run in the
+    # [80, 120) window is columns 95-104, centred in the window.
+    canvas = Image.new("RGB", (200, 100), _SPLIT_BG)
+    d = ImageDraw.Draw(canvas)
+    d.rectangle((30, 20, 94, 79), fill=_SPLIT_FRONT_COLOR)
+    d.rectangle((105, 20, 170, 79), fill=_SPLIT_BACK_COLOR)
+
+    result = split_front_back_canvas(canvas)
+    assert result is not None
+    front_half, back_half = result
+    assert front_half.size == (100, 100)
+    assert back_half.size == (100, 100)
+
+    # Front half holds the front square untouched.
+    assert front_half.getpixel((60, 50)) == _SPLIT_FRONT_COLOR
+    # Back half holds the back square, shifted left by the cut column.
+    assert back_half.getpixel((105 - 100, 50)) == _SPLIT_BACK_COLOR
+    assert back_half.getpixel((170 - 100, 50)) == _SPLIT_BACK_COLOR
+
+
+def test_split_widest_run_wins_over_narrower_earlier_run():
+    # Full-height column bands across the [80, 120) window:
+    #   80-83 content, 84-87 bg (narrow gap, width 4), 88-99 content,
+    #   100-114 bg (wide gap, width 15), 115-119 content.
+    # The narrow gap comes first but the wide gap must win the cut.
+    canvas = Image.new("RGB", (200, 100), _SPLIT_BG)
+    d = ImageDraw.Draw(canvas)
+    d.rectangle((80, 0, 83, 99), fill=_SPLIT_FRONT_COLOR)
+    d.rectangle((88, 0, 99, 99), fill=_SPLIT_BACK_COLOR)
+    d.rectangle((115, 0, 119, 99), fill=_SPLIT_FRONT_COLOR)
+
+    result = split_front_back_canvas(canvas)
+    assert result is not None
+    front_half, back_half = result
+    # Widest run is columns 100-114 (run_start=100, run_end=115); centre = 107.
+    assert front_half.size == (107, 100)
+    assert back_half.size == (200 - 107, 100)
+
+
+def test_split_no_full_height_background_run_returns_none():
+    # A single full-height band spans columns 70-130, covering the entire
+    # [80, 120) search window, so no column in it is background.
+    canvas = Image.new("RGB", (200, 100), _SPLIT_BG)
+    d = ImageDraw.Draw(canvas)
+    d.rectangle((70, 0, 130, 99), fill=_SPLIT_FRONT_COLOR)
+
+    assert split_front_back_canvas(canvas) is None
 
 
 # ---------------------------------------------------------------------------

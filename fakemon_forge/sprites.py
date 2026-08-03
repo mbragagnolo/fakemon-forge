@@ -46,6 +46,11 @@ _MAX_CREATURE_COLORS = 13
 # above): a creature colour within this Euclidean RGB distance of ``_KEY_COLOR``
 # is nudged away so it can never be mistaken for the transparency background.
 _KEY_COLLISION_DISTANCE = 12
+# Tunable eyeball placeholder: the middle 20% of a side-by-side front/back
+# canvas's columns (as fractions of width) searched for the background gap
+# between the two sprites.
+_SPLIT_SEARCH_LOW = 0.4
+_SPLIT_SEARCH_HIGH = 0.6
 
 _TYPE_TAGS = {
     "Normal": "normaltype", "Fire": "firetype", "Water": "watertype",
@@ -485,6 +490,56 @@ def _content_bbox(image: Image.Image, background: int):
     """Bounding box of the non-background region, or ``None`` if all background."""
     mask = image.point(lambda p: 255 if p != background else 0)
     return mask.getbbox()
+
+
+def split_front_back_canvas(canvas: Image.Image) -> tuple[Image.Image, Image.Image] | None:
+    """Cut a side-by-side front/back canvas into a front half and a back half.
+
+    ``canvas`` is assumed to hold a front sprite on the left and a back sprite
+    on the right, sharing one flat background (mirroring
+    ``_flatten_background_to_key``'s RGB assumption — not converted or
+    validated here). The background colour ``bg`` is the per-channel mean of
+    ``_border_ring(canvas)``, exactly as ``_flatten_background_to_key``
+    computes it.
+
+    Only the middle ``_SPLIT_SEARCH_LOW``-``_SPLIT_SEARCH_HIGH`` fraction of
+    columns is searched for the widest run of columns that are background for
+    their *full height* (every pixel within ``_KEY_TOLERANCE`` of ``bg``) —
+    that's where the gap between the two sprites is expected to fall. The cut
+    lands at the widest run's centre column; ties go to the first (leftmost)
+    run encountered. Returns ``(front_half, back_half)`` crops of ``canvas``,
+    or ``None`` if no full-height background run exists in that window (e.g.
+    the two sprites' silhouettes span the whole search window). ``canvas`` is
+    not mutated.
+    """
+    w, h = canvas.size
+    ring = _border_ring(canvas)
+    bg = tuple(round(sum(c[i] for c in ring) / len(ring)) for i in range(3))
+
+    px = canvas.load()
+    x_start = int(_SPLIT_SEARCH_LOW * w)
+    x_end = int(_SPLIT_SEARCH_HIGH * w)
+
+    best_run = None
+    run_start = None
+    for x in range(x_start, x_end):
+        is_full_height_bg = all(_rgb_distance(px[x, y], bg) <= _KEY_TOLERANCE for y in range(h))
+        if is_full_height_bg:
+            if run_start is None:
+                run_start = x
+            continue
+        if run_start is not None:
+            if best_run is None or (x - run_start) > (best_run[1] - best_run[0]):
+                best_run = (run_start, x)
+            run_start = None
+    if run_start is not None and (best_run is None or (x_end - run_start) > (best_run[1] - best_run[0])):
+        best_run = (run_start, x_end)
+
+    if best_run is None:
+        return None
+
+    cut = (best_run[0] + best_run[1]) // 2
+    return canvas.crop((0, 0, cut, h)), canvas.crop((cut, 0, w, h))
 
 
 def procedural_squash(frame1: Image.Image, amount_px: int | None = None) -> Image.Image:
