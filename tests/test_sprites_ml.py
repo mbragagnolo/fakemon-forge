@@ -8,11 +8,12 @@ tests require torch to be installed. They are marked `ml` and auto-skipped
 
 import pytest
 from unittest.mock import MagicMock, patch
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from fakemon_forge.sprites import (
     build_prompt,
     generate_sprite,
+    generate_sprite_pair,
     generate_sprite_img2img,
     generate_frame2,
     postprocess,
@@ -46,6 +47,46 @@ def _fake_img2img_pipeline(image: Image.Image):
 
 def _rgb_image(w=512, h=512, color=(200, 100, 50)):
     return Image.new("RGB", (w, h), color=color)
+
+
+def _fake_pair_pipeline(*images):
+    """A MagicMock pipeline returning each ``images`` entry across successive calls."""
+    pipe = MagicMock()
+    results = []
+    for image in images:
+        result = MagicMock()
+        result.images = [image]
+        results.append(result)
+    pipe.side_effect = results
+    return pipe
+
+
+# A 200x100 background canvas with (x0, x1, colour) bands spanning rows 1-98
+# (mirroring test_sprites.py's `_split_canvas`), used to drive
+# `split_front_back_canvas` inside `generate_sprite_pair`.
+_PAIR_BG = (250, 250, 250)
+_PAIR_FRONT_COLOR = (30, 60, 90)
+_PAIR_BACK_COLOR = (90, 30, 60)
+
+
+def _pair_canvas(*bands):
+    canvas = Image.new("RGB", (200, 100), _PAIR_BG)
+    d = ImageDraw.Draw(canvas)
+    for x0, x1, color in bands:
+        d.rectangle((x0, 1, x1, 98), fill=color)
+    return canvas
+
+
+def _clean_split_canvas():
+    # Front square at columns 30-94, back square at columns 105-170: the only
+    # full-height background run in the [80, 120) search window is 95-104.
+    return _pair_canvas((30, 94, _PAIR_FRONT_COLOR), (105, 170, _PAIR_BACK_COLOR))
+
+
+def _no_split_canvas(color):
+    # A single band spanning the whole [80, 120) search window: no column in
+    # it is background for its full height, so no split is found.
+    return _pair_canvas((70, 130, color))
 
 
 def _frame1_file(tmp_path, name="sprite.png"):
@@ -182,6 +223,103 @@ def test_pipeline_called_exactly_once(tmp_path):
     out = tmp_path / "sprite.png"
     generate_sprite("fire lizard", [], str(out), pipeline=pipe)
     assert pipe.call_count == 1
+
+
+# ---------------------------------------------------------------------------
+# generate_sprite_pair()
+# ---------------------------------------------------------------------------
+
+def test_pair_pipeline_called_with_1536x768(tmp_path):
+    pipe = _fake_pair_pipeline(_clean_split_canvas())
+    front, back = tmp_path / "sprite.png", tmp_path / "sprite_back.png"
+    generate_sprite_pair("fire lizard", [], str(front), str(back), pipeline=pipe)
+    kwargs = pipe.call_args.kwargs
+    assert kwargs["width"] == 1536
+    assert kwargs["height"] == 768
+
+
+def test_pair_pipeline_called_with_prompt_and_negative_prompt(tmp_path):
+    pipe = _fake_pair_pipeline(_clean_split_canvas())
+    front, back = tmp_path / "sprite.png", tmp_path / "sprite_back.png"
+    generate_sprite_pair("fire lizard", [], str(front), str(back), pipeline=pipe)
+    kwargs = pipe.call_args.kwargs
+    assert kwargs["prompt"] == build_prompt("fire lizard")
+    assert kwargs["negative_prompt"] == _NEGATIVE_PROMPT
+    assert kwargs["num_inference_steps"] == _NUM_STEPS
+    assert kwargs["guidance_scale"] == _CFG_SCALE
+
+
+def test_pair_happy_path_calls_pipeline_exactly_once(tmp_path):
+    pipe = _fake_pair_pipeline(_clean_split_canvas())
+    front, back = tmp_path / "sprite.png", tmp_path / "sprite_back.png"
+    generate_sprite_pair("fire lizard", [], str(front), str(back), pipeline=pipe)
+    assert pipe.call_count == 1
+
+
+def test_pair_front_output_is_native_768_p_mode(tmp_path):
+    pipe = _fake_pair_pipeline(_clean_split_canvas())
+    front, back = tmp_path / "sprite.png", tmp_path / "sprite_back.png"
+    generate_sprite_pair("fire lizard", [], str(front), str(back), pipeline=pipe)
+    saved = Image.open(front)
+    assert saved.mode == "P"
+    assert saved.size == (768, 768)
+
+
+def test_pair_back_output_shares_front_exact_palette(tmp_path):
+    pipe = _fake_pair_pipeline(_clean_split_canvas())
+    front, back = tmp_path / "sprite.png", tmp_path / "sprite_back.png"
+    generate_sprite_pair("fire lizard", [], str(front), str(back), pipeline=pipe)
+    assert back.exists()
+    saved_back = Image.open(back)
+    assert saved_back.mode == "P"
+    assert saved_back.getpalette() == Image.open(front).getpalette()
+
+
+def test_pair_reroll_when_first_canvas_has_no_clean_split(tmp_path, capsys):
+    pipe = _fake_pair_pipeline(_no_split_canvas(_PAIR_FRONT_COLOR), _clean_split_canvas())
+    front, back = tmp_path / "sprite.png", tmp_path / "sprite_back.png"
+    generate_sprite_pair("fire lizard", [], str(front), str(back), pipeline=pipe, seed=5)
+    assert pipe.call_count == 2
+    # a reroll that finds a clean split is the documented happy path, not a
+    # degradation -- no warning.
+    assert capsys.readouterr().err == ""
+    assert back.exists()
+
+
+def test_pair_reroll_uses_seed_plus_one(tmp_path):
+    pipe = _fake_pair_pipeline(_no_split_canvas(_PAIR_FRONT_COLOR), _clean_split_canvas())
+    front, back = tmp_path / "sprite.png", tmp_path / "sprite_back.png"
+    with patch("fakemon_forge.sprites._make_generator", wraps=lambda seed: MagicMock()) as m_gen:
+        generate_sprite_pair("fire lizard", [], str(front), str(back), pipeline=pipe, seed=5)
+    assert m_gen.call_args_list[0].args[0] == 5
+    assert m_gen.call_args_list[1].args[0] == 6
+
+
+def test_pair_unseeded_reroll_stays_unseeded(tmp_path):
+    pipe = _fake_pair_pipeline(_no_split_canvas(_PAIR_FRONT_COLOR), _clean_split_canvas())
+    front, back = tmp_path / "sprite.png", tmp_path / "sprite_back.png"
+    with patch("fakemon_forge.sprites._make_generator", wraps=lambda seed: MagicMock()) as m_gen:
+        generate_sprite_pair("fire lizard", [], str(front), str(back), pipeline=pipe)
+    assert m_gen.call_args_list[0].args[0] is None
+    assert m_gen.call_args_list[1].args[0] is None
+
+
+def test_pair_never_calls_pipeline_a_third_time_when_both_canvases_fail_to_split(tmp_path, capsys):
+    pipe = _fake_pair_pipeline(
+        _no_split_canvas(_PAIR_FRONT_COLOR), _no_split_canvas(_PAIR_BACK_COLOR)
+    )
+    front, back = tmp_path / "sprite.png", tmp_path / "sprite_back.png"
+    # A third pipeline() call would raise StopIteration (side_effect exhausted).
+    generate_sprite_pair("fire lizard", [], str(front), str(back), pipeline=pipe)
+    assert pipe.call_count == 2
+    assert capsys.readouterr().err   # naive-midline-fallback warning
+
+
+def test_pair_pipeline_error_propagates(tmp_path):
+    pipe = MagicMock(side_effect=RuntimeError("inference crash"))
+    front, back = tmp_path / "sprite.png", tmp_path / "sprite_back.png"
+    with pytest.raises(RuntimeError):
+        generate_sprite_pair("fire lizard", [], str(front), str(back), pipeline=pipe)
 
 
 # ---------------------------------------------------------------------------

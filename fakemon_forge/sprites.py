@@ -53,6 +53,10 @@ _KEY_COLLISION_DISTANCE = 12
 # between the two sprites.
 _SPLIT_SEARCH_LOW = 0.4
 _SPLIT_SEARCH_HIGH = 0.6
+# Front+back pair canvas width (literal per the issue): the fused LoRA renders
+# front on the left half, back on the right half, at twice the single-sprite
+# width. Height stays ``_GEN_SIZE``.
+_PAIR_WIDTH = 1536
 
 _NEGATIVE_PROMPT = "worst quality, low quality, blurry, watermark, signature, text, jpeg artifacts"
 
@@ -716,11 +720,84 @@ def generate_sprite(
     sprite.save(output_path)
 
 
-def generate_back_sprite(
-    prompt: str, types: list[str], output_path: str, *, pipeline, seed: int | None = None
-) -> None:
-    generate_sprite(prompt, types, output_path, pipeline=pipeline, extra_tags=["backside"], seed=seed)
+def _split_front_back_with_retry(canvas: Image.Image, regenerate):
+    """Split a front/back canvas, rerolling once and falling back to a naive cut.
 
+    Torch-free: ``regenerate`` is a zero-arg callable the caller supplies to
+    produce a fresh canvas (``generate_sprite_pair`` wires it to a second
+    ``pipeline`` call), kept external so this retry/fallback decision stays a
+    plain, unit-testable function. Tries ``split_front_back_canvas`` on
+    ``canvas``; on failure calls ``regenerate()`` once and tries again on the
+    fresh canvas; on a second failure falls back to a naive midline split of
+    that fresh canvas and warns. Mirrors ``_flatten_background_to_key``'s
+    gradient-border fallback: a best-effort result plus a ``stderr`` warning,
+    never a raise.
+    """
+    result = split_front_back_canvas(canvas)
+    if result is not None:
+        return result
+
+    canvas = regenerate()
+    result = split_front_back_canvas(canvas)
+    if result is not None:
+        return result
+
+    print(
+        "warning: _split_front_back_with_retry found no clean split column even "
+        "after a reroll; falling back to a naive midline split",
+        file=sys.stderr,
+    )
+    w, h = canvas.size
+    cut = w // 2
+    return canvas.crop((0, 0, cut, h)), canvas.crop((cut, 0, w, h))
+
+
+def generate_sprite_pair(
+    prompt: str, types: list[str], front_output_path: str, back_output_path: str,
+    *, pipeline, seed: int | None = None,
+) -> None:
+    """Generate a front+back sprite pair from one side-by-side SDXL canvas.
+
+    One ``pipeline`` txt2img call renders a ``_PAIR_WIDTH`` x ``_GEN_SIZE``
+    canvas — front on the left half, back on the right half, per the fused
+    back&front LoRA. ``_split_front_back_with_retry`` cuts the two apart
+    (rerolling with ``seed + 1`` once, then falling back to a naive midline
+    split, if the content-aware split fails). The front is quantized
+    adaptively via ``postprocess`` and always saved. The back is locked to the
+    front's exact palette via ``quantize_to_reference``; if it comes back
+    empty/background-only (every pixel at the Gen-3 contract's key index 0),
+    it is skipped with a ``stderr`` warning instead of being saved — this
+    function never raises for a split or empty-back degradation, only for a
+    genuine ``pipeline`` failure.
+    """
+    def _render(render_seed):
+        result = pipeline(
+            prompt=build_prompt(prompt),
+            negative_prompt=_NEGATIVE_PROMPT,
+            width=_PAIR_WIDTH,
+            height=_GEN_SIZE,
+            num_inference_steps=_NUM_STEPS,
+            guidance_scale=_CFG_SCALE,
+            generator=_make_generator(render_seed),
+        )
+        return result.images[0]
+
+    canvas = _render(seed)
+    reroll_seed = seed + 1 if seed is not None else None
+    front_raw, back_raw = _split_front_back_with_retry(canvas, lambda: _render(reroll_seed))
+
+    front = postprocess(front_raw)
+    front.save(front_output_path)
+
+    back = quantize_to_reference(back_raw, front)
+    if _content_bbox(back, background=0) is None:
+        print(
+            f"warning: generate_sprite_pair back half for {back_output_path} is "
+            "empty/background-only; skipping back sprite",
+            file=sys.stderr,
+        )
+        return
+    back.save(back_output_path)
 
 
 def _run_img2img(

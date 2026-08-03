@@ -31,6 +31,7 @@ from fakemon_forge.sprites import (
     _border_ring,
     _border_is_uniform,
     _detect_background,
+    _split_front_back_with_retry,
     _KEY_COLOR,
     _KEY_TOLERANCE,
     _MAX_CREATURE_COLORS,
@@ -1308,6 +1309,80 @@ def test_split_single_sprite_canvas_succeeds_with_one_empty_half():
     front_half, back_half = result
     assert _SPLIT_FRONT_COLOR in set(front_half.get_flattened_data())
     assert set(back_half.get_flattened_data()) == {_SPLIT_BG}
+
+
+# ---------------------------------------------------------------------------
+# _split_front_back_with_retry()
+# ---------------------------------------------------------------------------
+# Reuses `_split_canvas` / `_SPLIT_*` above: a "clean" canvas has a full-height
+# background gap in the search window, a "dirty" one has a single band
+# spanning the whole window (no clean split possible).
+
+def _clean_split_canvas(front_color=_SPLIT_FRONT_COLOR, back_color=_SPLIT_BACK_COLOR):
+    return _split_canvas((30, 94, front_color), (105, 170, back_color))
+
+
+def _dirty_canvas(color):
+    return _split_canvas((70, 130, color))
+
+
+def test_retry_clean_first_canvas_never_regenerates():
+    canvas = _clean_split_canvas()
+
+    def _regenerate():
+        raise AssertionError("regenerate must not be called on a clean first split")
+
+    front_half, back_half = _split_front_back_with_retry(canvas, _regenerate)
+    assert front_half.getpixel((60, 50)) == _SPLIT_FRONT_COLOR
+    assert back_half.getpixel((5, 50)) == _SPLIT_BACK_COLOR
+
+
+def test_retry_falls_back_to_regenerated_canvas_when_first_has_no_split():
+    dirty = _dirty_canvas(_SPLIT_FRONT_COLOR)
+    clean = _clean_split_canvas()
+
+    front_half, back_half = _split_front_back_with_retry(dirty, lambda: clean)
+    assert front_half.getpixel((60, 50)) == _SPLIT_FRONT_COLOR
+    assert back_half.getpixel((5, 50)) == _SPLIT_BACK_COLOR
+
+
+def test_retry_naive_midline_fallback_uses_the_second_canvas_and_warns(capsys):
+    # Distinct colours per canvas so the naive-split result can be traced back
+    # to whichever canvas it actually came from.
+    first = _dirty_canvas(_SPLIT_FRONT_COLOR)
+    second = _dirty_canvas(_SPLIT_BACK_COLOR)
+
+    front_half, back_half = _split_front_back_with_retry(first, lambda: second)
+    assert front_half.size == (100, 100)
+    assert back_half.size == (100, 100)
+    # The band (columns 70-130) straddles the naive cut at column 100; a pixel
+    # from it on either side must show the SECOND canvas's colour.
+    assert front_half.getpixel((90, 50)) == _SPLIT_BACK_COLOR
+    assert back_half.getpixel((10, 50)) == _SPLIT_BACK_COLOR
+    assert capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# Empty-back-half check (pure PIL logic `generate_sprite_pair` relies on)
+# ---------------------------------------------------------------------------
+# The back half is treated as empty/background-only when every pixel of the
+# palette-locked result decodes to index 0 (the Gen-3 contract's guaranteed
+# key slot) -- exactly what `_content_bbox(back, background=0) is None` tests.
+
+def test_empty_back_half_locks_to_all_key_index():
+    front = _pp96(_sprite_rgb())
+    back_raw = Image.new("RGB", (96, 96), _SPLIT_BG)  # pure background, no content
+
+    back = quantize_to_reference(back_raw, front)
+    assert _content_bbox(back, 0) is None
+
+
+def test_nonempty_back_half_has_content_outside_key_index():
+    front = _pp96(_sprite_rgb())
+    back_raw = _sprite_rgb()  # same creature shape used to build `front`
+
+    back = quantize_to_reference(back_raw, front)
+    assert _content_bbox(back, 0) is not None
 
 
 # ---------------------------------------------------------------------------

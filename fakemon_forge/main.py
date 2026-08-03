@@ -8,7 +8,7 @@ from fakemon_forge.cli import parse_args, validate_args
 from fakemon_forge.vision import describe_image
 from fakemon_forge.generator import generate_fakemon
 from fakemon_forge.sprites import (
-    generate_sprite,
+    generate_sprite_pair,
     generate_sprite_img2img,
     generate_frame2,
     generate_shiny,
@@ -95,6 +95,7 @@ def main(argv=None):
             )
 
         sprite_path = str(stage_dir / "sprite.png")
+        back_path = str(stage_dir / "sprite_back.png")
         try:
             if args.image:
                 generate_sprite_img2img(
@@ -102,7 +103,10 @@ def main(argv=None):
                     pipeline=pipeline, seed=seed,
                 )
             else:
-                generate_sprite(args.description, stage["types"], sprite_path, pipeline=pipeline, seed=seed)
+                generate_sprite_pair(
+                    stage["sprite_prompt"], stage["types"], sprite_path, back_path,
+                    pipeline=pipeline, seed=seed,
+                )
         except Exception as exc:
             print(
                 f"Warning: sprite generation failed for {stage['name']}: {exc}",
@@ -131,21 +135,6 @@ def main(argv=None):
         except Exception as exc:
             print(
                 f"Warning: icon generation failed for {stage['name']}: {exc}",
-                file=sys.stderr,
-            )
-
-        back_path = str(stage_dir / "sprite_back.png")
-        try:
-            # Always chain the back view from the generated front sprite — a
-            # user drawing is a front view and holds no backside information.
-            generate_sprite_img2img(
-                stage["sprite_prompt"], stage["types"], sprite_path, back_path,
-                pipeline=img2img_pipeline, extra_tags=["backside"], seed=seed,
-                strength=0.65, reference_path=sprite_path,
-            )
-        except Exception as exc:
-            print(
-                f"Warning: back sprite generation failed for {stage['name']}: {exc}",
                 file=sys.stderr,
             )
 
