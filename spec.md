@@ -1,320 +1,447 @@
-# Spec: Lock the back sprite to the shared front-frame palette + cross-view shiny consistency
+# Spec: Generate front+back sprite pairs from one SDXL canvas, delete the backside chain
 
 ## Summary
 
-`fakemon-forge` already produces, per stage, a front sprite `sprite.png` and a
-second front-animation frame `sprite_frame2.png` that **share one exact
-16-colour palette** (frame 2 is palette-locked to frame 1 via
-`quantize_to_reference` / `build_frame2` in `fakemon_forge/sprites.py`), plus
-shiny variants. The **back sprite** (`sprite_back.png`) is the last view still
-carrying its **own adaptive palette**: it is produced by
-`generate_sprite_img2img`, whose final step is `postprocess(candidate)` — an
-*adaptive* 16-colour `quantize` that builds a fresh palette every call.
+Today, a stage's front and back sprites are two independent generations
+chained by tag convention, not by construction:
 
-This slice (4/4 of #1) brings the back sprite into the **same shared palette**
-as the two front frames, completing the authentic Gen-3 model of *one palette
-for the whole sprite set, one rotated palette for the whole shiny set*. It has
-two parts:
+1. **Front**: `generate_sprite(...)` — one `pipeline(...)` txt2img call at
+   768x768, `postprocess`-quantized (adaptive palette), saved to `sprite.png`.
+   (In the `--image` path this step is `generate_sprite_img2img` seeded from
+   the user's drawing instead — see "Explicitly out of scope".)
+2. **Back**: `generate_sprite_img2img(..., extra_tags=["backside"], strength=0.65,
+   reference_path=sprite_path)` — an img2img pass over the just-written front
+   sprite, tagged `"backside"`, quantized against the front's exact palette via
+   `quantize_to_reference`, saved to `sprite_back.png`.
 
-1. **`sprites.py`** — give the back-sprite generation path a way to re-quantize
-   its img2img result against a reference `P`-mode image's exact palette
-   (frame 1) instead of an adaptive palette, by adding an optional
-   `reference_path` parameter to `generate_sprite_img2img`. When
-   `reference_path` is given, the raw img2img candidate is locked with the
-   existing `quantize_to_reference(candidate, reference)` rather than
-   `postprocess`. When it is omitted, behaviour is byte-for-byte unchanged
-   (adaptive `postprocess`), so the front-sprite img2img path and all existing
-   tests are untouched.
-2. **`main.py`** — pass `sprite.png` (frame 1, the just-written front sprite) as
-   the back sprite's `reference_path`, so the back sprite locks to frame 1's
-   palette regardless of which image seeded the img2img (the user's drawing in
-   the img2img path, `sprite.png` in the txt2img path).
+Per `research-sprite-generation.md` (2026-08-03 discovery spike), this two-step
+chain is a known failure mode: "back sprites aren't back views... img2img +
+`backside` tag doesn't rotate the subject." The now-fused LoRA
+(`pkspbf_nb_v1.safetensors`, "Pokemon Sprite XL PixelArt back&front") instead
+renders a genuine front+back pair **side by side in one 1536x768 canvas** from
+a single denoising pass — identity-consistent by construction, no tag needed.
+A pure splitter, `split_front_back_canvas`, already exists to cut such a
+canvas into a front half and a back half (or report no clean cut column).
 
-Because the back sprite then shares frame 1's exact palette, and
-`generate_shiny` is name-keyed and **rotates only the palette** (preserving
-achromatic entries), `sprite_back_shiny.png` — already derived via
-`generate_shiny(back_path, …)` — automatically uses the **same rotated palette**
-as `sprite_shiny.png` and `sprite_frame2_shiny.png`. All three views' shinies
-become consistent for free; no shiny-path change is required.
+This slice wires the two together: a new `generate_sprite_pair(...)` function
+in `fakemon_forge/sprites.py` that runs one txt2img call, splits it (with a
+one-time reroll and a naive-midline fallback if the split fails), postprocesses
+the front adaptively, and locks the back to the front's exact palette via the
+existing `quantize_to_reference` — then `main.py`'s `--description`-only stage
+loop is rewired to call it instead of the old two-step chain. `generate_back_sprite`
+and the `extra_tags=["backside"]` call site are deleted.
 
 ### Explicitly out of scope
 
-- **`.ini` / writer changes** — verified unnecessary (as in the prior slices).
-  `export_ini` emits Gen 3 data fields, `writer.py` writes only
-  `stats.json` / `entry.md`; neither references sprite filenames.
-- **The img2img call itself** — the pipeline invocation (`_run_img2img`),
-  `strength=0.65`, and `extra_tags=["backside"]` are unchanged. Only the
-  post-generation quantization step gains a reference-locked branch.
-- **Recentering / animation-band logic** — the back sprite is a *different view*,
-  not an animation frame of the front, so `build_frame2` /
-  `recenter_to_anchor` / the acceptance band do **not** apply to it. Only the
-  palette is shared; geometry is whatever img2img produced.
-- **Colour-fidelity guarantees** — the back sprite's colours may degrade when
-  they land far from frame 1's 16 colours. Per the issue this is the authentic
-  Gen-3 constraint and is accepted, not mitigated.
+- **`--image` (img2img front) mode.** The issue's own framing — "today's
+  **front-txt2img**-then-backside-img2img two-step" — and its "Done when"
+  criterion ("one txt2img call produces both views **for txt2img mode**")
+  both describe the `--description`-only path, where the front already comes
+  from a bare txt2img call that the new 1536x768 call can directly replace.
+  When `--image` is given, the front instead comes from
+  `generate_sprite_img2img(..., args.image, ...)` — an img2img pass seeded
+  from the user's drawing. There is no described way to fold that into a
+  single 1536x768 txt2img canvas without discarding the reference image, so
+  this slice leaves that call untouched.
+  **Consequence, flagged explicitly:** because the back sprite in `--image`
+  mode was produced by the very call site this issue says to delete
+  ("the old backside-img2img call path... entirely"), and no replacement is
+  specified for that mode, `--image` runs stop producing `sprite_back.png` /
+  `sprite_back_shiny.png` after this slice. This is a real regression against
+  issue #10 ("back sprite inits from front sprite, not the user's drawing").
+  See Assumptions for why this is the picked default and what a follow-up
+  slice needs to close.
+- **`generate_sprite`** (the plain single-canvas txt2img helper) is left in
+  place, unused by `main.py` after this slice, mirroring this codebase's own
+  precedent of leaving a superseded generator function in place rather than
+  deleting it preemptively (see Assumptions).
+- **`generate_sprite_img2img`'s `reference_path` parameter** is left in place
+  (still a generic, tested capability), even though no call site passes it
+  after this slice. See Assumptions.
+- `quantize_to_reference`'s contract, `generate_shiny`, `stitch_spritesheet`'s
+  cell layout, `export_ini`/`writer.py` — all unaffected, per the issue.
 
 ## Inputs
 
-### Changed: `generate_sprite_img2img(prompt, types, image_path, output_path, *, pipeline, extra_tags=None, seed=None, strength=0.8, reference_path=None)`
+### New: `generate_sprite_pair(prompt, types, front_output_path, back_output_path, *, pipeline, seed=None)`
 
-All existing parameters are unchanged. One new keyword-only parameter is added
-at the end (so existing positional/keyword calls are unaffected):
+- `prompt: str` — `stage["sprite_prompt"]` (or `args.description` for stage 1
+  today's call already threads through inconsistently — see Assumptions).
+- `types: list[str]` — accepted for call-site parity with `generate_sprite`
+  (main.py passes `stage["types"]`); not forwarded into the prompt, matching
+  `build_prompt`'s existing contract (type wording already lives in `prompt`).
+- `front_output_path: str`, `back_output_path: str` — where the two P-mode
+  PNGs are saved. `back_output_path` is only written when a non-empty back
+  half is found (see Edge cases).
+- `pipeline` — a **txt2img** pipeline (`StableDiffusionXLPipeline`-shaped),
+  called with `prompt=`, `negative_prompt=`, `width=`, `height=`,
+  `num_inference_steps=`, `guidance_scale=`, `generator=` kwargs, returning
+  `.images[0]` — exactly `generate_sprite`'s existing call contract, so
+  `main.py`'s already-loaded `pipeline` (the txt2img pipeline in the
+  no-`--image` branch) is passed through unchanged.
+- `seed: int | None = None` (keyword-only) — seeds the initial `pipeline`
+  call via `_make_generator(seed)`, matching every other generator function
+  in the module.
 
-- `reference_path: str | None = None` (keyword-only) — path to a `P`-mode
-  reference image whose exact 16-colour palette the generated sprite must adopt.
-  When `None` (the default, and every current call except the new back-sprite
-  one), the sprite is quantized adaptively via `postprocess` exactly as today.
-  When set, the raw img2img candidate is locked to that palette via
-  `quantize_to_reference`. **[picked]** name/shape — see Assumptions.
+### `main.py` per-stage sprite block
 
-### `main.py` per-stage back-sprite call
-
-No new CLI arguments. Inside the existing
-`for stage, stage_dir in zip(stages, stage_dirs)` loop, the existing back-sprite
-block gains one keyword argument:
-
-- `reference_path = sprite_path` — i.e. `str(stage_dir / "sprite.png")`, the
-  front sprite written earlier in the same loop iteration. This is **always**
-  `sprite.png` (frame 1), independent of `init_image` (which is the user's
-  `args.image` in the img2img path, or `sprite_path` in the txt2img path).
+No new CLI flags. Inside the existing per-stage loop, the `--description`-only
+branch's front generation (`generate_sprite`) and the (previously mode-agnostic)
+back-sprite block are collapsed into one call to `generate_sprite_pair`. The
+`--image` branch's front call is unchanged.
 
 ## Outputs
 
-- **`generate_sprite_img2img` with `reference_path` set** → returns `None`; side
-  effect is writing a 96×96 `P`-mode PNG at `output_path` whose palette is
-  byte-for-byte equal to the reference image's palette (guaranteed by
-  `quantize_to_reference`).
-- **`generate_sprite_img2img` with `reference_path=None`** → unchanged: a 96×96
-  `P`-mode PNG with an adaptive ≤16-colour palette (via `postprocess`).
-- **`main`** per stage — the same set of files as today
-  (`sprite.png`, `sprite_frame2.png`, `sprite_frame2_shiny.png`,
-  `sprite_back.png`, `sprite_shiny.png`, `sprite_back_shiny.png`), but now:
-  - `sprite_back.png` shares `sprite.png`'s exact 16-colour palette (was: its
-    own adaptive palette).
-  - `sprite_back_shiny.png` uses the same rotated palette as `sprite_shiny.png`
-    and `sprite_frame2_shiny.png` (automatic consequence; no code change in the
-    shiny blocks).
+- **`generate_sprite_pair`** → returns `None`. Side effects:
+  - Always writes `front_output_path`: a 768x768 `P`-mode PNG, adaptively
+    quantized via `postprocess` — byte-for-byte the same post-processing
+    `generate_sprite` used to apply.
+  - Writes `back_output_path` **iff** a non-empty back half was found: a
+    `P`-mode PNG sharing the front's exact palette (via `quantize_to_reference`),
+    sized to the front's size (mirroring how `quantize_to_reference` already
+    resizes to its reference's size for the frame-2 lock).
+  - Never raises for a split failure or an empty back half — both degrade
+    with a `stderr` warning, matching `_flatten_background_to_key`'s
+    "best-effort result + warn, never raise" convention. A `pipeline(...)`
+    call itself raising (real inference failure) **does** propagate — matching
+    every existing generator function in this module, which never swallow
+    pipeline errors.
+- **`main`**, `--description`-only stage: same file set as today
+  (`sprite.png`, `sprite_back.png`, `sprite_frame2.png`, three shiny variants,
+  `spritesheet.png`, `footprint.png`), but `sprite_back.png` now comes from the
+  paired canvas instead of a backside-tagged img2img pass, and is absent (with
+  a stderr warning already emitted by `generate_sprite_pair`) on the rare
+  empty-back-half case instead of always being present.
+- **`main`**, `--image` stage: unchanged front-sprite output; `sprite_back.png`
+  / `sprite_back_shiny.png` are no longer produced (see "Explicitly out of
+  scope").
 
 ## Behavior
 
-### `generate_sprite_img2img(...)` in `sprites.py`
+### `generate_sprite_pair(...)` in `sprites.py`
 
-1. Run the img2img pipeline exactly as today via the existing internal helper
-   `_run_img2img(prompt, types, image_path, pipeline=…, extra_tags=…, seed=…,
-   strength=…)`, obtaining the raw RGB candidate (`result.images[0]`). This step
-   is unchanged.
-2. Quantize the candidate:
-   - If `reference_path is None`: `sprite = postprocess(candidate)` (adaptive
-     palette) — unchanged from today.
-   - Else: open the reference as a `P`-mode image
-     (`Image.open(reference_path)` — the saved front sprite is already `P`-mode;
-     do **not** convert) and `sprite = quantize_to_reference(candidate,
-     reference)`. `quantize_to_reference` already performs the same
-     resize-to-96×96 + colour/contrast enhance pre-steps as `postprocess`, then
-     `.quantize(palette=reference)`, so both branches feed identical input to
-     quantization and differ only in adaptive-vs-fixed palette.
-3. `sprite.save(output_path)` (PNG inferred from extension) — unchanged.
-
-The choice is a single branch on `reference_path`; `_run_img2img`,
-`postprocess`, `quantize_to_reference`, and the module constants are reused
-rather than duplicated.
+1. Build the prompt via the existing `build_prompt(prompt)` (no `extra_tags` —
+   the parameter is dropped entirely; there is no longer a tag-driven view
+   variant to request).
+2. Call `pipeline(prompt=..., negative_prompt=_NEGATIVE_PROMPT, width=1536,
+   height=768, num_inference_steps=_NUM_STEPS, guidance_scale=_CFG_SCALE,
+   generator=_make_generator(seed))`, take `result.images[0]` as `canvas`
+   (a 1536x768 RGB image — front on the left, back on the right, per the
+   research spike's verified orientation).
+3. Resolve `(front_raw, back_raw)` via a new private helper,
+   `_split_front_back_with_retry(canvas, regenerate)`, so the retry/fallback
+   decision is a small pure-PIL function independent of `pipeline`/`torch`:
+   - Try `split_front_back_canvas(canvas)`. If it returns a pair, that's
+     `(front_raw, back_raw)` — done.
+   - If it returns `None`: call `regenerate()` (the caller-supplied zero-arg
+     callable that reruns the pipeline with `seed + 1`, or a plain unseeded
+     call again if `seed is None` — see Assumptions) to get a fresh `canvas`,
+     and try `split_front_back_canvas` on **that** — a full regeneration, not
+     a re-split of the same pixels.
+   - If it's still `None`: split at the naive midline
+     (`canvas.crop((0, 0, w // 2, h))` / `canvas.crop((w // 2, 0, w, h))`) and
+     `print(..., file=sys.stderr)` a warning — never raise. This mirrors
+     `_flatten_background_to_key`'s gradient-border fallback shape exactly:
+     best-effort result, stderr warning, no exception.
+   - `generate_sprite_pair` calls this with
+     `regenerate=lambda: pipeline(prompt=..., negative_prompt=_NEGATIVE_PROMPT,
+     width=1536, height=768, num_inference_steps=_NUM_STEPS,
+     guidance_scale=_CFG_SCALE, generator=_make_generator(seed + 1 if seed is
+     not None else None)).images[0]` — i.e. the only `pipeline`/`_make_generator`
+     (torch) calls happen in `generate_sprite_pair` itself; the helper it
+     calls is torch-free and unit-testable with a stub `regenerate`.
+   - At most **two** `pipeline(...)` calls total per `generate_sprite_pair`
+     invocation (initial + at most one reroll).
+4. `front = postprocess(front_raw)` (adaptive palette, `size` defaults to
+   `_SPRITE_SIZE`, unchanged from `generate_sprite`'s post-step);
+   `front.save(front_output_path)`.
+5. Lock the back half to the front's exact palette *in memory* —
+   `back = quantize_to_reference(back_raw, front)` — reusing `front` directly
+   rather than round-tripping through `front_output_path` on disk (unlike the
+   old `reference_path=...` call, which needed the round trip because it was
+   a separate function invocation).
+6. **Empty-back check:** because `quantize_to_reference` locks to `front`'s
+   exact palette, and the Gen-3 contract (`_quantize_gen3`) always puts the
+   transparency key at **palette index 0**, "the back half is empty or
+   entirely background" reduces to: every pixel of `back` decodes to index 0.
+   Concretely, this is the same test `_content_bbox` already answers
+   elsewhere in the module — `_content_bbox(back, background=0) is None` —
+   just with the background index taken from the Gen-3 contract instead of
+   computed via `_background_index` (which would also work here, since index
+   0 dominates an all-background image, but is unnecessary generality for a
+   contract that already guarantees the index).
+   - If empty: `print(..., file=sys.stderr)` a warning and **do not** save
+     `back_output_path` (front is already written).
+   - Else: `back.save(back_output_path)`.
 
 ### `main.py` wiring
 
-The existing back-sprite block becomes:
+Illustrative (not literal code to paste — see Constraints for exact
+call-site coordinates):
 
 ```
+sprite_path = str(stage_dir / "sprite.png")
 back_path = str(stage_dir / "sprite_back.png")
 try:
-    init_image = args.image if args.image else sprite_path
-    generate_sprite_img2img(
-        stage["sprite_prompt"], stage["types"], init_image, back_path,
-        pipeline=img2img_pipeline, extra_tags=["backside"], seed=seed,
-        strength=0.65, reference_path=sprite_path,
-    )
+    if args.image:
+        generate_sprite_img2img(
+            stage["sprite_prompt"], stage["types"], args.image, sprite_path,
+            pipeline=pipeline, seed=seed,
+        )
+    else:
+        generate_sprite_pair(
+            stage["sprite_prompt"], stage["types"], sprite_path, back_path,
+            pipeline=pipeline, seed=seed,
+        )
 except Exception as exc:
-    print(
-        f"Warning: back sprite generation failed for {stage['name']}: {exc}",
-        file=sys.stderr,
-    )
+    print(f"Warning: sprite generation failed for {stage['name']}: {exc}", file=sys.stderr)
+    continue
+
+# ... chibi/icon block: unchanged, still reads sprite_path ...
+
+# The old back-sprite block (lines ~137-150 today) is deleted outright: its
+# job is now folded into generate_sprite_pair for the --description path,
+# and --image mode has no replacement this slice (see "Explicitly out of
+# scope").
 ```
 
-Only `reference_path=sprite_path` is added. The block still reaches this code
-only after the front-sprite block succeeded (that block `continue`s on failure),
-so `sprite_path` names an existing `P`-mode `sprite.png`. The back-shiny block
-(`generate_shiny(back_path, stage["name"], back_shiny_path)`) is **unchanged** —
-it now inherits the shared palette automatically.
+This satisfies both preservation requirements verbatim:
+- **Front-generation failure still `continue`s.** If the initial
+  `pipeline(...)` call inside `generate_sprite_pair` (or the img2img front
+  call) raises, that *is* a front-generation failure — there is no front
+  sprite for chibi/icon/frame2/shiny to build on — so the existing
+  `except: warn; continue` fires exactly as it does today.
+- **A back-only failure warns and continues to icon/frame2/shiny.** Both
+  back-only degradations (split-failure-after-reroll, empty-back-half) are
+  handled *inside* `generate_sprite_pair` with a `stderr` warning and no
+  exception, so from `main.py`'s perspective the call simply returns
+  normally and execution falls through to the chibi/icon block exactly as
+  the old, independently-caught back-sprite `try/except` allowed.
+
+`main.py`'s import list drops `generate_sprite` (no longer referenced there)
+and gains `generate_sprite_pair`; `generate_sprite_img2img` stays imported
+(still used for the `--image` front call and the chibi call).
 
 ## Edge cases
 
-- **Front sprite generation failed** → the front-sprite `except` `continue`s to
-  the next stage; the back-sprite block (and its `reference_path`) never runs
-  for that stage, so there is never a missing/absent reference.
-- **img2img returns colours far from frame 1's palette** →
-  `quantize_to_reference` maps each pixel to the nearest of frame 1's 16 colours;
-  the back sprite may look slightly off-palette / posterized. **Accepted** — this
-  is the authentic Gen-3 shared-palette constraint, not a bug.
-- **Back sprite content differs from the front** (it is a rear view) → only the
-  palette is shared, not geometry; no recentering/animation-band logic is applied
-  (that is `build_frame2`'s job for frame 2, not for the back view).
-- **Cross-view shiny consistency** → `sprite.png`, `sprite_frame2.png`, and
-  `sprite_back.png` now share one palette; `generate_shiny` rotates only the
-  palette keyed on `name`, so `sprite_shiny.png`, `sprite_frame2_shiny.png`, and
-  `sprite_back_shiny.png` share one rotated palette automatically.
-- **Line mode (3 stages)** → the back-sprite block is inside the per-stage loop;
-  each stage locks its own back sprite to its own `sprite.png`, and each stage's
-  three shinies stay mutually consistent within that stage.
-- **`reference_path=None` callers** (the front-sprite img2img call, and any other
-  existing caller) → behaviour is identical to today (adaptive `postprocess`).
+- **Clean split on the first canvas** → normal path, one `pipeline` call.
+- **No clean split on the first canvas, clean split after reroll** → two
+  `pipeline` calls, no warning (the reroll finding a clean gap is the
+  documented happy path for that branch, not a degradation).
+- **No clean split even after reroll** → two `pipeline` calls, naive midline
+  split, one `stderr` warning. Front and back are still both attempted from
+  that midline crop.
+- **Back half empty/background-only** (from *any* of the three split paths
+  above) → front is written, back is not, one `stderr` warning naming the
+  skipped path. Downstream steps (`generate_shiny(back_path, ...)`,
+  `stitch_spritesheet`, `export_ini`) already tolerate a missing
+  `sprite_back.png` today — `stitch_spritesheet` explicitly leaves that cell
+  on the transparency key, and the back-shiny step's own `try/except` in
+  `main.py` catches `Image.open`'s `FileNotFoundError` and warns, exactly as
+  it already does for a fully-failed back sprite today.
+- **`seed=None`** → the initial call is unseeded (`_make_generator(None)`,
+  same as every other generator function in the module); the reroll cannot
+  add 1 to a seed that doesn't exist, so it is also a plain unseeded call —
+  already stochastic, so a second draw is a legitimate "reroll" in spirit
+  even without the `+1`.
+- **`--image` stage** → front sprite generation and the chibi/icon/frame2/shiny
+  pipeline are otherwise unaffected; `sprite_back.png` is simply never
+  created, degrading the same way a fully-failed back-sprite call degrades
+  today (missing file, warned-and-skipped downstream).
 
 ## Errors
 
-- `generate_sprite_img2img` surfaces exceptions to its caller (it does not
-  swallow them); `main` wraps the back-sprite call in the existing try/except and
-  warns `Warning: back sprite generation failed for {name}: {exc}` — unchanged
-  wording and structure.
-- `quantize_to_reference` raises `ValueError` ("palette-mode reference image") if
-  the reference is not `P`-mode. Because `main` always passes the already-saved
-  `P`-mode `sprite.png`, this only fires on misuse and would be caught by the
-  back-sprite `except`.
-- A missing `reference_path` file (e.g. `sprite.png` never written) would raise
-  in `Image.open`; this cannot happen after a successful front-sprite block, and
-  if it somehow did it is caught by the back-sprite `except` (warn-and-continue).
-- No new `sys.exit` paths; pipeline-load failure paths are unchanged.
+- `generate_sprite_pair` propagates any exception the underlying
+  `pipeline(...)` call raises (both the initial call and the reroll) —
+  it does not catch pipeline/inference errors, matching `generate_sprite`
+  and `generate_sprite_img2img` today. `main.py`'s existing front-sprite
+  `except: warn; continue` is the catch point.
+- `quantize_to_reference` still raises `ValueError` if handed a non-`P`-mode
+  reference; unreachable here in practice because `front` is always the
+  `postprocess` output from step 4 (guaranteed `P`-mode), one call earlier in
+  the same function.
+- No new `sys.exit` paths.
 
 ## Constraints & dependencies
 
-- The change lives in `fakemon_forge/sprites.py` (`generate_sprite_img2img`) and
-  `fakemon_forge/main.py` (one added kwarg). It reuses the existing
-  `quantize_to_reference`, `_run_img2img`, `postprocess`, and module constants;
-  nothing is hard-coded or duplicated.
-- `generate_sprite_img2img` performs a function-local `import torch` (via
-  `_run_img2img` → `_make_generator`), so **any test that calls it is an `ml`
-  test** and belongs in `tests/test_sprites_ml.py` (or carries
-  `@pytest.mark.ml`), per `CLAUDE.md`'s test-slicing rule. The pure
-  palette-lock/shiny assertions that go in `tests/test_sprites.py` must therefore
-  exercise `quantize_to_reference` / `generate_shiny` **directly**, not through
-  `generate_sprite_img2img`.
-- `main.py` changes touch only the back-sprite call (one kwarg); no import
-  changes, no new CLI args, no signature change to `main`. Because
-  `test_main.py` mocks the sprite functions, the `main` wiring is testable
-  without torch.
-- **Backward compatibility:** the new parameter defaults to `None`, so all
-  current `generate_sprite_img2img` calls and their `ml` tests (96×96, `P`-mode,
-  PNG, single pipeline call, `strength`/`image`/`prompt_embeds` passthrough)
-  must continue to pass unchanged. Only the new back-sprite call passes
-  `reference_path`.
-- Frame 1 (`sprite.png`) is the canonical palette source for the whole set
-  (front frame 1, front frame 2, and back all lock to it). The front sprite
-  itself is never reference-locked (it *defines* the palette).
+- `generate_sprite_pair` performs a function-local `import torch` (via
+  `_make_generator`, called directly by `generate_sprite_pair` for both the
+  initial and reroll pipeline calls) — so **any test exercising the actual
+  pipeline call** is an `ml` test (`tests/test_sprites_ml.py` /
+  `@pytest.mark.ml`), per `CLAUDE.md`. `_split_front_back_with_retry` itself
+  calls no torch and takes its `regenerate` callable as a plain argument, so
+  it belongs in `tests/test_sprites.py` with a stub `regenerate`.
+- `main.py`'s sprite block is roughly lines 97-150 today; the front branch is
+  97-111, the (deleted) back-sprite block is 137-150. `write_output`,
+  `export_ini`, footprint sizing, and the shiny/spritesheet blocks (152-221)
+  are untouched.
+- `split_front_back_canvas` and its tunables (`_SPLIT_SEARCH_LOW/HIGH`,
+  `_KEY_TOLERANCE`) are reused as-is; this slice adds no new tunables besides
+  the canvas size (`1536x768`, spec'd literally by the issue) and the naive
+  midline fallback (`w // 2`, no new constant needed — it is not an "eyeball
+  placeholder" like the module's tunables, it is a structural fallback).
+  `Image.crop((0, 0, w // 2, h))` on an odd `w` rounds down (e.g. 1535 -> 767
+  front / 768 back); no special-casing needed since `_GEN_SIZE`/canvas width
+  are fixed constants, not user input.
 
 ## Tests
 
-### light (`tests/test_sprites.py`, torch-free)
+### `tests/test_sprites.py` (torch-free)
 
-These exercise the shared-palette lock and shiny consistency **without** calling
-`generate_sprite_img2img` (which would trigger `import torch`). Follow the
-existing `postprocess` / `quantize_to_reference` / helper patterns.
+- `_split_front_back_with_retry(canvas, regenerate)`:
+  - Clean split on the first canvas: `regenerate` is never called (assert via
+    a stub that raises if invoked, or a call counter).
+  - First canvas has no clean split, second (the `regenerate()` result) does:
+    the returned halves come from the **second** canvas, not the first —
+    build two visually distinguishable canvases (à la `_split_canvas` in the
+    existing `split_front_back_canvas` tests) and assert on pixel content.
+  - Neither canvas splits cleanly: returns the naive `w // 2` crop of the
+    *second* canvas (the one `regenerate` returned, since it was already
+    called), and `capsys`-style `stderr` is non-empty — following
+    `test_flatten_gradient_border_warns_without_raising`'s existing pattern of
+    asserting `err` truthy rather than exact wording.
+- Empty-back-half check, exercised directly as pure PIL logic (build a `front`
+  via `postprocess`, build a `back_raw` that is pure background color, run it
+  through `quantize_to_reference` + the index-0 bbox check) — this can be
+  asserted either by calling a small extracted helper directly, or by
+  constructing the equivalent inline in the test if no such helper is
+  factored out. Either is acceptable; the point is the branch is not left
+  solely covered by an `ml` test.
 
-- **Back-sprite palette lock**: given a back RGB image and a `P`-mode reference
-  frame (build via `postprocess(_rgb_image())` / `postprocess(_noisy_image())`),
-  `quantize_to_reference(back_rgb, reference)` yields a `P`-mode 96×96 image
-  whose `getpalette()` equals the reference's exactly. (This is the pure core of
-  the back-sprite lock; `quantize_to_reference` is already well-covered, so this
-  test frames it as the back-sprite scenario and asserts palette equality.)
-- **Cross-view shiny consistency**: build three `P`-mode images that share one
-  palette (stand-ins for frame 1 / frame 2 / back — e.g. quantize three
-  different RGB inputs against one reference so all three share its palette),
-  save each, run `generate_shiny(path, name, out_path)` on each with the **same
-  `name`**, reload the three outputs, and assert their three `getpalette()`
-  results are **identical** to one another. (Optionally also assert each shiny
-  palette differs from the shared original, i.e. rotation happened.)
+### `tests/test_sprites_ml.py` (torch, auto-skipped in this sandbox)
 
-### ml (`tests/test_sprites_ml.py`, auto-skipped without torch)
+- `generate_sprite_pair` calls `pipeline` with `width=1536`, `height=768`,
+  and the other existing kwargs (`prompt`, `negative_prompt`,
+  `num_inference_steps`, `guidance_scale`, `generator`) — same assertion
+  shape as the deleted `generate_sprite` tests it replaces coverage for.
+  A fake pipeline returning a pre-built side-by-side canvas (front/back
+  distinguishable by color, mirroring `_split_canvas`) exercises the full
+  happy path: exactly one `pipeline` call, `front_output_path` is `P`-mode
+  768x768 PNG, `back_output_path` is `P`-mode PNG sharing the front's exact
+  `getpalette()`.
+- Reroll integration: a fake pipeline whose first call returns a
+  no-clean-split canvas and second call returns a clean-split canvas —
+  `pipeline.call_count == 2`, second call's `generator` seed reflects
+  `seed + 1`, output halves come from the second canvas.
+- Regression: `generate_sprite_pair` never calls `pipeline` a third time even
+  when both canvases fail to split (naive-fallback path, integration-level
+  version of the torch-free unit test above).
+- Delete: `test_extra_tags_included_in_prompt`'s `generate_sprite(...,
+  extra_tags=["backside"])` example is unaffected (that test exercises
+  `generate_sprite`, which is untouched); no forced update, though swapping
+  its example tag away from the literal string `"backside"` is a reasonable
+  optional cleanup since that string no longer means anything special.
+- The whole `generate_sprite_img2img(reference_path=...)` — "back-sprite
+  palette lock" test block (today's lines ~260-326) stays as-is:
+  `reference_path` is not removed (see Assumptions), so its existing
+  generic-capability coverage remains valid even though no production call
+  site exercises it after this slice.
 
-Follow the existing `_fake_img2img_pipeline` / `_stub_encode_prompt` patterns;
-build the reference as a real `P`-mode 96×96 file (e.g. via `_frame1_file` /
-`postprocess(_rgb_image())`, as sprites are saved).
+### `tests/test_main.py`
 
-- `generate_sprite_img2img(..., reference_path=<P-mode frame path>)` with a mock
-  img2img pipeline writes an output file that is **`P`-mode** and whose
-  `getpalette()` **equals the reference's** (proves the back sprite adopts the
-  shared palette rather than an adaptive one).
-- The saved reference-locked sprite is still 96×96 and PNG.
-- **Regression**: `generate_sprite_img2img` **without** `reference_path`
-  continues to produce a `P`-mode 96×96 PNG via adaptive `postprocess` (existing
-  tests suffice; add one asserting the two branches diverge only in palette if
-  desired — e.g. locked output's palette equals the reference while the
-  unlocked output's need not).
-- The pipeline is still invoked **exactly once** and with the unchanged
-  `strength` / `image` / `prompt_embeds` / `extra_tags` passthrough when
-  `reference_path` is supplied (the reference only affects post-quantization).
+- `ctx` fixture: replace `patch("fakemon_forge.main.generate_sprite")` with
+  `patch("fakemon_forge.main.generate_sprite_pair")` (main.py's import list
+  changes accordingly).
+- `test_txt2img_path_calls_generate_sprite` → rewrite against
+  `generate_sprite_pair`: asserts it is called once with `sprite_path` and
+  `back_path` (`str(stage_dir / "sprite_back.png")`) as the two output-path
+  arguments; drop the old assertions that inspected `sprite_i2i` calls for a
+  `extra_tags == ["backside"]` entry (that call site no longer exists). The
+  chibi assertion (`extra_tags == _CHIBI_TAGS` among `sprite_i2i` calls)
+  stays — chibi generation is unaffected.
+- `test_txt2img_back_sprite_reference_is_frame1` → delete. It specifically
+  asserted the deleted `reference_path=sprite_path` backside call; there is
+  no equivalent `main.py`-level assertion to make since
+  `generate_sprite_pair` locks the back to the front internally, not via a
+  `main.py`-supplied path.
+- `test_img2img_path_calls_generate_sprite_img2img` → update the expected
+  `call_count` from `3` (front + chibi + back) to `2` (front + chibi only).
+- `test_img2img_back_sprite_inits_from_front_sprite` → delete or rewrite as
+  an explicit "no back call happens in `--image` mode" assertion. **Flag for
+  the implementer/reviewer:** this test existed specifically as regression
+  coverage for issue #10; removing it removes that regression's test
+  coverage, not just its assertions about a call shape that no longer
+  exists. This is a direct, visible consequence of the "Explicitly out of
+  scope" decision above, not an incidental test cleanup.
+- Any other test asserting `sprite_i2i.call_count` in the `--image` path
+  (e.g. around line 621) needs the same `3 -> 2` adjustment.
 
-### light (`tests/test_main.py`, no torch — sprite fns mocked)
+### `tests/test_stages_e2e.py`
 
-- The back-sprite `generate_sprite_img2img` call receives
-  `reference_path == str(stage_dir / "sprite.png")` (frame 1), in **both** the
-  txt2img path and the img2img path. In the img2img path, assert the back call's
-  positional `image_path` (init) is `args.image` while its `reference_path` is
-  `sprite.png` — i.e. the reference is frame 1 even though the init image is the
-  user's drawing.
-- The existing back-sprite assertions still hold:
-  `extra_tags == ["backside"]`, `strength == 0.65`, and the img2img-path call
-  count (front + back). Distinguish the front call (`reference_path` absent/`None`)
-  from the back call (`reference_path == sprite.png`).
-- The back-shiny wiring is unchanged (`generate_shiny(back_path, name,
-  back_shiny_path)`); the existing shiny-count assertions
-  (`test_generate_shiny_called_three_times_per_stage`,
-  `test_line_mode_frame2_called_three_times`) remain valid, since no shiny call
-  was added or removed — only the back sprite's palette changed.
+- The `forge` fixture's `patch("fakemon_forge.main.generate_sprite")` becomes
+  `patch("fakemon_forge.main.generate_sprite_pair")`; `generate_sprite_img2img`
+  stays patched (still used for `--image` front + chibi). No assertions in
+  this file inspect sprite call shapes today (it asserts on-disk stage
+  structure), so no further changes expected there.
+
+### `tests/test_cli.py`
+
+- No sprite functions are imported or asserted on in this file (`cli.py`
+  doesn't reference `sprites.py`); no changes expected.
 
 ## Assumptions
 
 Items marked **[picked]** are defaults chosen here (not confirmed by existing
 code/tests/docs); **[confirmed]** items are grounded in the codebase.
 
-- **[picked]** The lock is added as an optional `reference_path: str = None`
-  keyword parameter on the **existing** `generate_sprite_img2img`, rather than a
-  new dedicated `generate_back_sprite` function. Rationale: it is the minimal,
-  lowest-risk change (existing `reference_path=None` callers and their tests are
-  untouched), keeps the img2img call in one place, and matches how the front
-  frames were locked (via `quantize_to_reference`). The issue explicitly permits
-  either approach. Note: an unused `generate_back_sprite` (txt2img-based) already
-  exists in `sprites.py` but is **not** the back-sprite path `main` uses (`main`
-  calls `generate_sprite_img2img` for the back sprite); it is left untouched to
-  avoid scope creep. **[confirmed]** that `generate_back_sprite` is currently
-  unused by `main.py`.
-- **[picked]** The parameter is a **path** (`reference_path`) rather than a
-  pre-loaded `Image`, matching how `main` already threads file paths
-  (`front_sprite_path`, `image_path`) and letting the function own the
-  `Image.open`. The issue allowed `reference_path`/`reference`; path chosen for
-  consistency.
-- **[picked]** The parameter is placed **last** in the keyword-only signature and
-  defaults to `None`, preserving every existing call site and test.
-- **[picked]** When `reference_path` is set, the reference is opened without a
-  mode conversion (the saved front sprite is already `P`-mode); a non-`P`-mode
-  reference is left to raise via `quantize_to_reference` (caught by `main`'s
-  back-sprite `except`).
-- **[confirmed]** Frame 1 (`sprite.png`) is the canonical palette source: it is
-  generated first in the loop and is saved `P`-mode by `postprocess`'s
-  `.quantize`; front frame 2 already locks to it, and this slice locks the back
-  to it too.
-- **[confirmed]** The reference is always `sprite_path` (frame 1), independent of
-  the img2img init image — in the img2img path the init is the user's drawing
-  (`args.image`) while the palette reference must still be frame 1.
-- **[confirmed]** `quantize_to_reference` already mirrors `postprocess`'s
-  resize + colour/contrast pre-steps, so switching only the palette (adaptive →
-  fixed reference) is the sole behavioural difference between the branches; it
-  does not mutate its inputs.
-- **[confirmed]** `generate_shiny` rotates only the palette keyed on `name` and
-  preserves achromatic entries, so three views sharing one palette yield three
-  identical rotated shiny palettes — `sprite_back_shiny.png` is consistent with
-  `sprite_shiny.png` / `sprite_frame2_shiny.png` with **no** change to the shiny
-  blocks (the back shiny is already `generate_shiny(back_path, …)`).
-- **[confirmed]** `export_ini` / `writer.py` need no changes — they reference no
-  sprite files (Gen 3 data fields / `stats.json` + `entry.md`).
-- **[confirmed]** Anything calling `generate_sprite_img2img` triggers a real
-  `import torch` (via `_run_img2img` → `_make_generator`) and is therefore an
-  `ml` test; the pure palette/shiny assertions in `test_sprites.py` must call
-  `quantize_to_reference` / `generate_shiny` directly, and the `main`-level
-  wiring is torch-free because `test_main.py` mocks the sprite functions.
+- **[picked]** `--image` mode's back-sprite generation is dropped in this
+  slice rather than adapted, because (a) the issue's own framing and "Done
+  when" list both scope the paired-canvas replacement to "txt2img mode," and
+  (b) no replacement mechanism for an img2img-seeded pair is described
+  anywhere (research doc, issue text). This is a real regression against
+  issue #10 that a follow-up slice in #61 should close — candidate approaches
+  worth a future spike: compositing the user's drawing into the left half of
+  a blank 1536x768 canvas and running the paired-canvas prompt through
+  img2img at high denoise (the research doc's own "img2img from a plain
+  white canvas at denoise 1.0" recommendation), or a dedicated single-view
+  back-generation img2img pass with an in-prompt (not tag-based) rear-view
+  phrase. Flagging this clearly rather than silently reintroducing #10's bug
+  or silently expanding this slice's scope to design that mechanism.
+- **[picked]** `generate_sprite` (the function, not its main.py call site) is
+  left in `sprites.py` even though it becomes unused there, mirroring this
+  codebase's own explicit precedent (see `spec.md`'s git history — the
+  back-sprite palette-lock slice left `generate_back_sprite` "unused... to
+  avoid scope creep") until an issue explicitly asks to remove it, as this
+  one explicitly does for `generate_back_sprite` but not for `generate_sprite`.
+- **[picked]** `generate_sprite_img2img`'s `reference_path` parameter and its
+  `quantize_to_reference` branch are left in place, for the same reason:
+  the issue's delete list names `generate_back_sprite` and "the old
+  backside-img2img call path" (the `main.py` call site), not the generic
+  capability on `generate_sprite_img2img` itself, which remains a tested,
+  reusable feature even with zero current callers.
+- **[picked]** `generate_sprite_pair`'s reroll increments `seed` by exactly 1
+  (`seed + 1`), and falls back to an unseeded second call when `seed is None`
+  — the issue specifies "seed + 1" for the seeded case but is silent on the
+  unseeded one; incrementing `None` has no sensible meaning, and an unseeded
+  pipeline call is already non-deterministic, so a second plain call already
+  satisfies "a full regeneration, not just a re-split."
+- **[picked]** The empty-back-half check uses the Gen-3 contract's guaranteed
+  key-at-index-0 rather than computing `_background_index(back)` — simpler
+  and doesn't depend on the key happening to be the *most common* index
+  (it always is, by contract, once locked to the front's palette, but
+  checking index 0 directly is more precisely what "background" means here).
+- **[picked]** Function name `generate_sprite_pair` and helper name
+  `_split_front_back_with_retry` — not specified by the issue; chosen for
+  consistency with existing naming (`generate_sprite`, `generate_frame2`,
+  `split_front_back_canvas`).
+- **[confirmed]** `split_front_back_canvas` never raises — it returns `None`
+  on failure to find a full-height background run — so the reroll logic can
+  treat "no split" as a plain `None` check, not an exception path.
+  (`tests/test_sprites.py`, `test_split_no_full_height_background_run_returns_none`,
+  `test_split_degenerate_search_window_returns_none`.)
+- **[confirmed]** `quantize_to_reference` performs its own resize-to-reference-
+  size + colour/contrast enhance + background-flatten pipeline internally, so
+  `generate_sprite_pair` does not need to pre-process `back_raw` before
+  calling it — matching how the deleted `reference_path=...` branch of
+  `generate_sprite_img2img` used it.
+- **[confirmed]** `_flatten_background_to_key`'s gradient-border fallback is
+  the established "degrade, don't fail" pattern this issue explicitly asks
+  the split/reroll/naive-fallback logic to mirror (best-effort result +
+  `stderr` warning via bare `print(..., file=sys.stderr)`, never raise).
+- **[confirmed]** `stitch_spritesheet` already tolerates a missing
+  `sprite_back.png` (skips that cell, leaves it on `_KEY_COLOR`), and the
+  back-shiny `main.py` block already tolerates a missing `sprite_back.png`
+  (an `Image.open` failure caught by its own `try/except`, warn-and-continue)
+  — so no changes are needed to either for the new empty-back-half or
+  `--image`-mode-has-no-back cases; both were already reachable degradations
+  before this slice (a fully-failed back-sprite call left the same gap).
