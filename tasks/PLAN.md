@@ -78,7 +78,7 @@ task 10 owns its implementation. Default `3` is what preserves today's behavior.
 | **[default]** CLI surface: `--stages {2,3}` alongside an unchanged `--mode`, rather than enumerating shapes in `--mode` | 11 | Assumption taken. Chosen because `--mode line2/line3` would break existing `--mode line` invocations. Task 11 asserts `--mode line` with no `--stages` is unchanged |
 | **[assumption]** No stage-count validation of the model's response — a model returning 3 stages when 2 were asked for is accepted | 30 | Explicit non-goal. `_normalize` already tolerates any list length; the 2-attempt retry budget is spent on the name contract. Task 30 pins this as intended behavior so it isn't "fixed" later by accident |
 | **[open]** Whether `--stages 1` should be a synonym for `--mode single` | 11 | Assumed **no** — two ways to say one thing invites drift. Task 11 asserts `--stages 1` is rejected by argparse `choices` |
-| **Byte-identical prompt** for `--mode line` with no `--stages` | 10, 30 | Highest-risk regression in this change. Pinned twice: task 10 unit-level, task 30 as a full-prompt snapshot |
+| **Structure-identical prompt** for `--mode line` with no `--stages` | 10, 30 | Highest-risk regression in this change. Pinned twice: task 10 unit-level, task 30 through the full CLI path. **Restated during task 00** — the original "byte-identical" wording was unsatisfiable, since the BST values are rendered into that prompt and correcting them is the point of the issue. Now asserted as old-prompt-with-substitutions |
 | Band fixture must contain no species data | 00 | Acceptance criterion on task 00 + a grep-based check in task 30 |
 
 ## Execution

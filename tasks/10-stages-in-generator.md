@@ -46,10 +46,23 @@ parameter style is yours, but keep them internal.
 ## TDD steps (red → green → refactor)
 
 1. **Red — write failing tests first** in `tests/test_generator.py`:
-   - **Byte-identical default (highest value test in this task).** The full
+   - **Structure-identical default (highest value test in this task).** The full
      prompt produced by `generate_fakemon(..., "line")` with no `stages` argument
-     is character-for-character identical to the prompt produced before this
-     change. Capture today's string and assert equality — not a substring check.
+     must be identical in structure and wording to the pre-change prompt,
+     differing **only** in the corrected BST numbers. Assert equality against the
+     old prompt with exactly those substitutions applied — not a substring check,
+     which would miss reordering or a lost line:
+
+     ```
+     expected = OLD_LINE_PROMPT.replace(
+         "stage 1 ~300, stage 2 ~420, stage 3 ~520",
+         "stage 1 ~295, stage 2 ~405, stage 3 ~518",
+     )
+     assert new_prompt == expected
+     ```
+
+     A literally byte-identical prompt is impossible — the BST values are
+     rendered into that string and correcting them is the point of #59.
    - `--mode line --stages 2` puts exactly **two** BST targets in the prompt;
      `--stages 3` puts three; `--mode single` puts one.
    - The 2-stage BST hint carries 305 and 468; the 3-stage hint carries
@@ -81,7 +94,8 @@ out explicitly in the handoff.
 ## Acceptance criteria (Definition of Done)
 
 - [ ] `generate_fakemon` accepts keyword-only `stages: int = 3`.
-- [ ] `--mode line` with no `stages` produces a byte-identical prompt to before.
+- [ ] `--mode line` with no `stages` produces a prompt identical in structure and
+      wording to before, differing only in the corrected BST numbers.
 - [ ] Prompt carries 1 / 2 / 3 BST targets for single / 2-stage / 3-stage.
 - [ ] 2-stage progression wording is distinct from the 3-stage wording.
 - [ ] A 2-stage final takes the stage-3 size row; 3-stage sizes are unchanged.

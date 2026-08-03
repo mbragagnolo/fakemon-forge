@@ -29,11 +29,13 @@ fix it in the owning task rather than reaching across the boundary here.
      mocked client; assert two stage directories, each with a valid `stats.json`
      and `entry.md`, and that both `.ini` exports succeed.
    - **Happy path, 3 stages** — unchanged from today.
-   - **The byte-identical guarantee, at full-prompt level.** `--mode line` with no
-     `--stages` sends a prompt character-for-character identical to the
-     pre-change one. Task 10 pins this at unit level; pin it here through the
-     whole CLI → generator path, because this is the regression most likely to be
-     broken by a later well-meaning prompt edit.
+   - **The structure-identical guarantee, at full-prompt level.** `--mode line`
+     with no `--stages` sends a prompt identical in structure and wording to the
+     pre-change one, differing only in the corrected BST numbers. Task 10 pins
+     this at unit level; pin it here through the whole CLI → generator path,
+     because this is the regression most likely to be broken by a later
+     well-meaning prompt edit. (Literal byte-identity is impossible — the BST
+     values are rendered into that string.)
    - **Both CLI rejections** surface correctly when driven through `main`, not
      just `validate_args`: `--mode single --stages 2` and
      `--tier pseudo --stages 2` each exit 1.
@@ -71,7 +73,7 @@ of a 2-stage line alongside the existing examples.
 ## Acceptance criteria (Definition of Done)
 
 - [ ] 2-stage and 3-stage happy paths both pass end to end through `main`.
-- [ ] The byte-identical default prompt is pinned at full-prompt level.
+- [ ] The structure-identical default prompt is pinned at full-prompt level.
 - [ ] Both CLI rejections are exercised through `main`.
 - [ ] The "model returns the wrong stage count" non-goal is pinned as accepted.
 - [ ] A species-data leak check covers `tests/fixtures/`.

@@ -6,6 +6,11 @@
   - `tests/fixtures/gen3_bst_bands.json` (new)
   - `fakemon_forge/generator.py` — **only** the `_BST_TARGETS` constant
   - `tests/test_bst_targets.py` (new)
+  - `tests/test_generator.py` — **only** the two tests that assert `_BST_TARGETS`
+    *values* (`test_standard_tier_bst_in_prompt`,
+    `test_standard_line_bst_includes_stage3_target`). Scope amendment made during
+    execution: these assert this task's constant, not task 10's prompt
+    threading, so they belong here. Wave 0 runs alone, so there is no collision.
 - **Depends on:** none
 - **Parallel-safe with:** none (sequential wave)
 - **Implements spec sections:** Behavior §2 (the committed fixture), §3 (`_BST_TARGETS`); Testing (band conformance, median equality, the 21-member assertion)

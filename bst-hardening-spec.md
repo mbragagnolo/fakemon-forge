@@ -31,8 +31,9 @@ Internal: `generate_fakemon(description, mode, tier, *, client, api_key)` gains 
 `stages: int = 3` keyword parameter. `_user_prompt` and `_size_defaults` take the
 same value.
 
-**Default preserved:** `--mode line` with no `--stages` behaves exactly as today
-(3 stages), so no existing invocation changes behaviour.
+**Default preserved:** `--mode line` with no `--stages` still produces a 3-stage
+line, so no existing invocation changes *shape*. Its prompt text does change, but
+only in the corrected BST numbers — see Testing.
 
 ## Outputs
 
@@ -221,7 +222,12 @@ stderr, `sys.exit(1)`, no traceback):
   meaningfully above the 3-stage *mid*-stage target (a 2-stage final is a final).
 - `--mode single --tier standard` target is the standalone value, and is
   strictly greater than the 3-stage stage-1 target (the #48 consistency fix).
-- `--mode line` without `--stages` produces a byte-identical prompt to today's.
+- `--mode line` without `--stages` produces a prompt **identical in structure and
+  wording** to today's, differing only in the corrected BST numbers. Assert the
+  new prompt equals the old one with exactly those substitutions applied — a
+  substring check is too weak to catch reordering or lost lines. A literally
+  byte-identical prompt is impossible: the BST values are rendered into that
+  string, and correcting them is the point of this issue.
 - Prompt contains the right number of BST targets for each `(mode, stages)`.
 - 2-stage progression wording appears for `--stages 2` and not for `--stages 3`.
 - `_size_defaults` maps a 2-stage final to the stage-3 size row.
@@ -294,6 +300,13 @@ existing four tier names are kept.
   — recommended default, no preference expressed.
 - 2026-08-03: **Medians confirmed over means**, with the 33.5-point 3-stage
   stage-2 gap as evidence. Replaces: an unverified `[assumption]`.
+- 2026-08-03: **"Byte-identical prompt" restated as "structure-identical, numbers
+  may change"** — surfaced during task 00. Replaces: "`--mode line` without
+  `--stages` produces a byte-identical prompt to today's", which was
+  unsatisfiable. The BST values are rendered directly into that prompt string
+  (`BST targets: stage 1 ~300, stage 2 ~420, stage 3 ~520.`), so correcting them
+  necessarily changes it. The guarantee now pins structure and wording, asserted
+  as old-prompt-with-substitutions rather than a substring check.
 - 2026-08-03: **Derivation script relocated to the private injector repo.**
   Replaces: "a throwaway script, run once by the operator". It depends on that
   package and on the placeholder-slot IDs, which must not enter this repo, so it
