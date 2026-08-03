@@ -4,9 +4,14 @@ import hashlib
 import json
 import sys
 import textwrap
+from functools import lru_cache
 from pathlib import Path
 
 _RESOURCES = Path(__file__).parent.parent / "resources"
+
+# PokedexType's field budget. One char more than a species name — a different
+# field with a different limit, so the two constants stay separate.
+_MAX_CATEGORY_LEN = 11
 
 # ── lookup tables ──────────────────────────────────────────────────────────────
 
@@ -75,15 +80,73 @@ _ABILITY_FALLBACK: dict[str, int] = {
 
 # ── helpers ────────────────────────────────────────────────────────────────────
 
-def _resolve_ability(name: str) -> int:
-    abilities: dict[str, str] = json.loads(
+@lru_cache(maxsize=1)
+def _ability_table() -> dict[str, str]:
+    """The Gen 3 ability table, read once.
+
+    Lazily, not at import: a missing resource file should fail the export that
+    needs it, not the import of the module.
+    """
+    return json.loads(
         (_RESOURCES / "gen3_abilities.json").read_text(encoding="utf-8")
     )
+
+
+def _resolve_ability(name: str) -> int:
+    abilities = _ability_table()
     lower = name.lower()
     for idx, aname in abilities.items():
         if aname.lower() == lower:
             return int(idx)
     return _ABILITY_FALLBACK.get(lower, 0)
+
+
+def _ability_indexes(data: dict) -> tuple[int, int]:
+    """Resolve the (ability1, ability2) byte indexes for the BaseStats blob.
+
+    Prefers the real Gen 3 names in ``abilities_gen3``; anything malformed
+    (absent, empty, or not a list) falls back to the legacy free-text
+    ``ability`` with an empty second slot.
+    """
+    names = data.get("abilities_gen3")
+    if not isinstance(names, list) or not names:
+        return _resolve_ability(data.get("ability", "")), 0x00
+
+    def idx(pos: int) -> int:
+        if pos < len(names) and isinstance(names[pos], str):
+            return _resolve_ability(names[pos])
+        return 0x00
+
+    return idx(0), idx(1)
+
+
+def _dimension(data: dict, key: str, legacy: int) -> int:
+    """Read a ``Hght``/``Wght`` value, falling back to the legacy literal.
+
+    Keyed on the value's type rather than its truthiness so a legitimate ``0``
+    round-trips; a present-but-non-integer value (malformed file) degrades to
+    the literal rather than writing a junk token into the .ini. Values are
+    already clamped upstream at generation time, so no re-clamping here.
+    """
+    value = data.get(key)
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    return legacy
+
+
+def _pokedex_type(data: dict) -> str:
+    """The PokedexType value: the category noun, else the primary type word.
+
+    Upper-cased and clipped to the field budget on both paths. The generator
+    already guarantees both for anything it writes, but this function is also
+    the last stop for hand-edited and externally produced stats.json — and an
+    over-long category would overrun exactly the budget that dropping the
+    " POKEMON" suffix was meant to reclaim.
+    """
+    category = data.get("category")
+    if isinstance(category, str) and category.strip():
+        return category.upper().strip()[:_MAX_CATEGORY_LEN].strip()
+    return data["types"][0].upper()[:_MAX_CATEGORY_LEN]
 
 
 def _dex_number(name: str) -> int:
@@ -102,7 +165,7 @@ def _ev_yield(stats: dict) -> int:
     return 1
 
 
-def _encode_base_stats(data: dict, ability_idx: int) -> str:
+def _encode_base_stats(data: dict, ability1_idx: int, ability2_idx: int) -> str:
     s = data["base_stats"]
     types = [t if t != "Fairy" else "Normal" for t in data["types"]]
     t1 = _TYPE_INDEX[types[0]]
@@ -120,7 +183,7 @@ def _encode_base_stats(data: dict, ability_idx: int) -> str:
         70,                                      # base happiness
         0,                                       # growth rate: Medium Fast
         11, 11,                                  # egg groups: Amorphous
-        ability_idx & 0xFF, 0x00,               # ability1, ability2
+        ability1_idx & 0xFF, ability2_idx & 0xFF,  # ability1, ability2
         0x00,                                    # safari flee rate
         _TYPE_BODY_COLOR.get(t1, 8),
         0x00, 0x00,                              # padding
@@ -175,10 +238,16 @@ def export_ini(stage_dir: Path) -> Path:
     data = json.loads((stage_dir / "stats.json").read_text(encoding="utf-8"))
     entry = (stage_dir / "entry.md").read_text(encoding="utf-8").strip()
 
-    ability_idx = _resolve_ability(data.get("ability", ""))
+    ability1_idx, ability2_idx = _ability_indexes(data)
+
     dex = _dex_number(data["name"])
-    base_stats = _encode_base_stats(data, ability_idx)
+    base_stats = _encode_base_stats(data, ability1_idx, ability2_idx)
     moves = _build_moveset(data)
+
+    height_dm = _dimension(data, "height_dm", 5)
+    weight_hg = _dimension(data, "weight_hg", 30)
+
+    dex_type = _pokedex_type(data)
 
     ini_lines = [
         "[Pokemon]",
@@ -197,14 +266,14 @@ def export_ini(stage_dir: Path) -> Path:
         "TMHMCompatibility=0000000000000000",
         f"NationalDexNumber={dex}",
         f"SecondDexNumber={dex}",
-        "Hght=5",
-        "Wght=30",
+        f"Hght={height_dm}",
+        f"Wght={weight_hg}",
         "Scale1=256",
         "Scale2=256",
         "Offset_1=0",
         "Offset_2=0",
         f"PokedexDescription={_format_entry(entry)}",
-        f"PokedexType={data['types'][0].upper()} POKEMON",
+        f"PokedexType={dex_type}",
         "",
     ]
 
