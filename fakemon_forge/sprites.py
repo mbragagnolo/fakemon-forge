@@ -67,11 +67,18 @@ def k_centroid(image: Image.Image, width: int, height: int, centroids: int = 2) 
     occurs in the tile, aligned with the tile's dominant content — the
     property pixel-art downscaling needs. MIT-licensed algorithm ported from
     Astropulse's "pixeldetector". Does not mutate ``image``.
+
+    Only downscales meaningfully: if either target dimension exceeds the
+    source's, the per-output-pixel tile would be empty and there is no
+    dominant colour to pick, so the whole resize falls back to ``NEAREST``
+    (which likewise only replicates existing colours).
     """
     image = image.convert("RGB")
-    out = Image.new("RGB", (width, height))
     wf = image.width / width
     hf = image.height / height
+    if wf < 1 or hf < 1:
+        return image.resize((width, height), Image.NEAREST)
+    out = Image.new("RGB", (width, height))
     for x in range(width):
         for y in range(height):
             tile = image.crop((int(x * wf), int(y * hf), int((x + 1) * wf), int((y + 1) * hf)))

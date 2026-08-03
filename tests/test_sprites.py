@@ -1020,6 +1020,58 @@ def test_k_centroid_hard_edge_introduces_no_new_colors():
     assert out_colors <= {red, blue}
 
 
+def _mixed_tile(majority, minority):
+    """4x4 tile, 3:1 majority, with the minority on the row NEAREST samples.
+
+    PIL's ``NEAREST`` reduction of 4x4 -> 1x1 reads source pixel (2, 2), so
+    putting the minority colour on row 2 makes the two algorithms disagree:
+    NEAREST returns the minority, k-centroid must return the majority.
+    """
+    img = Image.new("RGB", (4, 4), majority)
+    for x in range(4):
+        img.putpixel((x, 2), minority)
+    return img
+
+
+def test_k_centroid_mixed_tile_picks_dominant_color():
+    # The property NEAREST does not have: when a tile straddles an edge the
+    # majority colour wins, rather than whichever pixel the sampler lands on.
+    red, blue = (255, 0, 0), (0, 0, 255)
+
+    img = _mixed_tile(majority=red, minority=blue)
+    assert img.resize((1, 1), Image.NEAREST).getpixel((0, 0)) == blue  # guard
+    assert k_centroid(img, 1, 1).getpixel((0, 0)) == red
+
+    # Flip the majority and the answer must flip with it.
+    flipped = _mixed_tile(majority=blue, minority=red)
+    assert flipped.resize((1, 1), Image.NEAREST).getpixel((0, 0)) == red  # guard
+    assert k_centroid(flipped, 1, 1).getpixel((0, 0)) == blue
+
+
+def test_k_centroid_upscale_falls_back_to_nearest():
+    # Target larger than source: no source tile per output pixel, so the
+    # dominant-colour path cannot run. Must still return a correctly sized
+    # image built from existing colours instead of raising.
+    red, blue = (255, 0, 0), (0, 0, 255)
+    img = _mixed_tile(majority=red, minority=blue)
+
+    out = k_centroid(img, 16, 16)
+    assert out.size == (16, 16)
+    assert out.mode == "RGB"
+    assert set(out.get_flattened_data()) <= {red, blue}
+
+    # Mixed axes (width up, height down) hit the same empty-tile crop.
+    mixed = k_centroid(img, 8, 2)
+    assert mixed.size == (8, 2)
+    assert set(mixed.get_flattened_data()) <= {red, blue}
+
+    # Equal size is a genuine 1x1-tile downscale, not the fallback: every
+    # source pixel survives verbatim.
+    same = k_centroid(img, 4, 4)
+    assert same.size == (4, 4)
+    assert list(same.get_flattened_data()) == list(img.get_flattened_data())
+
+
 # --------------------------------------------------------------------------
 # Display-depth palette dedupe (Gen 3 shows 5 bits per channel)
 # --------------------------------------------------------------------------
