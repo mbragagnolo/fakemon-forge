@@ -239,3 +239,28 @@ def test_stats_json_defaults_height_and_weight_per_stage(tmp_path):
     for stage_dir in dirs:
         data = json.loads((stage_dir / "stats.json").read_text())
         assert (data["height_dm"], data["weight_hg"]) == (5, 30)
+
+
+# ---------------------------------------------------------------------------
+# abilities_gen3 in stats.json
+# ---------------------------------------------------------------------------
+
+def test_stats_json_persists_abilities_gen3(tmp_path):
+    stage = {**_STAGE_1, "abilities_gen3": ["Blaze", "Flash Fire"]}
+    dirs = write_output([stage], base_dir=str(tmp_path))
+    data = json.loads((dirs[0] / "stats.json").read_text())
+    assert data["abilities_gen3"] == ["Blaze", "Flash Fire"]
+
+
+def test_stats_json_defaults_missing_abilities_gen3_to_empty_list(tmp_path):
+    assert "abilities_gen3" not in _STAGE_1
+    dirs = write_output(_SINGLE, base_dir=str(tmp_path))
+    data = json.loads((dirs[0] / "stats.json").read_text())
+    assert data["abilities_gen3"] == []
+
+
+def test_stats_json_still_excludes_llm_only_with_abilities_gen3(tmp_path):
+    stage = {**_STAGE_1, "abilities_gen3": ["Blaze"]}
+    dirs = write_output([stage], base_dir=str(tmp_path))
+    data = json.loads((dirs[0] / "stats.json").read_text())
+    assert not (_LLM_ONLY & set(data.keys()))
