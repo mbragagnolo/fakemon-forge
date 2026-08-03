@@ -520,25 +520,27 @@ def split_front_back_canvas(canvas: Image.Image) -> tuple[Image.Image, Image.Ima
     x_start = int(_SPLIT_SEARCH_LOW * w)
     x_end = int(_SPLIT_SEARCH_HIGH * w)
 
-    best_run = None
+    # Maximal ``[start, end)`` column ranges that are background for their full
+    # height. The window is only 20% of the canvas, so this list stays short.
+    runs = []
     run_start = None
     for x in range(x_start, x_end):
-        is_full_height_bg = all(_rgb_distance(px[x, y], bg) <= _KEY_TOLERANCE for y in range(h))
-        if is_full_height_bg:
+        if all(_rgb_distance(px[x, y], bg) <= _KEY_TOLERANCE for y in range(h)):
             if run_start is None:
                 run_start = x
-            continue
-        if run_start is not None:
-            if best_run is None or (x - run_start) > (best_run[1] - best_run[0]):
-                best_run = (run_start, x)
+        elif run_start is not None:
+            runs.append((run_start, x))
             run_start = None
-    if run_start is not None and (best_run is None or (x_end - run_start) > (best_run[1] - best_run[0])):
-        best_run = (run_start, x_end)
+    if run_start is not None:
+        runs.append((run_start, x_end))
 
-    if best_run is None:
+    if not runs:
         return None
 
-    cut = (best_run[0] + best_run[1]) // 2
+    # Widest run wins; ``max`` returns the first of equal-width runs, so a tie
+    # goes to the leftmost one.
+    start, end = max(runs, key=lambda run: run[1] - run[0])
+    cut = (start + end) // 2
     return canvas.crop((0, 0, cut, h)), canvas.crop((cut, 0, w, h))
 
 
