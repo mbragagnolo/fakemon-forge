@@ -19,20 +19,10 @@ from fakemon_forge.sprites import (
     procedural_squash,
     _NUM_STEPS,
     _CFG_SCALE,
+    _NEGATIVE_PROMPT,
 )
 
 pytestmark = pytest.mark.ml
-
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
-
-@pytest.fixture(autouse=True)
-def _stub_encode_prompt():
-    """Patch _encode_prompt for all sprite tests so compel isn't required."""
-    with patch("fakemon_forge.sprites._encode_prompt", return_value=MagicMock()):
-        yield
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -73,59 +63,63 @@ def _frame1_file(tmp_path, name="sprite.png"):
 
 
 # ---------------------------------------------------------------------------
-# _encode_prompt() / prompt_embeds passthrough
+# prompt= / negative_prompt= passthrough
 # ---------------------------------------------------------------------------
 
-def test_encode_prompt_called_with_built_prompt_and_pipeline(tmp_path):
+def test_pipeline_called_with_prompt_string(tmp_path):
     pipe = _fake_pipeline(_rgb_image())
     out = tmp_path / "sprite.png"
-    fake_embeds = MagicMock()
-    with patch("fakemon_forge.sprites._encode_prompt", return_value=fake_embeds) as mock_enc:
-        generate_sprite("spiky ice wolf", [], str(out), pipeline=pipe)
-    mock_enc.assert_called_once_with(build_prompt("spiky ice wolf", []), pipe)
+    generate_sprite("spiky ice wolf", [], str(out), pipeline=pipe)
+    assert pipe.call_args.kwargs["prompt"] == build_prompt("spiky ice wolf")
+    assert "prompt_embeds" not in pipe.call_args.kwargs
 
 
-def test_encode_prompt_result_passed_as_prompt_embeds(tmp_path):
+def test_pipeline_called_with_negative_prompt(tmp_path):
     pipe = _fake_pipeline(_rgb_image())
     out = tmp_path / "sprite.png"
-    fake_embeds = MagicMock()
-    with patch("fakemon_forge.sprites._encode_prompt", return_value=fake_embeds):
-        generate_sprite("fire lizard", [], str(out), pipeline=pipe)
-    assert pipe.call_args.kwargs["prompt_embeds"] is fake_embeds
-    assert "prompt" not in pipe.call_args.kwargs
+    generate_sprite("fire lizard", [], str(out), pipeline=pipe)
+    assert pipe.call_args.kwargs["negative_prompt"] == _NEGATIVE_PROMPT
 
 
-def test_type_tags_included_in_encoded_prompt(tmp_path):
+def test_types_are_not_mechanically_tagged_into_the_prompt(tmp_path):
+    # ``types`` is still accepted (main.py passes stage["types"]) but the SD1.5
+    # LoRA's "firetype" trigger vocabulary is gone with the backend that trained
+    # it. This asserts the absence of the mechanical tags only — the type signal
+    # itself did not disappear, it moved into the LLM-authored sprite_prompt,
+    # required by the sprite_prompt spec in generator.py and pinned by
+    # test_system_prompt_requires_sprite_prompt_to_show_the_types.
     pipe = _fake_pipeline(_rgb_image())
     out = tmp_path / "sprite.png"
-    with patch("fakemon_forge.sprites._encode_prompt", return_value=MagicMock()) as mock_enc:
-        generate_sprite("fire lizard", ["Fire", "Flying"], str(out), pipeline=pipe)
-    encoded_prompt = mock_enc.call_args.args[0]
-    assert "firetype" in encoded_prompt
-    assert "flyingtype" in encoded_prompt
+    generate_sprite("fire lizard", ["Fire", "Flying"], str(out), pipeline=pipe)
+    prompt = pipe.call_args.kwargs["prompt"]
+    assert prompt == build_prompt("fire lizard")
+    assert "firetype" not in prompt and "flyingtype" not in prompt
 
 
-def test_img2img_encode_prompt_called(tmp_path):
+def test_extra_tags_included_in_prompt(tmp_path):
+    pipe = _fake_pipeline(_rgb_image())
+    out = tmp_path / "sprite.png"
+    generate_sprite("fire lizard", [], str(out), pipeline=pipe, extra_tags=["backside"])
+    assert "backside" in pipe.call_args.kwargs["prompt"]
+
+
+def test_img2img_pipeline_called_with_prompt_string(tmp_path):
     init_img = tmp_path / "drawing.png"
     _rgb_image(100, 100).save(str(init_img))
     pipe = _fake_img2img_pipeline(_rgb_image())
     out = tmp_path / "sprite.png"
-    fake_embeds = MagicMock()
-    with patch("fakemon_forge.sprites._encode_prompt", return_value=fake_embeds) as mock_enc:
-        generate_sprite_img2img("spiky ice wolf", [], str(init_img), str(out), pipeline=pipe)
-    mock_enc.assert_called_once_with(build_prompt("spiky ice wolf", []), pipe)
+    generate_sprite_img2img("spiky ice wolf", [], str(init_img), str(out), pipeline=pipe)
+    assert pipe.call_args.kwargs["prompt"] == build_prompt("spiky ice wolf")
+    assert "prompt_embeds" not in pipe.call_args.kwargs
 
 
-def test_img2img_encode_prompt_result_passed_as_prompt_embeds(tmp_path):
+def test_img2img_pipeline_called_with_negative_prompt(tmp_path):
     init_img = tmp_path / "drawing.png"
     _rgb_image(100, 100).save(str(init_img))
     pipe = _fake_img2img_pipeline(_rgb_image())
     out = tmp_path / "sprite.png"
-    fake_embeds = MagicMock()
-    with patch("fakemon_forge.sprites._encode_prompt", return_value=fake_embeds):
-        generate_sprite_img2img("fire lizard", [], str(init_img), str(out), pipeline=pipe)
-    assert pipe.call_args.kwargs["prompt_embeds"] is fake_embeds
-    assert "prompt" not in pipe.call_args.kwargs
+    generate_sprite_img2img("fire lizard", [], str(init_img), str(out), pipeline=pipe)
+    assert pipe.call_args.kwargs["negative_prompt"] == _NEGATIVE_PROMPT
 
 
 # ---------------------------------------------------------------------------
@@ -304,23 +298,21 @@ def test_img2img_reference_path_saved_matches_reference_size(tmp_path):
 
 def test_img2img_reference_path_pipeline_called_once_with_passthrough(tmp_path):
     """The reference only affects post-quantization: the pipeline is still
-    invoked exactly once with the unchanged strength / image / prompt_embeds."""
+    invoked exactly once with the unchanged strength / image / prompt."""
     ref = _frame1_file(tmp_path)
     init_img = tmp_path / "drawing.png"
     _rgb_image(100, 100).save(str(init_img))
     pipe = _fake_img2img_pipeline(_rgb_image(96, 96, color=(90, 160, 210)))
     out = tmp_path / "sprite_back.png"
-    fake_embeds = MagicMock()
-    with patch("fakemon_forge.sprites._encode_prompt", return_value=fake_embeds):
-        generate_sprite_img2img(
-            "fire lizard", [], str(init_img), str(out), pipeline=pipe,
-            extra_tags=["backside"], strength=0.65, reference_path=str(ref),
-        )
+    generate_sprite_img2img(
+        "fire lizard", [], str(init_img), str(out), pipeline=pipe,
+        extra_tags=["backside"], strength=0.65, reference_path=str(ref),
+    )
     assert pipe.call_count == 1
     kwargs = pipe.call_args.kwargs
     assert kwargs["strength"] == 0.65
     assert kwargs["image"].size == (768, 768)
-    assert kwargs["prompt_embeds"] is fake_embeds
+    assert kwargs["prompt"] == build_prompt("fire lizard", ["backside"])
 
 
 def test_img2img_without_reference_path_uses_adaptive_palette(tmp_path):
@@ -395,23 +387,21 @@ def test_frame2_default_extra_tags_include_open_mouth(tmp_path):
     front = _frame1_file(tmp_path)
     pipe = _fake_img2img_pipeline(_rgb_image(96, 96, color=(90, 160, 210)))
     out = tmp_path / "sprite_frame2.png"
-    with patch("fakemon_forge.sprites._encode_prompt", return_value=MagicMock()) as mock_enc:
-        generate_frame2("fire lizard", [], str(front), str(out), pipeline=pipe)
-    assert "open mouth" in mock_enc.call_args.args[0]
+    generate_frame2("fire lizard", [], str(front), str(out), pipeline=pipe)
+    assert "open mouth" in pipe.call_args.kwargs["prompt"]
 
 
 def test_frame2_honours_caller_supplied_extra_tags(tmp_path):
     front = _frame1_file(tmp_path)
     pipe = _fake_img2img_pipeline(_rgb_image(96, 96, color=(90, 160, 210)))
     out = tmp_path / "sprite_frame2.png"
-    with patch("fakemon_forge.sprites._encode_prompt", return_value=MagicMock()) as mock_enc:
-        generate_frame2(
-            "fire lizard", [], str(front), str(out), pipeline=pipe,
-            extra_tags=["closed eyes"],
-        )
-    encoded = mock_enc.call_args.args[0]
-    assert "closed eyes" in encoded
-    assert "open mouth" not in encoded
+    generate_frame2(
+        "fire lizard", [], str(front), str(out), pipeline=pipe,
+        extra_tags=["closed eyes"],
+    )
+    prompt = pipe.call_args.kwargs["prompt"]
+    assert "closed eyes" in prompt
+    assert "open mouth" not in prompt
 
 
 def test_frame2_seed_path_exercised(tmp_path):
