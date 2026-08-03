@@ -15,12 +15,20 @@ A CLI tool that turns a child's drawing and/or a text description into a complet
 output/
   <Name>/
     stage1_<Name>/
-      sprite.png      # 768×768 front view, 16-colour GBA-style pixel art
-      sprite_back.png # 768×768 back view, same palette as the front
-      spritesheet.png # all six views stitched into 64px GBA-scale cells
-      ...             # plus shiny, frame-2, party-icon and footprint views
-      stats.json      # types, ability, base stats
-      entry.md        # Pokédex flavour text
+      sprite.png              # 768×768 front view, 16-colour GBA-style pixel art
+      sprite_back.png         # 768×768 back view, same palette as the front
+      sprite_frame2.png       # front view's second animation frame
+      sprite_shiny.png        # shiny recolours of the three views above
+      sprite_back_shiny.png
+      sprite_frame2_shiny.png
+      sprite_small.png        # 32px party-menu icon
+      sprite_chibi.png        # big-head/small-body render the icon derives from
+      footprint.png           # 16px footprint
+      spritesheet.png         # all six sprite views stitched into 64px cells
+      cry.wav                 # generated cry
+      stats.json              # types, ability, base stats
+      entry.md                # Pokédex flavour text
+      <Name>.ini              # Gen-3-style data file
     stage2_<Name2>/   # only with --mode line
       ...
     stage3_<Name3>/   # only with --mode line --stages 3
