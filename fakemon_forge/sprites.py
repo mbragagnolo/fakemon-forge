@@ -57,6 +57,15 @@ _SPLIT_SEARCH_HIGH = 0.6
 _NEGATIVE_PROMPT = "worst quality, low quality, blurry, watermark, signature, text, jpeg artifacts"
 
 
+# The SD1.5 LoRA this backend replaced had a trained "firetype"/"watertype"
+# trigger vocabulary, so type conditioning used to be mechanical: look the type
+# up in a table, prepend the tag. The SDXL LoRA knows no such vocabulary, so the
+# type signal has to arrive as ordinary description ("wreathed in embers"), and
+# only the LLM that picked the types can write it. That obligation is spelled
+# out in the ``sprite_prompt`` spec in ``generator.py`` (and pinned by a test
+# there) — it is the sole reason the ``types`` argument threaded through the
+# generate_* functions below is accepted but never read. Anything mechanical
+# here would just fight the prompt the LLM already wrote.
 def build_prompt(sprite_prompt: str, extra_tags: list[str] | None = None) -> str:
     """Plain SDXL prompt string: type wording is baked into ``sprite_prompt`` upstream."""
     if extra_tags:
@@ -823,8 +832,26 @@ def stitch_spritesheet(stage_dir: str, output_path: str, *, cell_size: int = 64)
 
 
 def make_img2img_pipeline(txt2img_pipe):
+    """Derive an img2img pipeline that reuses ``txt2img_pipe``'s loaded components.
+
+    The derived pipe gets its **own** ``enable_model_cpu_offload()`` rather than
+    riding on the parent's. The offload hooks live on the shared modules, but
+    the ``_all_hooks`` bookkeeping they are driven through lives on the
+    *pipeline* — so without this call the derived pipe's
+    ``maybe_free_model_hooks()`` (which every diffusers ``__call__`` runs on the
+    way out) silently does nothing, and whatever component ran last — the VAE,
+    upcast to fp32 to decode — stays GPU-resident until the next run evicts it.
+    That is the residency the 8GB budget cannot afford.
+
+    Enabling it on a pipe that shares another's components is safe here because
+    the two are the same pipeline in all the ways offload cares about: identical
+    ``model_cpu_offload_seq`` over identical modules. ``enable_model_cpu_offload``
+    strips every hook and reinstalls from scratch, so whichever pipe ran last
+    leaves the modules in exactly the state the other would have built anyway.
+    """
     from diffusers import StableDiffusionXLImg2ImgPipeline
-    return StableDiffusionXLImg2ImgPipeline(**txt2img_pipe.components)
+    pipe = StableDiffusionXLImg2ImgPipeline(**txt2img_pipe.components)
+    return _enable_vram_measures(pipe)
 
 
 def _device_and_dtype():
@@ -866,6 +893,31 @@ def _apply_lora(pipe) -> None:
     pipe.fuse_lora(lora_scale=_LORA_SCALE)
 
 
+def _enable_vram_measures(pipe):
+    """Apply the CUDA-only VRAM measures to ``pipe`` and return it.
+
+    Mandatory on CUDA (not opt-in) to stay inside the 8GB budget, and applied to
+    every pipeline that is ever called — including one derived from another's
+    components (see ``make_img2img_pipeline``). Off CUDA this is a no-op:
+    ``enable_model_cpu_offload`` needs an accelerator and raises without one.
+
+    ``enable_model_cpu_offload`` installs hooks that move each component to the
+    GPU only while it runs, so from here on *it* owns device placement: a
+    ``pipe.to("cuda")`` afterwards would make every component resident at once
+    and hand the offload's savings straight back (diffusers warns on exactly
+    this combination), so the move is deliberately skipped on this path.
+    """
+    import torch
+    if not torch.cuda.is_available():
+        return pipe
+    pipe.enable_model_cpu_offload()
+    if hasattr(pipe, "enable_vae_tiling"):
+        pipe.enable_vae_tiling()
+    else:
+        pipe.vae.enable_tiling()
+    return pipe
+
+
 def _load_base_pipeline(pipe_cls):
     from diffusers import EulerAncestralDiscreteScheduler
 
@@ -875,18 +927,7 @@ def _load_base_pipeline(pipe_cls):
     pipe.scheduler = EulerAncestralDiscreteScheduler.from_config(pipe.scheduler.config)
     if device != "cuda":
         return pipe.to(device)
-    # Mandatory on CUDA (not opt-in) to stay inside the 8GB VRAM budget.
-    # ``enable_model_cpu_offload`` installs hooks that move each component to the
-    # GPU only while it runs, so from here on *it* owns device placement: a
-    # ``pipe.to("cuda")`` afterwards would make every component resident at once
-    # and hand the offload's savings straight back (diffusers warns on exactly
-    # this combination), so the move is deliberately skipped on this path.
-    pipe.enable_model_cpu_offload()
-    if hasattr(pipe, "enable_vae_tiling"):
-        pipe.enable_vae_tiling()
-    else:
-        pipe.vae.enable_tiling()
-    return pipe
+    return _enable_vram_measures(pipe)
 
 
 def load_txt2img_pipeline():

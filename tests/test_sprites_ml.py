@@ -81,9 +81,13 @@ def test_pipeline_called_with_negative_prompt(tmp_path):
     assert pipe.call_args.kwargs["negative_prompt"] == _NEGATIVE_PROMPT
 
 
-def test_types_are_not_forwarded_into_the_prompt(tmp_path):
-    # ``types`` is still accepted (main.py passes stage["types"]) but the type
-    # vocabulary is gone: type wording now rides in the LLM-authored prompt.
+def test_types_are_not_mechanically_tagged_into_the_prompt(tmp_path):
+    # ``types`` is still accepted (main.py passes stage["types"]) but the SD1.5
+    # LoRA's "firetype" trigger vocabulary is gone with the backend that trained
+    # it. This asserts the absence of the mechanical tags only — the type signal
+    # itself did not disappear, it moved into the LLM-authored sprite_prompt,
+    # required by the sprite_prompt spec in generator.py and pinned by
+    # test_system_prompt_requires_sprite_prompt_to_show_the_types.
     pipe = _fake_pipeline(_rgb_image())
     out = tmp_path / "sprite.png"
     generate_sprite("fire lizard", ["Fire", "Flying"], str(out), pipeline=pipe)

@@ -965,15 +965,18 @@ def test_load_img2img_error_mentions_exception(capsys):
 # make_img2img_pipeline()
 # ---------------------------------------------------------------------------
 
-def _mock_img2img_class():
+def _mock_img2img_class(cuda=False):
     mock_cls = MagicMock()
     mock_diffusers = MagicMock()
     mock_diffusers.StableDiffusionXLImg2ImgPipeline = mock_cls
-    return {"diffusers": mock_diffusers}, mock_cls
+
+    mock_torch = MagicMock()
+    mock_torch.cuda.is_available.return_value = cuda
+
+    return {"diffusers": mock_diffusers, "torch": mock_torch}, mock_cls
 
 
-def test_make_img2img_pipeline_reuses_txt2img_components():
-    mods, mock_cls = _mock_img2img_class()
+def _txt2img_stub():
     txt2img = MagicMock()
     # SDXL's component set — note the second text encoder/tokenizer, which the
     # SD1.5 pipeline this replaced did not have.
@@ -982,10 +985,46 @@ def test_make_img2img_pipeline_reuses_txt2img_components():
         "tokenizer": "tok1", "tokenizer_2": "tok2", "unet": "unet",
         "scheduler": "sched",
     }
+    return txt2img
+
+
+def test_make_img2img_pipeline_reuses_txt2img_components():
+    mods, mock_cls = _mock_img2img_class()
+    txt2img = _txt2img_stub()
     with patch.dict("sys.modules", mods):
         pipe = make_img2img_pipeline(txt2img)
     mock_cls.assert_called_once_with(**txt2img.components)
     assert pipe is mock_cls.return_value
+
+
+def test_make_img2img_pipeline_enables_offload_and_tiling_on_cuda():
+    # Sharing the parent's components does NOT share the offload: `_all_hooks`
+    # is per-pipeline, so a derived pipe without its own enable_model_cpu_offload
+    # has a no-op maybe_free_model_hooks() and leaves its last-run component
+    # (the fp32-upcast VAE) sitting in VRAM between calls.
+    mods, mock_cls = _mock_img2img_class(cuda=True)
+    with patch.dict("sys.modules", mods):
+        pipe = make_img2img_pipeline(_txt2img_stub())
+    pipe.enable_model_cpu_offload.assert_called_once()
+    pipe.enable_vae_tiling.assert_called_once()
+
+
+def test_make_img2img_pipeline_leaves_device_placement_to_the_offload():
+    mods, _ = _mock_img2img_class(cuda=True)
+    with patch.dict("sys.modules", mods):
+        pipe = make_img2img_pipeline(_txt2img_stub())
+    pipe.to.assert_not_called()
+
+
+def test_make_img2img_pipeline_skips_offload_and_tiling_off_cuda():
+    # enable_model_cpu_offload() raises without an accelerator, and the shared
+    # components are already wherever the parent put them — nothing to do.
+    mods, _ = _mock_img2img_class(cuda=False)
+    with patch.dict("sys.modules", mods):
+        pipe = make_img2img_pipeline(_txt2img_stub())
+    pipe.enable_model_cpu_offload.assert_not_called()
+    pipe.enable_vae_tiling.assert_not_called()
+    pipe.to.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

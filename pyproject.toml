@@ -8,7 +8,12 @@ version = "0.1.0"
 requires-python = ">=3.10"
 dependencies = [
     "mistralai>=1.0.0",
-    "diffusers>=0.27.0",
+    # Floor set by the kohya LoRA shim in sprites.py: `lora_state_dict(...,
+    # return_lora_metadata=True)` only returns the (state_dict, alphas, metadata)
+    # 3-tuple the shim unpacks from 0.35 on. Older releases return a 2-tuple, so
+    # loading dies in the unpack and the CLI reports a bare "failed to load
+    # model". Developed and exercised against 0.38.
+    "diffusers>=0.35.0",
     "transformers>=4.40.0",
     "accelerate>=0.29.0",
     "Pillow>=10.0.0",
