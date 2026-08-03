@@ -471,6 +471,31 @@ def test_chibi_render_failure_falls_back_to_plain_downscale(ctx, capsys):
     ctx["stitch"].assert_called_once()
 
 
+def test_chibi_render_uses_the_txt2img_derived_img2img_pipeline(ctx):
+    """Issue #68: the chibi pass runs on the SDXL img2img pipeline
+    make_img2img_pipeline builds from the txt2img components — not on the
+    txt2img pipeline itself, and not on a separately loaded one."""
+    main(["--description", "fire lizard"])
+
+    chibi = [c for c in ctx["sprite_i2i"].call_args_list
+             if c.kwargs.get("extra_tags") == _CHIBI_TAGS]
+    assert len(chibi) == 1
+    assert chibi[0].kwargs["pipeline"] is ctx["make_i2i"].return_value
+
+
+def test_chibi_render_uses_the_loaded_img2img_pipeline_in_image_mode(ctx, tmp_path):
+    """--image path: the chibi pass reuses load_img2img_pipeline()'s SDXL
+    pipeline, the same one that rendered the front sprite."""
+    img = tmp_path / "drawing.png"
+    img.write_bytes(b"\x89PNG\r\n")
+    main(["--image", str(img), "--description", "fire lizard"])
+
+    chibi = [c for c in ctx["sprite_i2i"].call_args_list
+             if c.kwargs.get("extra_tags") == _CHIBI_TAGS]
+    assert len(chibi) == 1
+    assert chibi[0].kwargs["pipeline"] is ctx["i2i"].return_value
+
+
 def test_icon_generated_three_times_in_line_mode(ctx_line):
     main(["--description", "fire lizard", "--mode", "line"])
     assert ctx_line["icon"].call_count == 3

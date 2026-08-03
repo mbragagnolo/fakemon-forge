@@ -441,6 +441,45 @@ def test_img2img_pipeline_called_exactly_once(tmp_path):
     assert pipe.call_count == 1
 
 
+def test_img2img_chibi_tags_folded_into_prompt_against_sdxl_pipeline(tmp_path):
+    """Issue #68: the chibi enhancement's extra_tags must still reach the
+    prompt sent to the (now SDXL) img2img pipeline end to end, not just at
+    the build_prompt unit level."""
+    from fakemon_forge.main import _CHIBI_TAGS
+
+    init_img = tmp_path / "drawing.png"
+    _rgb_image(100, 100).save(str(init_img))
+    pipe = _fake_img2img_pipeline(_rgb_image())
+    out = tmp_path / "sprite_chibi.png"
+    generate_sprite_img2img(
+        "fire lizard", [], str(init_img), str(out), pipeline=pipe, extra_tags=_CHIBI_TAGS,
+    )
+    prompt = pipe.call_args.kwargs["prompt"]
+    for tag in _CHIBI_TAGS:
+        assert tag in prompt
+    assert pipe.call_count == 1
+    saved = Image.open(str(out))
+    assert saved.mode == "P"
+
+
+def test_img2img_pipeline_error_propagates(tmp_path):
+    """generate_sprite_img2img swallows nothing — main.py's chibi fallback
+    (icon_source = sprite.png) only works because a pipeline crash during the
+    chibi render reaches the caller's except branch."""
+    from fakemon_forge.main import _CHIBI_TAGS
+
+    init_img = tmp_path / "drawing.png"
+    _rgb_image(100, 100).save(str(init_img))
+    pipe = MagicMock(side_effect=RuntimeError("inference crash"))
+    out = tmp_path / "sprite_chibi.png"
+    with pytest.raises(RuntimeError):
+        generate_sprite_img2img(
+            "fire lizard", [], str(init_img), str(out),
+            pipeline=pipe, extra_tags=_CHIBI_TAGS,
+        )
+    assert not out.exists()   # no half-written chibi render left behind
+
+
 # ---------------------------------------------------------------------------
 # generate_sprite_img2img(reference_path=...) — shared-palette lock
 #
