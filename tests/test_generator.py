@@ -999,6 +999,190 @@ def test_generate_fakemon_emits_abilities_gen3_on_every_stage():
     assert [s["abilities_gen3"] for s in result] == [[], [], []]
 
 
+# ---------------------------------------------------------------------------
+# category field: prompt
+# ---------------------------------------------------------------------------
+
+def test_system_prompt_mentions_category_field():
+    assert "category" in _SYSTEM_PROMPT
+
+
+def test_system_prompt_category_gives_examples():
+    assert '"SEED"' in _SYSTEM_PROMPT
+    assert '"MOUSE"' in _SYSTEM_PROMPT
+    assert '"TINY TURTLE"' in _SYSTEM_PROMPT
+
+
+def test_system_prompt_category_forbids_type_word():
+    assert "not its type" in _SYSTEM_PROMPT.lower()
+    assert '"FIRE"' in _SYSTEM_PROMPT or '"WATER"' in _SYSTEM_PROMPT
+
+
+def test_system_prompt_category_forbids_trailing_pokemon():
+    assert "POKEMON" in _SYSTEM_PROMPT
+    assert "No trailing" in _SYSTEM_PROMPT
+
+
+def test_system_prompt_category_states_max_length():
+    assert "11 characters" in _SYSTEM_PROMPT
+
+
+# ---------------------------------------------------------------------------
+# category field: normalization in _normalize
+# ---------------------------------------------------------------------------
+
+def test_normalize_uppercases_lowercase_category():
+    stage = {**_STAGE_1, "category": "seed"}
+    result = _normalize([stage], "single", "standard")
+    assert result[0]["category"] == "SEED"
+
+
+def test_normalize_uppercases_mixed_case_category():
+    stage = {**_STAGE_1, "category": "Tiny Turtle"}
+    result = _normalize([stage], "single", "standard")
+    assert result[0]["category"] == "TINY TURTLE"
+
+
+def test_normalize_category_exactly_eleven_chars_passes_through():
+    """`> 11` is the failure condition, not `>= 11`."""
+    stage = {**_STAGE_1, "category": "TINY TURTLE"}
+    assert len("TINY TURTLE") == 11
+    result = _normalize([stage], "single", "standard")
+    assert result[0]["category"] == "TINY TURTLE"
+
+
+def test_normalize_category_over_eleven_chars_truncated_no_retry():
+    stage = {**_STAGE_1, "category": "TINY TURTLES"}
+    assert len("TINY TURTLES") == 12
+    result = _normalize([stage], "single", "standard")
+    assert result[0]["category"] == "TINY TURTLE"
+    assert len(result[0]["category"]) == 11
+
+
+def test_over_long_category_does_not_trigger_corrective_retry():
+    """An over-long name costs a retry; an over-long category never does."""
+    stage = {**_STAGE_1, "category": "WAY TOO LONG NOUN HERE"}
+    client = _make_client(json.dumps([stage]))
+    result = generate_fakemon("fire lizard", "single", client=client)
+    assert client.chat.complete.call_count == 1
+    assert result[0]["category"] == "WAY TOO LON"
+
+
+def test_normalize_category_strips_illegal_chars():
+    stage = {**_STAGE_1, "category": "SE@ED"}
+    result = _normalize([stage], "single", "standard")
+    assert result[0]["category"] == "SEED"
+
+
+def test_normalize_category_strips_illegal_chars_then_truncates():
+    stage = {**_STAGE_1, "category": "TINY@ TURTLE!!!!"}
+    result = _normalize([stage], "single", "standard")
+    stripped = "TINY TURTLE!!!!"
+    assert result[0]["category"] == stripped.upper()[:11]
+
+
+def test_normalize_category_strips_trailing_pokemon_case_insensitive():
+    stage = {**_STAGE_1, "category": "Seed Pokemon"}
+    result = _normalize([stage], "single", "standard")
+    assert result[0]["category"] == "SEED"
+
+
+def test_normalize_category_keeps_pokemon_as_mid_word_substring():
+    """Only an exact trailing " POKEMON" token is stripped."""
+    stage = {**_STAGE_1, "category": "Seedmon"}
+    result = _normalize([stage], "single", "standard")
+    assert result[0]["category"] == "SEEDMON"
+
+
+def test_normalize_category_strip_pokemon_before_truncate():
+    long_with_suffix = "A VERY LONG SEED POKEMON"
+    stage = {**_STAGE_1, "category": long_with_suffix}
+    result = _normalize([stage], "single", "standard")
+    expected = long_with_suffix.upper()[: -len(" POKEMON")][:11]
+    assert result[0]["category"] == expected
+
+
+def test_normalize_category_missing_falls_back_to_type_word():
+    stage = {**_STAGE_1}
+    stage.pop("category", None)
+    result = _normalize([stage], "single", "standard")
+    assert result[0]["category"] == "FIRE"
+
+
+def test_normalize_category_empty_string_falls_back_to_type_word():
+    stage = {**_STAGE_1, "category": ""}
+    result = _normalize([stage], "single", "standard")
+    assert result[0]["category"] == "FIRE"
+
+
+@pytest.mark.parametrize("bad_value", [None, 42, ["Seed"], {"noun": "Seed"}])
+def test_normalize_category_non_string_falls_back_to_type_word(bad_value):
+    stage = {**_STAGE_1, "category": bad_value}
+    result = _normalize([stage], "single", "standard")
+    assert result[0]["category"] == "FIRE"
+
+
+def test_normalize_category_all_illegal_chars_falls_back_to_type_word():
+    stage = {**_STAGE_1, "category": "\n\t"}
+    result = _normalize([stage], "single", "standard")
+    assert result[0]["category"] == "FIRE"
+
+
+@pytest.mark.parametrize("blank", ["   ", "\n \t", " POKEMON"])
+def test_normalize_category_blank_after_cleaning_falls_back_to_type_word(blank):
+    """Whitespace is not a usable noun — a blank category never survives."""
+    stage = {**_STAGE_1, "category": blank}
+    result = _normalize([stage], "single", "standard")
+    assert result[0]["category"] == "FIRE"
+
+
+def test_normalize_category_truncation_does_not_leave_trailing_space():
+    stage = {**_STAGE_1, "category": "GIANT SEED PODS"}
+    result = _normalize([stage], "single", "standard")
+    assert result[0]["category"] == "GIANT SEED"
+
+
+def test_normalize_category_strips_trailing_pokemon_despite_stray_spaces():
+    """A stray space must not defeat the suffix check and leave "POKEMO"."""
+    stage = {**_STAGE_1, "category": "Seed Pokemon "}
+    result = _normalize([stage], "single", "standard")
+    assert result[0]["category"] == "SEED"
+
+
+def test_normalize_category_uses_second_type_never_used():
+    """Fallback always uses the primary (first) type, not any secondary type."""
+    stage = {**_STAGE_1, "types": ["Water", "Flying"]}
+    stage.pop("category", None)
+    result = _normalize([stage], "single", "standard")
+    assert result[0]["category"] == "WATER"
+
+
+def test_normalize_validates_category_independently_per_stage():
+    stages = [
+        {**_STAGE_1, "category": "seed"},
+        {**_STAGE_2, "category": ""},
+        {**_STAGE_3, "category": "TALL SEED PODS"},
+    ]
+    result = _normalize(stages, "line", "standard")
+    assert result[0]["category"] == "SEED"
+    assert result[1]["category"] == "FIRE"
+    assert result[2]["category"] == "TALL SEED P"
+
+
+def test_generate_fakemon_emits_category_when_model_omits_it():
+    assert all("category" not in s for s in _LINE)
+    client = _make_client(json.dumps(_LINE))
+    result = generate_fakemon("fire lizard", "line", client=client)
+    assert [s["category"] for s in result] == ["FIRE", "FIRE", "FIRE"]
+
+
+def test_generate_fakemon_normalizes_category():
+    stage = {**_STAGE_1, "category": "seed"}
+    client = _make_client(json.dumps([stage]))
+    result = generate_fakemon("fire lizard", "single", client=client)
+    assert result[0]["category"] == "SEED"
+
+
 # --- malformed abilities_gen3 degrades instead of raising --------------------
 
 @pytest.mark.parametrize("entry", [42, None, 7.5, ["Blaze"], {"name": "Blaze"}])
@@ -1116,3 +1300,69 @@ def test_generate_fakemon_survives_fully_off_spec_sizes():
     client = _make_client(json.dumps(stages))
     result = generate_fakemon("fire lizard", "line", client=client)
     assert (result[0]["height_dm"], result[0]["weight_hg"]) == (10, 150)
+
+
+# ---------------------------------------------------------------------------
+# category: the accented suffix and off-spec types
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("raw", [
+    "Seed Pokémon",
+    "SEED POKÉMON",
+    "Seed POKéMON",
+    "Seed Pokémon ",
+])
+def test_normalize_category_strips_the_accented_pokemon_suffix(raw):
+    """The prompt writes "Pokémon" with the accent throughout, so that is the
+    likelier echo — and é survives charset stripping, so the un-accented check
+    alone left "SEED POKÉMO" behind."""
+    result = _normalize([{**_STAGE_1, "category": raw}], "single", "standard")
+    assert result[0]["category"] == "SEED"
+
+
+@pytest.mark.parametrize("blank", [" POKÉMON", " Pokémon"])
+def test_normalize_category_bare_accented_suffix_falls_back(blank):
+    result = _normalize([{**_STAGE_1, "category": blank}], "single", "standard")
+    assert result[0]["category"] == "FIRE"
+
+
+def test_normalize_category_keeps_accented_word_that_is_not_the_suffix():
+    """Only a trailing " POKÉMON" token goes — é is otherwise a legal char."""
+    result = _normalize([{**_STAGE_1, "category": "Flambé"}], "single", "standard")
+    assert result[0]["category"] == "FLAMBé"
+
+
+def test_normalize_category_never_emits_uppercase_e_acute():
+    """The Gen 3 set has é but no É, so upcasing must not manufacture one —
+    the category would otherwise carry a character the charset just rejected."""
+    result = _normalize([{**_STAGE_1, "category": "flambé cake"}], "single", "standard")
+    assert "É" not in result[0]["category"]
+    assert all(ch in _ALLOWED_NAME_CHARS for ch in result[0]["category"])
+
+
+@pytest.mark.parametrize("raw", ["Flambé", "FLAMBÉ", "flambé", "SEED", "Tiny Turtle"])
+def test_normalize_category_output_is_always_inside_the_charset(raw):
+    result = _normalize([{**_STAGE_1, "category": raw}], "single", "standard")
+    assert all(ch in _ALLOWED_NAME_CHARS for ch in result[0]["category"])
+
+
+@pytest.mark.parametrize("types", [[], None, "Fire", [42], {"0": "Fire"}])
+def test_off_spec_types_degrade_to_normal_not_raised(types):
+    """types=[] raised IndexError out of the category fallback."""
+    stage = {**_STAGE_1, "types": types}
+    stage.pop("category", None)
+    result = _normalize([stage], "single", "standard")
+    assert result[0]["category"] == "NORMAL"
+
+
+def test_missing_types_key_degrades_to_normal():
+    stage = {k: v for k, v in _STAGE_1.items() if k != "types"}
+    result = _normalize([stage], "single", "standard")
+    assert result[0]["category"] == "NORMAL"
+
+
+def test_valid_category_survives_off_spec_types():
+    """The fallback is only reached when the category itself is unusable."""
+    stage = {**_STAGE_1, "types": [], "category": "seed"}
+    result = _normalize([stage], "single", "standard")
+    assert result[0]["category"] == "SEED"

@@ -22,6 +22,7 @@ _ABILITY_POOL = [
 _ABILITY_LOOKUP = {_normalize_ability_name(name): name for name in _ABILITY_POOL}
 
 _MAX_NAME_LEN = 10
+_MAX_CATEGORY_LEN = 11
 
 _ALLOWED_NAME_CHARS = set(
     "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
@@ -45,6 +46,9 @@ Each element represents one evolutionary stage and must have exactly these field
     letters, digits, spaces, é, ♂, ♀ and the punctuation . , ' - … ! ? / ( ) " : ;
   stage         – stage number as an integer (1, 2, or 3)
   types         – list of 1 or 2 type strings, e.g. ["Fire"] or ["Water", "Flying"]
+  category      – Pokédex category noun in caps, max 11 characters, e.g. "SEED",
+    "MOUSE", "TINY TURTLE". Describes what the creature *is*, not its type —
+    never "FIRE" or "WATER". No trailing "POKEMON".
   ability       – one ability name (string)
   abilities_gen3 – list of 1 or 2 distinct real Gen 3 ability names, chosen only from this list:
     {", ".join(_ABILITY_POOL)}
@@ -198,6 +202,65 @@ def _normalize_abilities_gen3(raw) -> list[str]:
     return result[:2]
 
 
+_POKEMON_SUFFIX = " POKEMON"
+
+
+def _gen3_upper(text: str) -> str:
+    """Uppercase within the Gen 3 text set.
+
+    The set carries lowercase é but no uppercase É, so a plain ``.upper()``
+    turns a legal character into an unencodable one. É folds back to é.
+    """
+    return text.upper().replace("É", "é")
+
+
+def _strip_pokemon_suffix(text: str) -> str:
+    """Drop a trailing " POKEMON", however the model spelled it.
+
+    The prompt writes "Pokémon" with the accent throughout, so that is the
+    likelier echo. Both spellings are 8 characters, so the fold is only used
+    to locate the suffix — the slice comes off the original text.
+    """
+    if text.upper().replace("É", "E").endswith(_POKEMON_SUFFIX):
+        return text[: -len(_POKEMON_SUFFIX)]
+    return text
+
+
+def _type_word(types) -> str:
+    """Primary type word for the category fallback.
+
+    An absent or empty ``types`` degrades to NORMAL rather than raising:
+    category is cosmetic, and _normalize's contract is that it repairs in
+    process. A genuinely typeless stage still fails later in export_ini,
+    where the type bytes actually matter.
+    """
+    if isinstance(types, list) and types and isinstance(types[0], str):
+        return types[0].upper()
+    return "NORMAL"
+
+
+def _normalize_category(raw, types) -> str:
+    """Uppercase/truncate/strip-trailing-"POKEMON" for the Pokédex category
+    noun; falls back to the primary type word when raw is missing, empty,
+    non-str, or cleans away to nothing. Truncation is immediate — unlike
+    ``name``, an over-long category never triggers a retry.
+
+    Whitespace is trimmed on the way in (rstrip only, so the leading space of
+    a bare " POKEMON" still reads as the suffix token) and again after
+    truncation, which would otherwise emit a dangling "GIANT SEED ".
+
+    The suffix comes off before charset filtering, not after: É is outside the
+    allowed set, so filtering first turned "SEED POKÉMON" into "SEED POKMON"
+    and the suffix stopped matching anything.
+    """
+    if not isinstance(raw, str):
+        return _type_word(types)
+    cleaned = _strip_pokemon_suffix(raw.rstrip())
+    cleaned = "".join(ch for ch in _gen3_upper(cleaned) if ch in _ALLOWED_NAME_CHARS)
+    result = cleaned.strip()[:_MAX_CATEGORY_LEN].strip()
+    return result or _type_word(types)
+
+
 def _size_defaults(stage: dict, mode: str, tier: str) -> tuple[int, int]:
     """Stage/tier-scaled (height_dm, weight_hg) fallbacks.
 
@@ -239,6 +302,7 @@ def _normalize(stages: list[dict], mode: str, tier: str) -> list[dict]:
     for stage in stages:
         stage["name"] = _repair_name(stage["name"])
         stage["abilities_gen3"] = _normalize_abilities_gen3(stage.get("abilities_gen3", []))
+        stage["category"] = _normalize_category(stage.get("category"), stage.get("types"))
 
         height_default, weight_default = _size_defaults(stage, mode, tier)
         stage["height_dm"] = _clamp_dimension(stage.get("height_dm"), 999, height_default)

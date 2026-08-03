@@ -264,3 +264,28 @@ def test_stats_json_still_excludes_llm_only_with_abilities_gen3(tmp_path):
     dirs = write_output([stage], base_dir=str(tmp_path))
     data = json.loads((dirs[0] / "stats.json").read_text())
     assert not (_LLM_ONLY & set(data.keys()))
+
+
+# ---------------------------------------------------------------------------
+# category in stats.json
+# ---------------------------------------------------------------------------
+
+def test_stats_json_persists_category(tmp_path):
+    stage = {**_STAGE_1, "category": "SEED"}
+    dirs = write_output([stage], base_dir=str(tmp_path))
+    data = json.loads((dirs[0] / "stats.json").read_text())
+    assert data["category"] == "SEED"
+
+
+def test_stats_json_defaults_missing_category_to_empty_string(tmp_path):
+    assert "category" not in _STAGE_1
+    dirs = write_output(_SINGLE, base_dir=str(tmp_path))
+    data = json.loads((dirs[0] / "stats.json").read_text())
+    assert data["category"] == ""
+
+
+def test_stats_json_still_excludes_llm_only_with_category(tmp_path):
+    stage = {**_STAGE_1, "category": "SEED"}
+    dirs = write_output([stage], base_dir=str(tmp_path))
+    data = json.loads((dirs[0] / "stats.json").read_text())
+    assert not (_LLM_ONLY & set(data.keys()))
