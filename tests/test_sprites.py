@@ -337,12 +337,26 @@ def _noisy_border_sprite():
     return img
 
 
+_OUTLINE = (20, 24, 40)   # dark silhouette edge, as the pixel-art LoRA renders it
+_BODY = (60, 120, 200)
+
+
 def _ring_sprite():
-    """96x96 RGB: a creature disc with a background-coloured hole punched in it."""
+    """96x96 RGB: a creature disc with a background-coloured hole punched in it.
+
+    Drawn with the dark silhouette outline a real render carries, around the
+    outside *and* around the hole — seeing through the sprite is exactly what
+    puts an outline there, and it is the only thing that distinguishes this
+    hole from ``_highlight_sprite``'s painted patch. Without it the two images
+    are structurally identical (a near-bg island surrounded by body colour) and
+    no rule could key one and spare the other.
+    """
     img = Image.new("RGB", (96, 96), (250, 250, 250))
     d = ImageDraw.Draw(img)
-    d.ellipse((20, 20, 76, 76), fill=(60, 120, 200))
-    d.ellipse((40, 40, 56, 56), fill=(250, 250, 250))  # enclosed background pocket
+    d.ellipse((20, 20, 76, 76), fill=_OUTLINE)
+    d.ellipse((23, 23, 73, 73), fill=_BODY)
+    d.ellipse((40, 40, 56, 56), fill=_OUTLINE)         # the hole's outline rim
+    d.ellipse((43, 43, 53, 53), fill=(250, 250, 250))  # enclosed background pocket
     return img
 
 
@@ -376,15 +390,167 @@ def test_flatten_keys_every_border_pixel_and_leaves_creature():
         assert px[point] == (200, 80, 60)
 
 
-def test_flatten_keys_enclosed_pocket_via_global_sweep():
+def test_flatten_keys_enclosed_pocket_via_connected_component_scan():
     img = _ring_sprite()
     out = _flatten_background_to_key(img)
     px = out.load()
-    # The enclosed hole the outer flood cannot reach is keyed by the sweep.
+    # The enclosed hole the outer flood cannot reach is keyed by the scan.
     for point in ((48, 48), (46, 48), (48, 46)):
         assert px[point] == _KEY_COLOR
     # The creature ring itself is unchanged.
     assert px[28, 48] == (60, 120, 200)
+
+
+def _highlight_sprite(box=(44, 44, 52, 52)):
+    """96x96 RGB: a creature disc with a near-bg detail patch painted on it.
+
+    Unlike ``_ring_sprite``'s hole, this patch is not a background pocket — it's
+    a same-coloured detail (a shield highlight, a white belly patch) that just
+    happens to be within ``_KEY_TOLERANCE`` of the background colour. It sits on
+    body colour with no outline around it, because you cannot see through it.
+    """
+    img = Image.new("RGB", (96, 96), (250, 250, 250))
+    d = ImageDraw.Draw(img)
+    d.ellipse((20, 20, 76, 76), fill=_OUTLINE)
+    d.ellipse((23, 23, 73, 73), fill=_BODY)
+    d.rectangle(box, fill=(245, 245, 245))  # near-bg detail, not a pocket
+    return img
+
+
+def test_flatten_leaves_isolated_near_background_detail_patch_untouched():
+    img = _highlight_sprite()
+    out = _flatten_background_to_key(img)
+    px = out.load()
+    # The highlight is colour-close to bg, but it is walled by body colour
+    # rather than by the silhouette outline, so it must survive untouched.
+    for point in ((48, 48), (46, 48), (48, 46)):
+        assert px[point] == (245, 245, 245)
+    # The creature disc itself is unchanged.
+    assert px[28, 48] == _BODY
+
+
+def test_flatten_leaves_large_near_background_detail_patch_untouched():
+    """A belly patch is spared however big it is — size does not decide this.
+
+    Regression test: gating on a minimum area keyed anything past the gate, so
+    a patch this size came out as a hole punched through the creature.
+    """
+    img = _highlight_sprite(box=(38, 38, 58, 58))  # 21x21, ~4.8% of the image
+    out = _flatten_background_to_key(img)
+    px = out.load()
+    for point in ((48, 48), (40, 40), (56, 56)):
+        assert px[point] == (245, 245, 245)
+
+
+def _small_gap_sprite():
+    """96x96 RGB: an outlined creature disc with a tiny see-through gap in it."""
+    img = Image.new("RGB", (96, 96), (250, 250, 250))
+    d = ImageDraw.Draw(img)
+    d.ellipse((10, 10, 86, 86), fill=_OUTLINE)
+    d.ellipse((13, 13, 83, 83), fill=_BODY)
+    d.ellipse((43, 43, 53, 53), fill=_OUTLINE)
+    d.ellipse((45, 45, 51, 51), fill=(250, 250, 250))  # 7x7, ~0.5% of the image
+    return img
+
+
+def test_flatten_keys_small_enclosed_pocket():
+    """A real gap is keyed however small — size does not decide this either.
+
+    Regression test: gating on a minimum area left gaps under the gate
+    background-coloured, so a between-the-legs gap shipped as a white wedge.
+    """
+    out = _flatten_background_to_key(_small_gap_sprite())
+    px = out.load()
+    assert px[48, 48] == _KEY_COLOR
+    assert px[28, 48] == _BODY  # the creature body is unchanged
+
+
+def _open_notch_sprite():
+    """96x96 RGB: a U-shaped creature whose notch opens onto the top border.
+
+    The notch is background-coloured, and the corner flood fill cannot reach it
+    (the creature walls it off from every corner) — but it runs to the image
+    border, so it is outer background seen between the walls, not creature.
+    """
+    img = Image.new("RGB", (96, 96), (250, 250, 250))
+    d = ImageDraw.Draw(img)
+    d.rectangle((30, 0, 37, 50), fill=_BODY)   # left wall, touches top border
+    d.rectangle((58, 0, 65, 50), fill=_BODY)   # right wall, touches top border
+    d.rectangle((30, 44, 65, 50), fill=_BODY)  # floor
+    return img
+
+
+def test_flatten_keys_border_touching_background_component():
+    """Background that reaches the image edge is keyed even if the flood misses it.
+
+    Regression test: treating "touches the border" as *disqualifying* left this
+    notch unkeyed, so a leg gap opening onto an edge shipped opaque.
+    """
+    img = _open_notch_sprite()
+    out = _flatten_background_to_key(img)
+    px = out.load()
+    for point in ((48, 0), (48, 20), (40, 40)):
+        assert px[point] == _KEY_COLOR
+    # Outside the walls, the corner flood still keys the outer background.
+    assert px[10, 20] == _KEY_COLOR
+    assert px[90, 20] == _KEY_COLOR
+    # The walls themselves survive.
+    assert px[34, 20] == _BODY
+
+
+def _dark_creature(gap: bool):
+    """96x96 RGB: a near-black creature with either a see-through gap or a highlight.
+
+    The hard case for telling outline from body by brightness: the whole
+    creature is dark, so any *absolute* dark-cutoff calls the body outline too.
+    """
+    img = Image.new("RGB", (96, 96), (250, 250, 250))
+    d = ImageDraw.Draw(img)
+    d.ellipse((10, 10, 86, 86), fill=(8, 8, 12))     # outline
+    d.ellipse((13, 13, 83, 83), fill=(34, 30, 46))   # near-black body
+    if gap:
+        d.ellipse((42, 42, 54, 54), fill=(8, 8, 12))
+        d.ellipse((45, 45, 51, 51), fill=(250, 250, 250))
+    else:
+        d.rectangle((42, 42, 54, 54), fill=(245, 245, 245))
+    return img
+
+
+def test_flatten_keys_see_through_gap_in_a_near_black_creature():
+    out = _flatten_background_to_key(_dark_creature(gap=True))
+    assert out.load()[48, 48] == _KEY_COLOR
+
+
+def test_flatten_leaves_highlight_on_a_near_black_creature_untouched():
+    """A white marking on a black body is detail, not a pocket.
+
+    The outline cutoff scales with the creature's own mean luma for this: a
+    fixed margin below the mean goes negative on a body this dark, at which
+    point nothing counts as outline and every real gap would ship opaque.
+    """
+    out = _flatten_background_to_key(_dark_creature(gap=False))
+    assert out.load()[48, 48] == (245, 245, 245)
+
+
+def test_flatten_keys_background_fleck_the_flood_cannot_cross():
+    """Open-background pixels the stage-1 flood steps over are still keyed.
+
+    ``ImageDraw.floodfill`` thresholds on Manhattan distance and walks
+    4-connected, while the stage-2 scan uses Euclidean ``_rgb_distance`` and
+    8-connectivity, so pixels like ``(230, 230, 250)`` against a ``(250, 250,
+    250)`` background are inside one metric and outside the other. Regression
+    test: such flecks survived into the sprite, inflating its content bbox and
+    misaligning the frame-2 recentre.
+    """
+    img = Image.new("RGB", (96, 96), (250, 250, 250))
+    d = ImageDraw.Draw(img)
+    d.ellipse((30, 30, 66, 66), fill=_BODY)
+    d.point((12, 12), fill=(230, 230, 250))  # euclid 28.3 (in), manhattan 40 (out)
+    d.point((84, 70), fill=(230, 230, 250))
+    out = _flatten_background_to_key(img)
+    px = out.load()
+    assert px[12, 12] == _KEY_COLOR
+    assert px[84, 70] == _KEY_COLOR
 
 
 def test_flatten_does_not_mutate_input():
