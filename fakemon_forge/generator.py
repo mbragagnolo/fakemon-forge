@@ -42,7 +42,8 @@ _BST_TARGETS = {
 _SYSTEM_PROMPT = f"""\
 You are a Pokémon game designer. Generate Fakemon data as a JSON array.
 Each element represents one evolutionary stage and must have exactly these fields:
-  name          – portmanteau-style name (string)
+  name          – portmanteau-style name (string); max 10 characters, using only
+    letters, digits, spaces, é, ♂, ♀ and the punctuation . , ' - … ! ? / ( ) " : ;
   stage         – stage number as an integer (1, 2, or 3)
   types         – list of 1 or 2 type strings, e.g. ["Fire"] or ["Water", "Flying"]
   category      – Pokédex category noun in caps, max 11 characters, e.g. "SEED",
@@ -131,7 +132,9 @@ def _name_violations(stages: list[dict]) -> tuple[list[str], list[str]]:
     too_long = []
     illegal = []
     for stage in stages:
-        name = stage["name"]
+        # A present-but-non-string name is repaired via str(), not raised on —
+        # so it has to be measured the same way here or the two disagree.
+        name = str(stage["name"])
         if len(name) > _MAX_NAME_LEN:
             too_long.append(name)
         if any(ch not in _ALLOWED_NAME_CHARS for ch in name):
@@ -150,13 +153,13 @@ def _corrective_message(too_long: list[str], illegal: list[str]) -> str:
         parts.append(
             "These names contain characters that can't be used: " + ", ".join(illegal) +
             ". Return the full array again using only letters, numbers, spaces, "
-            "and standard punctuation."
+            "é, ♂, ♀ and the punctuation . , ' - … ! ? / ( ) \" : ;"
         )
     return " ".join(parts)
 
 
-def _repair_name(name: str) -> str:
-    cleaned = "".join(ch for ch in name if ch in _ALLOWED_NAME_CHARS)
+def _repair_name(name) -> str:
+    cleaned = "".join(ch for ch in str(name) if ch in _ALLOWED_NAME_CHARS)
     return cleaned[:_MAX_NAME_LEN]
 
 
@@ -174,13 +177,22 @@ _SIZE_DEFAULTS_BY_TIER = {
 }
 
 
-def _normalize_abilities_gen3(raw: list) -> list[str]:
+def _normalize_abilities_gen3(raw) -> list[str]:
     """Drop entries outside the Gen 3 pool, canonicalize spelling, collapse
     duplicates (by normalized form), then cap at 2 — in that order, so a
-    dedup-worthy duplicate can't crowd out a later distinct valid entry."""
+    dedup-worthy duplicate can't crowd out a later distinct valid entry.
+
+    A non-list value, or a non-string entry inside the list, is treated as
+    absent rather than raised on — the same reading ``export_ini`` applies to
+    the persisted field, so both halves agree on what malformed looks like.
+    """
+    if not isinstance(raw, list):
+        return []
     result = []
     seen = set()
     for entry in raw:
+        if not isinstance(entry, str):
+            continue
         key = _normalize_ability_name(entry)
         canonical = _ABILITY_LOOKUP.get(key)
         if canonical is None or key in seen:
@@ -190,7 +202,44 @@ def _normalize_abilities_gen3(raw: list) -> list[str]:
     return result[:2]
 
 
-def _normalize_category(raw, types: list[str]) -> str:
+_POKEMON_SUFFIX = " POKEMON"
+
+
+def _gen3_upper(text: str) -> str:
+    """Uppercase within the Gen 3 text set.
+
+    The set carries lowercase é but no uppercase É, so a plain ``.upper()``
+    turns a legal character into an unencodable one. É folds back to é.
+    """
+    return text.upper().replace("É", "é")
+
+
+def _strip_pokemon_suffix(text: str) -> str:
+    """Drop a trailing " POKEMON", however the model spelled it.
+
+    The prompt writes "Pokémon" with the accent throughout, so that is the
+    likelier echo. Both spellings are 8 characters, so the fold is only used
+    to locate the suffix — the slice comes off the original text.
+    """
+    if text.upper().replace("É", "E").endswith(_POKEMON_SUFFIX):
+        return text[: -len(_POKEMON_SUFFIX)]
+    return text
+
+
+def _type_word(types) -> str:
+    """Primary type word for the category fallback.
+
+    An absent or empty ``types`` degrades to NORMAL rather than raising:
+    category is cosmetic, and _normalize's contract is that it repairs in
+    process. A genuinely typeless stage still fails later in export_ini,
+    where the type bytes actually matter.
+    """
+    if isinstance(types, list) and types and isinstance(types[0], str):
+        return types[0].upper()
+    return "NORMAL"
+
+
+def _normalize_category(raw, types) -> str:
     """Uppercase/truncate/strip-trailing-"POKEMON" for the Pokédex category
     noun; falls back to the primary type word when raw is missing, empty,
     non-str, or cleans away to nothing. Truncation is immediate — unlike
@@ -199,14 +248,48 @@ def _normalize_category(raw, types: list[str]) -> str:
     Whitespace is trimmed on the way in (rstrip only, so the leading space of
     a bare " POKEMON" still reads as the suffix token) and again after
     truncation, which would otherwise emit a dangling "GIANT SEED ".
+
+    The suffix comes off before charset filtering, not after: É is outside the
+    allowed set, so filtering first turned "SEED POKÉMON" into "SEED POKMON"
+    and the suffix stopped matching anything.
     """
     if not isinstance(raw, str):
-        return types[0].upper()
-    cleaned = "".join(ch for ch in raw if ch in _ALLOWED_NAME_CHARS).rstrip()
-    if cleaned.upper().endswith(" POKEMON"):
-        cleaned = cleaned[: -len(" POKEMON")]
-    result = cleaned.upper().strip()[:_MAX_CATEGORY_LEN].strip()
-    return result or types[0].upper()
+        return _type_word(types)
+    cleaned = _strip_pokemon_suffix(raw.rstrip())
+    cleaned = "".join(ch for ch in _gen3_upper(cleaned) if ch in _ALLOWED_NAME_CHARS)
+    result = cleaned.strip()[:_MAX_CATEGORY_LEN].strip()
+    return result or _type_word(types)
+
+
+def _size_defaults(stage: dict, mode: str, tier: str) -> tuple[int, int]:
+    """Stage/tier-scaled (height_dm, weight_hg) fallbacks.
+
+    An off-spec stage number — missing, out of range, or a JSON string — falls
+    through to the tier table rather than raising KeyError, matching how
+    ``main.py`` already reads the same field for its sprite size fraction.
+    """
+    if mode == "line":
+        try:
+            return _SIZE_DEFAULTS_BY_LINE_STAGE[int(stage.get("stage"))]
+        except (TypeError, ValueError, KeyError):
+            pass
+    return _SIZE_DEFAULTS_BY_TIER.get(tier, _SIZE_DEFAULTS_BY_TIER["standard"])
+
+
+def _clamp_dimension(value, upper: int, fallback: int) -> int:
+    """Coerce to int and clamp to [1, upper]; unusable values take the default.
+
+    Both fields are 2-byte unsigned downstream, so a float would be as
+    unencodable as a string — the int() coercion is part of the contract, not
+    just defensive typing.
+    """
+    if isinstance(value, bool):
+        return fallback
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        return fallback
+    return max(1, min(upper, value))
 
 
 def _normalize(stages: list[dict], mode: str, tier: str) -> list[dict]:
@@ -219,20 +302,11 @@ def _normalize(stages: list[dict], mode: str, tier: str) -> list[dict]:
     for stage in stages:
         stage["name"] = _repair_name(stage["name"])
         stage["abilities_gen3"] = _normalize_abilities_gen3(stage.get("abilities_gen3", []))
-        stage["category"] = _normalize_category(stage.get("category"), stage["types"])
+        stage["category"] = _normalize_category(stage.get("category"), stage.get("types"))
 
-        if "height_dm" not in stage or "weight_hg" not in stage:
-            if mode == "line":
-                height_default, weight_default = _SIZE_DEFAULTS_BY_LINE_STAGE[stage["stage"]]
-            else:
-                height_default, weight_default = _SIZE_DEFAULTS_BY_TIER[tier]
-            if "height_dm" not in stage:
-                stage["height_dm"] = height_default
-            if "weight_hg" not in stage:
-                stage["weight_hg"] = weight_default
-
-        stage["height_dm"] = max(1, min(999, stage["height_dm"]))
-        stage["weight_hg"] = max(1, min(9999, stage["weight_hg"]))
+        height_default, weight_default = _size_defaults(stage, mode, tier)
+        stage["height_dm"] = _clamp_dimension(stage.get("height_dm"), 999, height_default)
+        stage["weight_hg"] = _clamp_dimension(stage.get("weight_hg"), 9999, weight_default)
     return stages
 
 
@@ -277,6 +351,10 @@ def generate_fakemon(
 
         too_long, illegal = _name_violations(stages)
         if (too_long or illegal) and attempt == 0:
+            # The offending array has to be in the conversation for "return the
+            # full array again" to mean anything — without it the model rebuilds
+            # the line from scratch and the already-valid sibling names change.
+            messages.append({"role": "assistant", "content": raw})
             messages.append({"role": "user", "content": _corrective_message(too_long, illegal)})
             continue
 
