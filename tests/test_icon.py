@@ -11,7 +11,7 @@ import pytest
 from PIL import Image, ImageDraw
 
 from fakemon_forge.sprites import postprocess
-from fakemon_forge.icon import generate_icon, _ICON_BG_COLOR
+from fakemon_forge.icon import generate_icon, _ICON_BG_COLOR, _build_frame1
 
 _TEAL = (96, 152, 128)
 
@@ -84,6 +84,19 @@ def test_background_color_is_teal(tmp_path):
     # And it lives on palette index 0 when saved as P-mode.
     if img.mode == "P":
         assert tuple(img.getpalette()[0:3]) == _TEAL
+
+
+def test_build_frame1_is_16_color_opaque_32x32(tmp_path):
+    # _build_frame1 downscales via k_centroid (not LANCZOS) — its output
+    # contract (size, opacity via P-mode, <= 16 colours) must be unchanged.
+    src = _sprite_fixture(tmp_path)
+    source = Image.open(str(src))
+    frame1 = _build_frame1(source)
+    assert frame1.mode == "P"
+    assert frame1.size == (32, 32)
+    assert "transparency" not in frame1.info
+    rgb = frame1.convert("RGB")
+    assert len(set(rgb.get_flattened_data())) <= 16
 
 
 def test_frame2_is_frame1_shifted_down_one_pixel(tmp_path):
