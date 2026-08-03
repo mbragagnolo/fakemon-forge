@@ -556,3 +556,313 @@ def test_system_prompt_mentions_levitates():
 
 def test_system_prompt_levitates_defines_never_touches_ground():
     assert "ground" in _SYSTEM_PROMPT.lower()
+
+
+# ---------------------------------------------------------------------------
+# height_dm / weight_hg in system prompt
+# ---------------------------------------------------------------------------
+
+def test_system_prompt_mentions_height_dm():
+    assert "height_dm" in _SYSTEM_PROMPT
+
+
+def test_system_prompt_mentions_weight_hg():
+    assert "weight_hg" in _SYSTEM_PROMPT
+
+
+def test_system_prompt_has_scale_anchors():
+    assert "rodent" in _SYSTEM_PROMPT.lower()
+    assert "dragon" in _SYSTEM_PROMPT.lower()
+
+
+@pytest.mark.parametrize(
+    "anchor", ["3 dm", "35 hg", "10 dm", "300 hg", "20 dm", "2100 hg"]
+)
+def test_system_prompt_scale_anchors_are_calibrated(anchor):
+    assert anchor in _SYSTEM_PROMPT
+
+
+def test_system_prompt_requires_growth_across_a_line():
+    assert "grow across an evolutionary line" in _SYSTEM_PROMPT
+
+
+# ---------------------------------------------------------------------------
+# height_dm / weight_hg defaulting in _normalize
+# ---------------------------------------------------------------------------
+
+def test_normalize_defaults_line_stage1_height_and_weight():
+    stage = {**_STAGE_1}
+    stage.pop("height_dm", None)
+    stage.pop("weight_hg", None)
+    result = _normalize([stage], "line", "standard")
+    assert result[0]["height_dm"] == 5
+    assert result[0]["weight_hg"] == 30
+
+
+def test_normalize_defaults_line_stage2_height_and_weight():
+    stage = {**_STAGE_2}
+    stage.pop("height_dm", None)
+    stage.pop("weight_hg", None)
+    result = _normalize([stage], "line", "standard")
+    assert result[0]["height_dm"] == 10
+    assert result[0]["weight_hg"] == 150
+
+
+def test_normalize_defaults_line_stage3_height_and_weight():
+    stage = {**_STAGE_3}
+    stage.pop("height_dm", None)
+    stage.pop("weight_hg", None)
+    result = _normalize([stage], "line", "standard")
+    assert result[0]["height_dm"] == 17
+    assert result[0]["weight_hg"] == 600
+
+
+def test_normalize_defaults_single_standard_uses_stage2_values():
+    stage = {**_STAGE_1}
+    stage.pop("height_dm", None)
+    stage.pop("weight_hg", None)
+    result = _normalize([stage], "single", "standard")
+    assert result[0]["height_dm"] == 10
+    assert result[0]["weight_hg"] == 150
+
+
+@pytest.mark.parametrize("tier", ["pseudo", "legendary", "mythical"])
+def test_normalize_defaults_single_big_tiers_use_stage3_values(tier):
+    stage = {**_STAGE_1}
+    stage.pop("height_dm", None)
+    stage.pop("weight_hg", None)
+    result = _normalize([stage], "single", tier)
+    assert result[0]["height_dm"] == 17
+    assert result[0]["weight_hg"] == 600
+
+
+@pytest.mark.parametrize("tier", ["standard", "pseudo", "legendary", "mythical"])
+def test_normalize_line_defaults_ignore_tier(tier):
+    """In line mode the table is keyed off stage["stage"] alone, never tier."""
+    stage = {**_STAGE_1}
+    stage.pop("height_dm", None)
+    stage.pop("weight_hg", None)
+    result = _normalize([stage], "line", tier)
+    assert result[0]["height_dm"] == 5
+    assert result[0]["weight_hg"] == 30
+
+
+def test_normalize_single_defaults_ignore_stage_number():
+    """A single standard form is a standalone species, not a stage-1 juvenile."""
+    stage = {**_STAGE_1, "stage": 1}
+    stage.pop("height_dm", None)
+    stage.pop("weight_hg", None)
+    result = _normalize([stage], "single", "standard")
+    assert (result[0]["height_dm"], result[0]["weight_hg"]) == (10, 150)
+
+
+def test_normalize_defaults_only_missing_field():
+    """If only one of the two keys is present, only the missing one is defaulted."""
+    stage = {**_STAGE_1, "height_dm": 42}
+    stage.pop("weight_hg", None)
+    result = _normalize([stage], "line", "standard")
+    assert result[0]["height_dm"] == 42
+    assert result[0]["weight_hg"] == 30
+
+
+# ---------------------------------------------------------------------------
+# height_dm / weight_hg clamping in _normalize
+# ---------------------------------------------------------------------------
+
+def test_normalize_clamps_zero_height_to_one():
+    stage = {**_STAGE_1, "height_dm": 0, "weight_hg": 30}
+    result = _normalize([stage], "line", "standard")
+    assert result[0]["height_dm"] == 1
+
+
+def test_normalize_clamps_zero_weight_to_one():
+    stage = {**_STAGE_1, "height_dm": 5, "weight_hg": 0}
+    result = _normalize([stage], "line", "standard")
+    assert result[0]["weight_hg"] == 1
+
+
+def test_normalize_clamps_negative_height_to_one():
+    stage = {**_STAGE_1, "height_dm": -10, "weight_hg": 30}
+    result = _normalize([stage], "line", "standard")
+    assert result[0]["height_dm"] == 1
+
+
+def test_normalize_clamps_huge_height_to_999():
+    stage = {**_STAGE_1, "height_dm": 50000, "weight_hg": 30}
+    result = _normalize([stage], "line", "standard")
+    assert result[0]["height_dm"] == 999
+
+
+def test_normalize_clamps_huge_weight_to_9999():
+    stage = {**_STAGE_1, "height_dm": 5, "weight_hg": 999999}
+    result = _normalize([stage], "line", "standard")
+    assert result[0]["weight_hg"] == 9999
+
+
+def test_normalize_clamps_negative_weight_to_one():
+    stage = {**_STAGE_1, "height_dm": 5, "weight_hg": -250}
+    result = _normalize([stage], "line", "standard")
+    assert result[0]["weight_hg"] == 1
+
+
+def test_normalize_present_in_range_values_pass_through():
+    stage = {**_STAGE_1, "height_dm": 8, "weight_hg": 77}
+    result = _normalize([stage], "line", "standard")
+    assert result[0]["height_dm"] == 8
+    assert result[0]["weight_hg"] == 77
+
+
+def test_normalize_lower_bound_values_pass_through():
+    stage = {**_STAGE_1, "height_dm": 1, "weight_hg": 1}
+    result = _normalize([stage], "line", "standard")
+    assert (result[0]["height_dm"], result[0]["weight_hg"]) == (1, 1)
+
+
+def test_normalize_upper_bound_values_pass_through():
+    """The bounds are inclusive — 999/9999 must not be clamped down."""
+    stage = {**_STAGE_1, "height_dm": 999, "weight_hg": 9999}
+    result = _normalize([stage], "line", "standard")
+    assert (result[0]["height_dm"], result[0]["weight_hg"]) == (999, 9999)
+
+
+def test_normalize_clamps_one_past_each_upper_bound():
+    stage = {**_STAGE_1, "height_dm": 1000, "weight_hg": 10000}
+    result = _normalize([stage], "line", "standard")
+    assert (result[0]["height_dm"], result[0]["weight_hg"]) == (999, 9999)
+
+
+def test_normalize_is_idempotent_for_height_and_weight():
+    stage = {**_STAGE_1, "height_dm": 50000, "weight_hg": 0}
+    once = _normalize([stage], "line", "standard")[0]
+    twice = _normalize([once], "line", "standard")[0]
+    assert (twice["height_dm"], twice["weight_hg"]) == (999, 1)
+
+
+def test_normalize_height_weight_result_from_generate_fakemon():
+    stage = {**_STAGE_1}
+    stage.pop("height_dm", None)
+    stage.pop("weight_hg", None)
+    client = _make_client(json.dumps([stage]))
+    result = generate_fakemon("fire lizard", "single", tier="standard", client=client)
+    assert result[0]["height_dm"] == 10
+    assert result[0]["weight_hg"] == 150
+
+
+def test_generate_fakemon_line_defaults_every_stage():
+    client = _make_client(json.dumps(_LINE))
+    result = generate_fakemon("fire lizard", "line", client=client)
+    assert [(s["height_dm"], s["weight_hg"]) for s in result] == [
+        (5, 30), (10, 150), (17, 600),
+    ]
+
+
+def test_generate_fakemon_clamps_model_supplied_values():
+    stages = [
+        {**_STAGE_1, "height_dm": 0, "weight_hg": 0},
+        {**_STAGE_2, "height_dm": 12, "weight_hg": 400},
+        {**_STAGE_3, "height_dm": 50000, "weight_hg": 999999},
+    ]
+    client = _make_client(json.dumps(stages))
+    result = generate_fakemon("fire lizard", "line", client=client)
+    assert [(s["height_dm"], s["weight_hg"]) for s in result] == [
+        (1, 1), (12, 400), (999, 9999),
+    ]
+
+
+def test_generate_fakemon_always_emits_in_range_height_and_weight():
+    """The output contract, independent of what the model returned."""
+    stages = [
+        {**_STAGE_1, "height_dm": -1},
+        {**_STAGE_2, "weight_hg": 65535},
+        {**_STAGE_3},
+    ]
+    client = _make_client(json.dumps(stages))
+    for stage in generate_fakemon("fire lizard", "line", client=client):
+        assert isinstance(stage["height_dm"], int) and 1 <= stage["height_dm"] <= 999
+        assert isinstance(stage["weight_hg"], int) and 1 <= stage["weight_hg"] <= 9999
+
+
+# ---------------------------------------------------------------------------
+# Off-spec stage numbers and dimension types degrade instead of raising
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("stage_no", [4, 0, -1, None, "one", [1], {"stage": 1}])
+def test_off_spec_stage_number_falls_back_to_the_tier_table(stage_no):
+    """A hallucinated stage number must not KeyError out of _normalize, which
+    runs outside generate_fakemon's try/except."""
+    stage = {**_STAGE_1, "stage": stage_no}
+    stage.pop("height_dm", None)
+    stage.pop("weight_hg", None)
+    result = _normalize([stage], "line", "standard")
+    assert (result[0]["height_dm"], result[0]["weight_hg"]) == (10, 150)
+
+
+@pytest.mark.parametrize("stage_no", ["3", 3.0])
+def test_coercible_stage_number_recovers_the_line_table(stage_no):
+    """A stage number the model wrote as a string still resolves to its own
+    row — falling back to the tier table there would lose real information.
+    Stage 3 is deliberately chosen: its (17, 600) differs from the standard
+    tier fallback, so the assertion can't pass by coincidence."""
+    stage = {**_STAGE_1, "stage": stage_no}
+    stage.pop("height_dm", None)
+    stage.pop("weight_hg", None)
+    result = _normalize([stage], "line", "standard")
+    assert (result[0]["height_dm"], result[0]["weight_hg"]) == (17, 600)
+
+
+def test_missing_stage_key_falls_back_to_the_tier_table():
+    stage = {k: v for k, v in _STAGE_1.items() if k != "stage"}
+    result = _normalize([stage], "line", "pseudo")
+    assert (result[0]["height_dm"], result[0]["weight_hg"]) == (17, 600)
+
+
+def test_off_spec_stage_number_still_uses_the_line_table_when_valid():
+    """The fallback must not swallow the stage table for well-formed input."""
+    stage = {**_STAGE_1, "stage": 3}
+    stage.pop("height_dm", None)
+    stage.pop("weight_hg", None)
+    result = _normalize([stage], "line", "standard")
+    assert (result[0]["height_dm"], result[0]["weight_hg"]) == (17, 600)
+
+
+@pytest.mark.parametrize("value, expected", [
+    ("12", 12),        # JSON string instead of a number
+    (7.8, 7),          # float truncates rather than persisting a non-integer
+    (True, 5),         # bool is not a measurement
+    (None, 5),
+    ("tall", 5),
+    ([7], 5),
+    ({"dm": 7}, 5),
+])
+def test_non_integer_height_degrades_to_default_or_coerces(value, expected):
+    stage = {**_STAGE_1, "height_dm": value, "weight_hg": 30}
+    result = _normalize([stage], "line", "standard")
+    assert result[0]["height_dm"] == expected
+    assert isinstance(result[0]["height_dm"], int)
+
+
+@pytest.mark.parametrize("value, expected", [
+    ("400", 400),
+    (149.9, 149),
+    ("heavy", 30),
+    (None, 30),
+])
+def test_non_integer_weight_degrades_to_default_or_coerces(value, expected):
+    stage = {**_STAGE_1, "height_dm": 5, "weight_hg": value}
+    result = _normalize([stage], "line", "standard")
+    assert result[0]["weight_hg"] == expected
+    assert isinstance(result[0]["weight_hg"], int)
+
+
+def test_coerced_string_dimension_is_still_clamped():
+    """Coercion happens before the bounds check, not instead of it."""
+    stage = {**_STAGE_1, "height_dm": "50000", "weight_hg": "0"}
+    result = _normalize([stage], "line", "standard")
+    assert (result[0]["height_dm"], result[0]["weight_hg"]) == (999, 1)
+
+
+def test_generate_fakemon_survives_fully_off_spec_sizes():
+    stages = [{**_STAGE_1, "stage": 9, "height_dm": "big", "weight_hg": None}]
+    client = _make_client(json.dumps(stages))
+    result = generate_fakemon("fire lizard", "line", client=client)
+    assert (result[0]["height_dm"], result[0]["weight_hg"]) == (10, 150)

@@ -34,6 +34,11 @@ Each element represents one evolutionary stage and must have exactly these field
   pokedex_entry – 2 sentence flavour text (string)
   sprite_prompt – visual description for pixel-art sprite generation; max 75 words, lead with the creature's most distinctive shape and colour features (string)
   levitates     – boolean; true only if the creature levitates, is bodiless/gaseous/amorphous, or otherwise never touches the ground (e.g. floating orbs, ghosts, cloud/gas creatures); otherwise false
+  height_dm – height in decimetres (integer).
+  weight_hg – weight in hectograms (integer).
+    For scale: a small rodent is ~3 dm / 35 hg, a mid-size quadruped
+    ~10 dm / 300 hg, a large final-stage dragon ~20 dm / 2100 hg.
+    Values must grow across an evolutionary line.
 
 All stage names and sprite prompts must share a clear thematic throughline.
 Return ONLY the JSON array. No markdown fences, no explanation, no extra keys.\
@@ -130,14 +135,64 @@ def _repair_name(name) -> str:
     return cleaned[:_MAX_NAME_LEN]
 
 
+_SIZE_DEFAULTS_BY_LINE_STAGE = {
+    1: (5, 30),
+    2: (10, 150),
+    3: (17, 600),
+}
+
+_SIZE_DEFAULTS_BY_TIER = {
+    "standard": (10, 150),
+    "pseudo": (17, 600),
+    "legendary": (17, 600),
+    "mythical": (17, 600),
+}
+
+
+def _size_defaults(stage: dict, mode: str, tier: str) -> tuple[int, int]:
+    """Stage/tier-scaled (height_dm, weight_hg) fallbacks.
+
+    An off-spec stage number — missing, out of range, or a JSON string — falls
+    through to the tier table rather than raising KeyError, matching how
+    ``main.py`` already reads the same field for its sprite size fraction.
+    """
+    if mode == "line":
+        try:
+            return _SIZE_DEFAULTS_BY_LINE_STAGE[int(stage.get("stage"))]
+        except (TypeError, ValueError, KeyError):
+            pass
+    return _SIZE_DEFAULTS_BY_TIER.get(tier, _SIZE_DEFAULTS_BY_TIER["standard"])
+
+
+def _clamp_dimension(value, upper: int, fallback: int) -> int:
+    """Coerce to int and clamp to [1, upper]; unusable values take the default.
+
+    Both fields are 2-byte unsigned downstream, so a float would be as
+    unencodable as a string — the int() coercion is part of the contract, not
+    just defensive typing.
+    """
+    if isinstance(value, bool):
+        return fallback
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        return fallback
+    return max(1, min(upper, value))
+
+
 def _normalize(stages: list[dict], mode: str, tier: str) -> list[dict]:
-    """Post-parse cleanup pass. Currently enforces the name contract only.
+    """Post-parse cleanup pass: enforces the name contract, and defaults/clamps
+    height_dm and weight_hg.
 
     Repair is idempotent: a name already inside the Gen 3 contract comes out
     of ``_repair_name`` unchanged, so valid names pass through untouched.
     """
     for stage in stages:
         stage["name"] = _repair_name(stage["name"])
+
+        height_default, weight_default = _size_defaults(stage, mode, tier)
+        stage["height_dm"] = _clamp_dimension(stage.get("height_dm"), 999, height_default)
+        stage["weight_hg"] = _clamp_dimension(stage.get("weight_hg"), 9999, weight_default)
     return stages
 
 
