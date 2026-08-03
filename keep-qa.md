@@ -1,0 +1,7 @@
+- [ ] Read README "How it works" step 3 and confirm it matches `fakemon_forge/sprites.py`: `Laxhar/noobai-XL-1.1`, LoRA fused at `_LORA_SCALE = 0.7`, one `1536×768` (`_PAIR_WIDTH` × `_GEN_SIZE`) txt2img call, content-aware split with reroll + midline fallback.
+- [ ] Confirm the README no longer claims the front/back halves are k-centroid downscaled — they stay at `_SPRITE_SIZE = 768`; k-centroid only runs for the 64px spritesheet cells and the 32px icon.
+- [ ] On a machine with the ML stack, run a single-form generation and check `output/<Name>/stage1_<Name>/` actually contains `sprite.png` and `sprite_back.png` at 768×768 and `spritesheet.png` with 64px cells, as the Outputs tree now says.
+- [ ] Temporarily rename `models/loras/pkspbf_nb_v1.safetensors` and confirm the run stops with `Error: failed to load model: ...`, matching the LoRA-weights section.
+- [ ] Follow the "LoRA weights" steps from scratch (Civitai 378602 → `models/loras/pkspbf_nb_v1.safetensors`) and confirm the download link and filename are right and that `models/` stays untracked.
+- [ ] Skim the license note: it should read as scoped to the model weights only, with the project's own LICENSE untouched.
+- [ ] Re-run the sweep — `git grep -in -e dreamshaper -e pksp768 -e compel -e _TYPE_TAGS -e _encode_prompt -e lambdalabs/sd-pokemon-diffusers -e DPMSolverMultistepScheduler` — and confirm the only hits are in `research-sprite-generation.md`, now under its "Historical document" banner.

@@ -6,7 +6,7 @@ A CLI tool that turns a child's drawing and/or a text description into a complet
 
 1. **Vision** (if `--image` provided) — the drawing is sent to a Mistral vision model, which extracts a plain-English description of the creature's appearance, colours, and features.
 2. **LLM generation** — Mistral Large invents the Fakemon: name, type(s), ability, base stats, Pokédex entry, and a visual prompt for each stage.
-3. **Sprite generation** — NoobAI-XL 1.1 with the Pokemon Sprite XL PixelArt back&front LoRA fused in renders a single 1536×768 canvas in one `txt2img` call, front sprite on the left half and back sprite on the right. The canvas is split content-aware into the two halves, each of which is downscaled to the final sprite size with k-centroid downscaling and palette-quantised to 16 colours to approximate a GBA sprite.
+3. **Sprite generation** — NoobAI-XL 1.1, with the Pokemon Sprite XL PixelArt back&front LoRA fused in at scale 0.7, renders a single 1536×768 canvas in one `txt2img` call: the front view on the left half, the back view on the right. The canvas is split content-aware into its two halves (rerolling once, then falling back to a naive midline cut, if no clean split column is found), and each half is palette-quantised to 16 colours under a Gen-3 palette contract to approximate a GBA sprite. The halves are kept at their native 768×768 render size; the drop to GBA pixel scale happens where a small image is actually needed — the 64px spritesheet cells and the 32px party icon — and uses k-centroid downscaling, which gives each output pixel its source tile's dominant colour rather than blending new colours into the palette.
 4. **Output** — stats, entry text, and sprite are written to an `output/` folder tree.
 
 ## Outputs
@@ -15,7 +15,10 @@ A CLI tool that turns a child's drawing and/or a text description into a complet
 output/
   <Name>/
     stage1_<Name>/
-      sprite.png      # 96×96 GBA-style pixel art
+      sprite.png      # 768×768 front view, 16-colour GBA-style pixel art
+      sprite_back.png # 768×768 back view, same palette as the front
+      spritesheet.png # all six views stitched into 64px GBA-scale cells
+      ...             # plus shiny, frame-2, party-icon and footprint views
       stats.json      # types, ability, base stats
       entry.md        # Pokédex flavour text
     stage2_<Name2>/   # only with --mode line
@@ -87,11 +90,13 @@ Sprite generation also requires the Pokemon Sprite XL PixelArt **back&front** Lo
 1. Download it from [Civitai model 378602](https://civitai.com/models/378602) ("back&front Noob v1"). A Civitai login is required.
 2. Place the file at `models/loras/pkspbf_nb_v1.safetensors` (relative to the repo root). `models/` is gitignored, so this file is never committed and each clone needs its own copy.
 
-Running the tool without the LoRA file in place fails when the sprite pipeline loads, since it tries to read LoRA weights from a path that doesn't exist.
+Running the tool without the LoRA file in place fails when the sprite pipeline loads — it tries to read LoRA weights from a path that doesn't exist, so the run stops with `Error: failed to load model: ...` before any sprite is generated.
 
-### A note on the LoRA's license
+### A note on the model weights' license
 
-NoobAI-XL is distributed under a Fair-AI license that includes a no-commercialisation clause. That's fine here — fakemon-forge is a non-monetised public portfolio project. If that clause is ever a problem for your use case, the same Civitai model page (378602) also publishes an SDXL-base LoRA variant as a documented fallback.
+This note is about the *model weights* only; fakemon-forge's own license is unchanged (see [LICENSE](LICENSE)).
+
+NoobAI-XL is distributed under a Fair-AI license that includes a no-commercialisation clause. That's fine here — fakemon-forge is a non-monetised public portfolio project. If that clause is ever a problem for your use case, the same Civitai model page (378602) also publishes a variant of this LoRA trained against SDXL base, so stock SDXL can stand in for NoobAI-XL. That swap is a documented escape hatch rather than a supported flag — it would need a code change to `_BASE_MODEL_ID` and `_LORA_PATH`.
 
 ### GPU vs CPU
 
