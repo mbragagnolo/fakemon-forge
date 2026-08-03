@@ -1,6 +1,0 @@
-- [ ] Run `pytest` from the repo root — 649 pass, 36 skip (the `ml` skips are expected when torch is absent, per CLAUDE.md)
-- [ ] Feed a real side-by-side generation from the NoobAI back&front LoRA to `split_front_back_canvas` and eyeball that the two returned halves each hold one complete sprite with no clipping
-- [ ] Confirm the cut tracks the actual gap on an off-centre generation (sprites not evenly placed) rather than landing on the naive midline
-- [ ] Feed a canvas where the two sprites touch or overlap across the middle and confirm you get `None` back, not a bad split
-- [ ] Confirm a tinted/vignetted background (not pure white) still splits — the background colour comes from the border ring, not a hardcoded white
-- [ ] Confirm nothing in `main.py` or `generate_sprite*` calls the new function yet — the pipeline wiring, reroll-on-`None`, and midline fallback are a later slice
