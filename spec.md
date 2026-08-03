@@ -1,251 +1,320 @@
-# Spec: Verify the chibi icon enhancement against the SDXL img2img pipeline
+# Spec: Lock the back sprite to the shared front-frame palette + cross-view shiny consistency
 
 ## Summary
 
-Slices 1-6 of #61 swapped `fakemon_forge/sprites.py`'s generation pipelines
-from SD1.5 to SDXL: `load_img2img_pipeline()` / `make_img2img_pipeline()` now
-construct a `diffusers.StableDiffusionXLImg2ImgPipeline`, and `build_prompt`
-was rewritten to a plain string formula (`"gen3, {sprite_prompt}[, extra
-tags], white background"`) instead of the old `_TYPE_TAGS`-based vocabulary.
-`fakemon_forge/main.py`'s per-stage chibi enhancement — an optional img2img
-pass (`generate_sprite_img2img(..., pipeline=img2img_pipeline,
-extra_tags=_CHIBI_TAGS, seed=seed)`, `_CHIBI_TAGS = ["chibi", "big head",
-"small body"]`) that feeds a caricatured render into `generate_icon` instead
-of the plain front sprite, falling back to the plain sprite on any exception —
-was written against the old SD1.5 pipeline and never re-verified against the
-new SDXL one.
+`fakemon-forge` already produces, per stage, a front sprite `sprite.png` and a
+second front-animation frame `sprite_frame2.png` that **share one exact
+16-colour palette** (frame 2 is palette-locked to frame 1 via
+`quantize_to_reference` / `build_frame2` in `fakemon_forge/sprites.py`), plus
+shiny variants. The **back sprite** (`sprite_back.png`) is the last view still
+carrying its **own adaptive palette**: it is produced by
+`generate_sprite_img2img`, whose final step is `postprocess(candidate)` — an
+*adaptive* 16-colour `quantize` that builds a fresh palette every call.
 
-This slice is **verification-only**: having read `build_prompt` and the
-`generate_sprite_img2img` call chain (`generate_sprite_img2img` →
-`_run_img2img` → `_run_img2img_on_image` → `build_prompt(prompt,
-extra_tags)`), `extra_tags` support was **not** dropped by the SDXL rewrite —
-it is threaded through unchanged, and `tests/test_sprites.py` already has a
-passing unit test (`test_build_prompt_multiple_extra_tags_joined_with_comma`)
-asserting `build_prompt`'s exact-`_CHIBI_TAGS`-shaped output. **No production
-code change is required.** The only work this slice does is add a test that
-exercises the chibi call path (`generate_sprite_img2img` with
-`extra_tags=_CHIBI_TAGS`) against an SDXL-img2img-shaped pipeline mock, so the
-combination is confirmed by test rather than by code reading alone.
+This slice (4/4 of #1) brings the back sprite into the **same shared palette**
+as the two front frames, completing the authentic Gen-3 model of *one palette
+for the whole sprite set, one rotated palette for the whole shiny set*. It has
+two parts:
+
+1. **`sprites.py`** — give the back-sprite generation path a way to re-quantize
+   its img2img result against a reference `P`-mode image's exact palette
+   (frame 1) instead of an adaptive palette, by adding an optional
+   `reference_path` parameter to `generate_sprite_img2img`. When
+   `reference_path` is given, the raw img2img candidate is locked with the
+   existing `quantize_to_reference(candidate, reference)` rather than
+   `postprocess`. When it is omitted, behaviour is byte-for-byte unchanged
+   (adaptive `postprocess`), so the front-sprite img2img path and all existing
+   tests are untouched.
+2. **`main.py`** — pass `sprite.png` (frame 1, the just-written front sprite) as
+   the back sprite's `reference_path`, so the back sprite locks to frame 1's
+   palette regardless of which image seeded the img2img (the user's drawing in
+   the img2img path, `sprite.png` in the txt2img path).
+
+Because the back sprite then shares frame 1's exact palette, and
+`generate_shiny` is name-keyed and **rotates only the palette** (preserving
+achromatic entries), `sprite_back_shiny.png` — already derived via
+`generate_shiny(back_path, …)` — automatically uses the **same rotated palette**
+as `sprite_shiny.png` and `sprite_frame2_shiny.png`. All three views' shinies
+become consistent for free; no shiny-path change is required.
 
 ### Explicitly out of scope
 
-- **Any change to `main.py`'s chibi call site or `_CHIBI_TAGS`** — both are
-  confirmed correct as-is (see Assumptions/Behavior).
-- **Any change to `build_prompt` / `generate_sprite_img2img` / `_run_img2img`**
-  — `extra_tags` passthrough already works; this slice adds coverage, not code.
-- **Tuning the chibi tags, `strength`, or judging whether the SDXL LoRA
-  actually produces a recognisable caricature** — per the original chibi spec
-  (`keep/aab47792`) and this issue, the LoRA was never trained with
-  chibi/caricature tags in mind, and whether the *rendered image* looks like a
-  caricature is a GPU-only, human-eyeball judgement out of scope for an
-  automated test. The exception-fallback to the plain (now
-  `k_centroid`-downscaled) sprite is the documented, sufficient safety net for
-  a poor render; this slice does not add new special-casing for that outcome.
-- **`icon.py`'s `k_centroid` downscale** — unchanged, already shipped by an
-  earlier slice in this sequence.
+- **`.ini` / writer changes** — verified unnecessary (as in the prior slices).
+  `export_ini` emits Gen 3 data fields, `writer.py` writes only
+  `stats.json` / `entry.md`; neither references sprite filenames.
+- **The img2img call itself** — the pipeline invocation (`_run_img2img`),
+  `strength=0.65`, and `extra_tags=["backside"]` are unchanged. Only the
+  post-generation quantization step gains a reference-locked branch.
+- **Recentering / animation-band logic** — the back sprite is a *different view*,
+  not an animation frame of the front, so `build_frame2` /
+  `recenter_to_anchor` / the acceptance band do **not** apply to it. Only the
+  palette is shared; geometry is whatever img2img produced.
+- **Colour-fidelity guarantees** — the back sprite's colours may degrade when
+  they land far from frame 1's 16 colours. Per the issue this is the authentic
+  Gen-3 constraint and is accepted, not mitigated.
 
 ## Inputs
 
-No new inputs. Existing values already in scope, unchanged:
+### Changed: `generate_sprite_img2img(prompt, types, image_path, output_path, *, pipeline, extra_tags=None, seed=None, strength=0.8, reference_path=None)`
 
-- `_CHIBI_TAGS = ["chibi", "big head", "small body"]` (`main.py`) — the
-  `extra_tags` passed to the chibi render.
-- The chibi call site in `main.py`'s per-stage loop:
-  `generate_sprite_img2img(stage["sprite_prompt"], stage["types"],
-  sprite_path, chibi_path, pipeline=img2img_pipeline, extra_tags=_CHIBI_TAGS,
-  seed=seed)`, where `img2img_pipeline` is, by this point in the sequence,
-  either `load_img2img_pipeline()`'s return value (`--image` path) or
-  `make_img2img_pipeline(pipeline)`'s return value (description-only path) —
-  both real `StableDiffusionXLImg2ImgPipeline` instances at runtime.
-- `build_prompt(sprite_prompt, extra_tags=None)` (`sprites.py`) — already
-  accepts and folds `extra_tags` into the plain prompt string; unchanged.
+All existing parameters are unchanged. One new keyword-only parameter is added
+at the end (so existing positional/keyword calls are unaffected):
+
+- `reference_path: str | None = None` (keyword-only) — path to a `P`-mode
+  reference image whose exact 16-colour palette the generated sprite must adopt.
+  When `None` (the default, and every current call except the new back-sprite
+  one), the sprite is quantized adaptively via `postprocess` exactly as today.
+  When set, the raw img2img candidate is locked to that palette via
+  `quantize_to_reference`. **[picked]** name/shape — see Assumptions.
+
+### `main.py` per-stage back-sprite call
+
+No new CLI arguments. Inside the existing
+`for stage, stage_dir in zip(stages, stage_dirs)` loop, the existing back-sprite
+block gains one keyword argument:
+
+- `reference_path = sprite_path` — i.e. `str(stage_dir / "sprite.png")`, the
+  front sprite written earlier in the same loop iteration. This is **always**
+  `sprite.png` (frame 1), independent of `init_image` (which is the user's
+  `args.image` in the img2img path, or `sprite_path` in the txt2img path).
 
 ## Outputs
 
-No new outputs. The behavior under test remains:
-
-- On success: `sprite_chibi.png` — a 768x768 `P`-mode PNG (adaptive palette,
-  `reference_path` omitted) produced from `sprite.png` via the SDXL img2img
-  pipeline with the chibi tags folded into the prompt; `generate_icon` builds
-  `sprite_small.png` from it.
-- On the chibi call raising: `icon_source` falls back to `sprite_path`
-  (`sprite.png`); `generate_icon` builds `sprite_small.png` from the plain
-  sprite instead. `sprite_chibi.png` may be absent.
+- **`generate_sprite_img2img` with `reference_path` set** → returns `None`; side
+  effect is writing a 96×96 `P`-mode PNG at `output_path` whose palette is
+  byte-for-byte equal to the reference image's palette (guaranteed by
+  `quantize_to_reference`).
+- **`generate_sprite_img2img` with `reference_path=None`** → unchanged: a 96×96
+  `P`-mode PNG with an adaptive ≤16-colour palette (via `postprocess`).
+- **`main`** per stage — the same set of files as today
+  (`sprite.png`, `sprite_frame2.png`, `sprite_frame2_shiny.png`,
+  `sprite_back.png`, `sprite_shiny.png`, `sprite_back_shiny.png`), but now:
+  - `sprite_back.png` shares `sprite.png`'s exact 16-colour palette (was: its
+    own adaptive palette).
+  - `sprite_back_shiny.png` uses the same rotated palette as `sprite_shiny.png`
+    and `sprite_frame2_shiny.png` (automatic consequence; no code change in the
+    shiny blocks).
 
 ## Behavior
 
-Confirmed by reading the code (no change needed):
+### `generate_sprite_img2img(...)` in `sprites.py`
 
-1. `generate_sprite_img2img(prompt, types, image_path, output_path, *,
-   pipeline, extra_tags=None, seed=None, strength=0.8, reference_path=None)`
-   calls `_run_img2img(prompt, types, image_path, pipeline=pipeline,
-   extra_tags=extra_tags, seed=seed, strength=strength)`, which calls
-   `_run_img2img_on_image(..., extra_tags=extra_tags, ...)`, which calls
-   `pipeline(prompt=build_prompt(prompt, extra_tags), negative_prompt=...,
-   image=init, num_inference_steps=..., guidance_scale=..., generator=...,
-   strength=strength)`. `extra_tags` is threaded through every hop unchanged —
-   this is generic plumbing shared by every `generate_sprite_img2img` caller
-   (chibi, back-sprite `["backside"]`, frame 2's `["open mouth"]`), not
-   special-cased per caller.
-2. `build_prompt("...", ["chibi", "big head", "small body"])` returns
-   `"gen3, ..., chibi, big head, small body, white background"` — verified by
-   the existing `test_build_prompt_multiple_extra_tags_joined_with_comma`
-   (which uses exactly this tag list, written against `_CHIBI_TAGS`'s literal
-   values).
-3. The chibi call in `main.py` is unchanged from the prior (SD1.5-targeting)
-   slice: same tags, same `pipeline=img2img_pipeline` (now SDXL), same
-   `seed=seed`, `reference_path` omitted (own adaptive palette, matching the
-   original chibi spec's choice — the chibi render need not share the front
-   sprite's palette).
-4. The only thing that changed under this call site since it was written is
-   *what* `img2img_pipeline` is a runtime instance of (SD1.5 -> SDXL
-   `Img2ImgPipeline`) and *what* `build_prompt` does internally (old
-   `_TYPE_TAGS` formula -> plain string formula) — neither changes the
-   `extra_tags` contract `generate_sprite_img2img` and `main.py` rely on.
+1. Run the img2img pipeline exactly as today via the existing internal helper
+   `_run_img2img(prompt, types, image_path, pipeline=…, extra_tags=…, seed=…,
+   strength=…)`, obtaining the raw RGB candidate (`result.images[0]`). This step
+   is unchanged.
+2. Quantize the candidate:
+   - If `reference_path is None`: `sprite = postprocess(candidate)` (adaptive
+     palette) — unchanged from today.
+   - Else: open the reference as a `P`-mode image
+     (`Image.open(reference_path)` — the saved front sprite is already `P`-mode;
+     do **not** convert) and `sprite = quantize_to_reference(candidate,
+     reference)`. `quantize_to_reference` already performs the same
+     resize-to-96×96 + colour/contrast enhance pre-steps as `postprocess`, then
+     `.quantize(palette=reference)`, so both branches feed identical input to
+     quantization and differ only in adaptive-vs-fixed palette.
+3. `sprite.save(output_path)` (PNG inferred from extension) — unchanged.
+
+The choice is a single branch on `reference_path`; `_run_img2img`,
+`postprocess`, `quantize_to_reference`, and the module constants are reused
+rather than duplicated.
+
+### `main.py` wiring
+
+The existing back-sprite block becomes:
+
+```
+back_path = str(stage_dir / "sprite_back.png")
+try:
+    init_image = args.image if args.image else sprite_path
+    generate_sprite_img2img(
+        stage["sprite_prompt"], stage["types"], init_image, back_path,
+        pipeline=img2img_pipeline, extra_tags=["backside"], seed=seed,
+        strength=0.65, reference_path=sprite_path,
+    )
+except Exception as exc:
+    print(
+        f"Warning: back sprite generation failed for {stage['name']}: {exc}",
+        file=sys.stderr,
+    )
+```
+
+Only `reference_path=sprite_path` is added. The block still reaches this code
+only after the front-sprite block succeeded (that block `continue`s on failure),
+so `sprite_path` names an existing `P`-mode `sprite.png`. The back-shiny block
+(`generate_shiny(back_path, stage["name"], back_shiny_path)`) is **unchanged** —
+it now inherits the shared palette automatically.
 
 ## Edge cases
 
-- **Chibi img2img raises** (pipeline crash, torch/OOM, bad init, the LoRA
-  simply not understanding "chibi"/"big head"/"small body" and producing a
-  garbage or unrecognisable image that some downstream step chokes on, etc.)
-  -> caught by the existing inner `try/except` in `main.py`; falls back to
-  `icon_source = sprite_path` silently (no warning — this is the documented,
-  optional-enhancement behavior, unchanged by this slice). Already exercised
-  by `tests/test_main.py::test_chibi_render_failure_falls_back_to_plain_downscale`.
-- **The LoRA renders something that doesn't read as a caricature but doesn't
-  raise either** (a real risk called out in the original chibi research) —
-  explicitly accepted, not a bug: nothing in `generate_sprite_img2img` /
-  `main.py` inspects render *quality*, only whether the call raised. No new
-  handling is added for this outcome per the issue's explicit instruction.
-- **`extra_tags` empty/`None` for other callers** (e.g. the plain front-sprite
-  img2img call, which passes no `extra_tags`) — unaffected; `build_prompt`'s
-  `if extra_tags:` branch is unchanged for the no-tags case.
+- **Front sprite generation failed** → the front-sprite `except` `continue`s to
+  the next stage; the back-sprite block (and its `reference_path`) never runs
+  for that stage, so there is never a missing/absent reference.
+- **img2img returns colours far from frame 1's palette** →
+  `quantize_to_reference` maps each pixel to the nearest of frame 1's 16 colours;
+  the back sprite may look slightly off-palette / posterized. **Accepted** — this
+  is the authentic Gen-3 shared-palette constraint, not a bug.
+- **Back sprite content differs from the front** (it is a rear view) → only the
+  palette is shared, not geometry; no recentering/animation-band logic is applied
+  (that is `build_frame2`'s job for frame 2, not for the back view).
+- **Cross-view shiny consistency** → `sprite.png`, `sprite_frame2.png`, and
+  `sprite_back.png` now share one palette; `generate_shiny` rotates only the
+  palette keyed on `name`, so `sprite_shiny.png`, `sprite_frame2_shiny.png`, and
+  `sprite_back_shiny.png` share one rotated palette automatically.
+- **Line mode (3 stages)** → the back-sprite block is inside the per-stage loop;
+  each stage locks its own back sprite to its own `sprite.png`, and each stage's
+  three shinies stay mutually consistent within that stage.
+- **`reference_path=None` callers** (the front-sprite img2img call, and any other
+  existing caller) → behaviour is identical to today (adaptive `postprocess`).
 
 ## Errors
 
-No new error paths. Unchanged:
-
-- `generate_sprite_img2img` propagates any exception from the pipeline call
-  (or from `Image.open`/quantization) to its caller; it does not swallow
-  errors itself.
-- `main.py`'s chibi call sits in an inner `try/except Exception` whose `except`
-  branch sets `icon_source = sprite_path` with no warning printed (contrast
-  with the outer per-block `except`s elsewhere in `main`, which do warn) —
-  this asymmetry is intentional and pre-existing (the chibi pass is an
-  optional enhancement, not a required step).
+- `generate_sprite_img2img` surfaces exceptions to its caller (it does not
+  swallow them); `main` wraps the back-sprite call in the existing try/except and
+  warns `Warning: back sprite generation failed for {name}: {exc}` — unchanged
+  wording and structure.
+- `quantize_to_reference` raises `ValueError` ("palette-mode reference image") if
+  the reference is not `P`-mode. Because `main` always passes the already-saved
+  `P`-mode `sprite.png`, this only fires on misuse and would be caught by the
+  back-sprite `except`.
+- A missing `reference_path` file (e.g. `sprite.png` never written) would raise
+  in `Image.open`; this cannot happen after a successful front-sprite block, and
+  if it somehow did it is caught by the back-sprite `except` (warn-and-continue).
+- No new `sys.exit` paths; pipeline-load failure paths are unchanged.
 
 ## Constraints & dependencies
 
+- The change lives in `fakemon_forge/sprites.py` (`generate_sprite_img2img`) and
+  `fakemon_forge/main.py` (one added kwarg). It reuses the existing
+  `quantize_to_reference`, `_run_img2img`, `postprocess`, and module constants;
+  nothing is hard-coded or duplicated.
 - `generate_sprite_img2img` performs a function-local `import torch` (via
-  `_run_img2img` -> `_make_generator`), so any test that calls it directly is
-  an `ml` test and belongs in `tests/test_sprites_ml.py` per `CLAUDE.md`'s
-  slicing rule; it is auto-skipped without torch installed (expected in the
-  keep sandbox).
-- `tests/test_main.py` mocks `generate_sprite_img2img` at the `main` module
-  level, so its existing chibi tests exercise wiring (call args/kwargs,
-  fallback control flow) without touching torch/diffusers at all; that
-  coverage is unaffected by this slice.
-- The "pipeline-swap" mocking seam already established for SDXL-pipeline
-  behavior in this test suite is the plain `_fake_img2img_pipeline(image)`
-  `MagicMock`-with-`.images`-attribute helper in `tests/test_sprites_ml.py`,
-  reused by every existing `generate_sprite_img2img` / `generate_frame2` test
-  in that file (e.g. `test_img2img_conditioning_image_passed_to_pipeline`,
-  `test_img2img_reference_path_pipeline_called_once_with_passthrough`). These
-  already exercise the SDXL-shaped img2img call (`image=`, `strength=`, no
-  `width`/`height`, unlike the txt2img/pair calls) generically; this slice
-  reuses that exact seam for the chibi tag combination rather than inventing a
-  new one or importing the real `diffusers.StableDiffusionXLImg2ImgPipeline`
-  class (which would require diffusers importable at test-module load time —
-  breaking collection in the torch/diffusers-less sandbox, since
-  `pytest_collection_modifyitems` skips `ml` items only *after* collection).
-- `_CHIBI_TAGS` must be imported from `fakemon_forge.main` (as
-  `tests/test_main.py` already does) rather than re-declared as a literal in
-  the new test, so a future edit to the constant is automatically reflected.
+  `_run_img2img` → `_make_generator`), so **any test that calls it is an `ml`
+  test** and belongs in `tests/test_sprites_ml.py` (or carries
+  `@pytest.mark.ml`), per `CLAUDE.md`'s test-slicing rule. The pure
+  palette-lock/shiny assertions that go in `tests/test_sprites.py` must therefore
+  exercise `quantize_to_reference` / `generate_shiny` **directly**, not through
+  `generate_sprite_img2img`.
+- `main.py` changes touch only the back-sprite call (one kwarg); no import
+  changes, no new CLI args, no signature change to `main`. Because
+  `test_main.py` mocks the sprite functions, the `main` wiring is testable
+  without torch.
+- **Backward compatibility:** the new parameter defaults to `None`, so all
+  current `generate_sprite_img2img` calls and their `ml` tests (96×96, `P`-mode,
+  PNG, single pipeline call, `strength`/`image`/`prompt_embeds` passthrough)
+  must continue to pass unchanged. Only the new back-sprite call passes
+  `reference_path`.
+- Frame 1 (`sprite.png`) is the canonical palette source for the whole set
+  (front frame 1, front frame 2, and back all lock to it). The front sprite
+  itself is never reference-locked (it *defines* the palette).
 
 ## Tests
 
-### `tests/test_sprites_ml.py` (new test; `ml`-marked via the file's
-`pytestmark`, needs torch, auto-skipped in the keep sandbox)
+### light (`tests/test_sprites.py`, torch-free)
 
-Add a test alongside the existing `generate_sprite_img2img` tests:
+These exercise the shared-palette lock and shiny consistency **without** calling
+`generate_sprite_img2img` (which would trigger `import torch`). Follow the
+existing `postprocess` / `quantize_to_reference` / helper patterns.
 
-- Import `_CHIBI_TAGS` from `fakemon_forge.main`.
-- Using the existing `_fake_img2img_pipeline` seam (a `MagicMock` pipeline
-  returning a plain RGB image via `.images`), call
-  `generate_sprite_img2img("fire lizard", [], str(init_img), str(out),
-  pipeline=pipe, extra_tags=_CHIBI_TAGS)`.
-- Assert the prompt actually sent to the pipeline
-  (`pipe.call_args.kwargs["prompt"]`) contains every tag in `_CHIBI_TAGS`
-  (`"chibi"`, `"big head"`, `"small body"`) — proving the SDXL-shaped img2img
-  call (the same call shape every other test in this file already exercises:
-  `image=`, `strength=`, `generator=`, no `width`/`height`) correctly folds the
-  chibi tags into the prompt end to end, not just at the `build_prompt` unit
-  level.
-- Assert `pipe.call_count == 1` and the saved output exists / is `P`-mode
-  (mirroring the file's existing `test_img2img_*` assertions), confirming the
-  call still completes and produces a valid sprite file with the chibi tags
-  applied.
-- Do **not** assert anything about the rendered image's *content* (caricature
-  proportions) — that is a GPU/human-eyeball judgement explicitly out of
-  scope (see Edge cases).
+- **Back-sprite palette lock**: given a back RGB image and a `P`-mode reference
+  frame (build via `postprocess(_rgb_image())` / `postprocess(_noisy_image())`),
+  `quantize_to_reference(back_rgb, reference)` yields a `P`-mode 96×96 image
+  whose `getpalette()` equals the reference's exactly. (This is the pure core of
+  the back-sprite lock; `quantize_to_reference` is already well-covered, so this
+  test frames it as the back-sprite scenario and asserts palette equality.)
+- **Cross-view shiny consistency**: build three `P`-mode images that share one
+  palette (stand-ins for frame 1 / frame 2 / back — e.g. quantize three
+  different RGB inputs against one reference so all three share its palette),
+  save each, run `generate_shiny(path, name, out_path)` on each with the **same
+  `name`**, reload the three outputs, and assert their three `getpalette()`
+  results are **identical** to one another. (Optionally also assert each shiny
+  palette differs from the shared original, i.e. rotation happened.)
 
-### `tests/test_main.py` (no change required, verification only)
+### ml (`tests/test_sprites_ml.py`, auto-skipped without torch)
 
-- `test_chibi_render_feeds_the_icon` and
-  `test_chibi_render_failure_falls_back_to_plain_downscale` already cover the
-  happy path and the exception-fallback path at the wiring level (`extra_tags
-  == _CHIBI_TAGS`, init/output paths, `icon_source` selection). Confirm both
-  still pass unmodified — they do not depend on which concrete pipeline class
-  `img2img_pipeline` is at runtime, since `generate_sprite_img2img` is fully
-  mocked in this file.
+Follow the existing `_fake_img2img_pipeline` / `_stub_encode_prompt` patterns;
+build the reference as a real `P`-mode 96×96 file (e.g. via `_frame1_file` /
+`postprocess(_rgb_image())`, as sprites are saved).
 
-### Regression check
+- `generate_sprite_img2img(..., reference_path=<P-mode frame path>)` with a mock
+  img2img pipeline writes an output file that is **`P`-mode** and whose
+  `getpalette()` **equals the reference's** (proves the back sprite adopts the
+  shared palette rather than an adaptive one).
+- The saved reference-locked sprite is still 96×96 and PNG.
+- **Regression**: `generate_sprite_img2img` **without** `reference_path`
+  continues to produce a `P`-mode 96×96 PNG via adaptive `postprocess` (existing
+  tests suffice; add one asserting the two branches diverge only in palette if
+  desired — e.g. locked output's palette equals the reference while the
+  unlocked output's need not).
+- The pipeline is still invoked **exactly once** and with the unchanged
+  `strength` / `image` / `prompt_embeds` / `extra_tags` passthrough when
+  `reference_path` is supplied (the reference only affects post-quantization).
 
-- Run the full suite (`pytest`); confirm no existing test needs updating and
-  the ~21 `ml`-marked tests remain the only skips in the torch-less sandbox
-  (per `CLAUDE.md`).
+### light (`tests/test_main.py`, no torch — sprite fns mocked)
+
+- The back-sprite `generate_sprite_img2img` call receives
+  `reference_path == str(stage_dir / "sprite.png")` (frame 1), in **both** the
+  txt2img path and the img2img path. In the img2img path, assert the back call's
+  positional `image_path` (init) is `args.image` while its `reference_path` is
+  `sprite.png` — i.e. the reference is frame 1 even though the init image is the
+  user's drawing.
+- The existing back-sprite assertions still hold:
+  `extra_tags == ["backside"]`, `strength == 0.65`, and the img2img-path call
+  count (front + back). Distinguish the front call (`reference_path` absent/`None`)
+  from the back call (`reference_path == sprite.png`).
+- The back-shiny wiring is unchanged (`generate_shiny(back_path, name,
+  back_shiny_path)`); the existing shiny-count assertions
+  (`test_generate_shiny_called_three_times_per_stage`,
+  `test_line_mode_frame2_called_three_times`) remain valid, since no shiny call
+  was added or removed — only the back sprite's palette changed.
 
 ## Assumptions
 
 Items marked **[picked]** are defaults chosen here (not confirmed by existing
 code/tests/docs); **[confirmed]** items are grounded in the codebase.
 
-- **[confirmed]** `extra_tags` support in the prompt-building path was **not**
-  dropped by the SDXL rewrite of `build_prompt`/pipelines: `build_prompt`
-  still takes `extra_tags: list[str] | None = None` and folds it in
-  (`sprites.py:56-60`), `generate_sprite_img2img` -> `_run_img2img` ->
-  `_run_img2img_on_image` all thread `extra_tags` through unchanged
-  (`sprites.py:672-733`), and `tests/test_sprites.py` already has a passing
-  unit test built from the literal `_CHIBI_TAGS` values
-  (`test_build_prompt_multiple_extra_tags_joined_with_comma`). Therefore this
-  slice makes **no production code change**, per the issue's own conditional
-  ("if it was dropped, restore... that is the only production-code change
-  this slice should need").
-- **[confirmed]** `main.py`'s chibi call site and `_CHIBI_TAGS` are unchanged
-  from the version written in `keep/aab47792` (the original chibi-icon spec);
-  `git log -S _CHIBI_TAGS` shows no edits to the constant or call site since.
-- **[picked]** The new SDXL-verification test belongs in
-  `tests/test_sprites_ml.py` (not `tests/test_main.py`), because that is where
-  the *real* `generate_sprite_img2img` function runs against an
-  SDXL-img2img-shaped pipeline call; `tests/test_main.py`'s chibi tests mock
-  `generate_sprite_img2img` away entirely and so cannot demonstrate anything
-  about the pipeline shape. This also matches `CLAUDE.md`'s rule that any test
-  invoking `generate_sprite_img2img` for real belongs in `test_sprites_ml.py`.
-- **[picked]** "Mock at the same seam already used for the pipeline-swap
-  tests" is read as: reuse the existing generic `_fake_img2img_pipeline`
-  `MagicMock` seam that every other SDXL-shaped img2img test in
-  `test_sprites_ml.py` already uses (chosen over importing the real
-  `diffusers.StableDiffusionXLImg2ImgPipeline` class as a `spec=`, which would
-  require diffusers to be importable at test-collection time and would break
-  collection of the whole file in the torch/diffusers-less sandbox — `ml` marks
-  are only skipped by `conftest.py` *after* collection, not before). The
-  sys.modules-injection seam used in `tests/test_sprites.py` for
-  `make_img2img_pipeline`/`load_img2img_pipeline` (which *does* reference the
-  real class name via a mocked `diffusers` module) verifies pipeline
-  *construction*, a different concern already covered by earlier slices; this
-  slice is about the chibi *call*, which is pipeline-class-agnostic by design.
-- **[confirmed]** No caricature-quality assertion is added: the original chibi
-  spec (`keep/aab47792`) and this issue both explicitly flag that whether the
-  LoRA (SD1.5 originally, SDXL now) produces recognisable chibi proportions
-  from `extra_tags` is an unverified, GPU-dependent tunable — not something an
-  automated test can or should assert on pixel content.
+- **[picked]** The lock is added as an optional `reference_path: str = None`
+  keyword parameter on the **existing** `generate_sprite_img2img`, rather than a
+  new dedicated `generate_back_sprite` function. Rationale: it is the minimal,
+  lowest-risk change (existing `reference_path=None` callers and their tests are
+  untouched), keeps the img2img call in one place, and matches how the front
+  frames were locked (via `quantize_to_reference`). The issue explicitly permits
+  either approach. Note: an unused `generate_back_sprite` (txt2img-based) already
+  exists in `sprites.py` but is **not** the back-sprite path `main` uses (`main`
+  calls `generate_sprite_img2img` for the back sprite); it is left untouched to
+  avoid scope creep. **[confirmed]** that `generate_back_sprite` is currently
+  unused by `main.py`.
+- **[picked]** The parameter is a **path** (`reference_path`) rather than a
+  pre-loaded `Image`, matching how `main` already threads file paths
+  (`front_sprite_path`, `image_path`) and letting the function own the
+  `Image.open`. The issue allowed `reference_path`/`reference`; path chosen for
+  consistency.
+- **[picked]** The parameter is placed **last** in the keyword-only signature and
+  defaults to `None`, preserving every existing call site and test.
+- **[picked]** When `reference_path` is set, the reference is opened without a
+  mode conversion (the saved front sprite is already `P`-mode); a non-`P`-mode
+  reference is left to raise via `quantize_to_reference` (caught by `main`'s
+  back-sprite `except`).
+- **[confirmed]** Frame 1 (`sprite.png`) is the canonical palette source: it is
+  generated first in the loop and is saved `P`-mode by `postprocess`'s
+  `.quantize`; front frame 2 already locks to it, and this slice locks the back
+  to it too.
+- **[confirmed]** The reference is always `sprite_path` (frame 1), independent of
+  the img2img init image — in the img2img path the init is the user's drawing
+  (`args.image`) while the palette reference must still be frame 1.
+- **[confirmed]** `quantize_to_reference` already mirrors `postprocess`'s
+  resize + colour/contrast pre-steps, so switching only the palette (adaptive →
+  fixed reference) is the sole behavioural difference between the branches; it
+  does not mutate its inputs.
+- **[confirmed]** `generate_shiny` rotates only the palette keyed on `name` and
+  preserves achromatic entries, so three views sharing one palette yield three
+  identical rotated shiny palettes — `sprite_back_shiny.png` is consistent with
+  `sprite_shiny.png` / `sprite_frame2_shiny.png` with **no** change to the shiny
+  blocks (the back shiny is already `generate_shiny(back_path, …)`).
+- **[confirmed]** `export_ini` / `writer.py` need no changes — they reference no
+  sprite files (Gen 3 data fields / `stats.json` + `entry.md`).
+- **[confirmed]** Anything calling `generate_sprite_img2img` triggers a real
+  `import torch` (via `_run_img2img` → `_make_generator`) and is therefore an
+  `ml` test; the pure palette/shiny assertions in `test_sprites.py` must call
+  `quantize_to_reference` / `generate_shiny` directly, and the `main`-level
+  wiring is torch-free because `test_main.py` mocks the sprite functions.

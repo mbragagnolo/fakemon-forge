@@ -1,6 +1,0 @@
-- [ ] On a GPU host, run `fakemon-forge --description "fire lizard"` and confirm each stage dir gets a `sprite_chibi.png` (768x768, palette-mode) alongside `sprite.png`.
-- [ ] Eyeball `sprite_small.png` (32x64 icon): it should be the downscale of the chibi render, not of `sprite.png` — and readable as a party-menu icon either way.
-- [ ] Judge whether the chibi tags actually produce big-head/small-body proportions on the new SDXL LoRA. If they don't, that is a known, accepted outcome (tune `_CHIBI_TAGS` / `strength` in a follow-up) — not a blocker for this slice.
-- [ ] Force the chibi pass to fail (e.g. temporarily raise inside `generate_sprite_img2img`) and confirm the run continues silently and `sprite_small.png` is still produced from `sprite.png`.
-- [ ] Run `fakemon-forge --image drawing.png --description "..."` and confirm the chibi pass reuses the same loaded img2img pipeline (no second model load / no VRAM spike).
-- [ ] Run the full suite on the ML host (`pytest`, torch installed): expect `tests/test_sprites_ml.py::test_frame2_falls_back_to_squash_on_garbage_candidate` to fail — a pre-existing regression from commit `c50e153`, unrelated to this slice (see PR discussion).
