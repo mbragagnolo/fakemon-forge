@@ -8,7 +8,7 @@ RUN apt-get update \
     && useradd --create-home --shell /bin/bash agent \
     && mkdir -p /home/agent/.claude \
     && chown -R agent:agent /home/agent/.claude \
-    # Deliberately no torch/diffusers/transformers/accelerate/compel: tests
+    # Deliberately no torch/diffusers/transformers/accelerate: tests
     # that need the real ML stack importable are marked `ml` and auto-skip
     # when torch is absent (tests/conftest.py), so the image stays slim and
     # free of ML-package version pins. The full suite runs on the host.

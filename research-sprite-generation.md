@@ -1,5 +1,10 @@
 # Sprite generation — upgrade research (discovery, 2026-08-03)
 
+> **Historical document — kept as written.** This is the discovery pass that
+> kicked off issue #61; "current stack" below means the stack *as of the date in
+> the title*, which the retooling has since replaced. For what actually ships
+> today, see the "Sprite generation" step in [README.md](README.md).
+
 Pure discovery, no spec/code. Current stack: `Lykon/dreamshaper-8` (SD1.5-class) +
 `pksp768_V2-1` LoRA @768px, DPM++ Karras, in-house Gen-3 post (16-colour contract,
 key flatten, NEAREST ÷12 → 64px cells). GPU: Quadro RTX 4000 — Turing, 8GB VRAM,
