@@ -4,9 +4,14 @@ import hashlib
 import json
 import sys
 import textwrap
+from functools import lru_cache
 from pathlib import Path
 
 _RESOURCES = Path(__file__).parent.parent / "resources"
+
+# PokedexType's field budget. One char more than a species name — a different
+# field with a different limit, so the two constants stay separate.
+_MAX_CATEGORY_LEN = 11
 
 # ── lookup tables ──────────────────────────────────────────────────────────────
 
@@ -75,10 +80,20 @@ _ABILITY_FALLBACK: dict[str, int] = {
 
 # ── helpers ────────────────────────────────────────────────────────────────────
 
-def _resolve_ability(name: str) -> int:
-    abilities: dict[str, str] = json.loads(
+@lru_cache(maxsize=1)
+def _ability_table() -> dict[str, str]:
+    """The Gen 3 ability table, read once.
+
+    Lazily, not at import: a missing resource file should fail the export that
+    needs it, not the import of the module.
+    """
+    return json.loads(
         (_RESOURCES / "gen3_abilities.json").read_text(encoding="utf-8")
     )
+
+
+def _resolve_ability(name: str) -> int:
+    abilities = _ability_table()
     lower = name.lower()
     for idx, aname in abilities.items():
         if aname.lower() == lower:
@@ -117,6 +132,21 @@ def _dimension(data: dict, key: str, legacy: int) -> int:
     if isinstance(value, int) and not isinstance(value, bool):
         return value
     return legacy
+
+
+def _pokedex_type(data: dict) -> str:
+    """The PokedexType value: the category noun, else the primary type word.
+
+    Upper-cased and clipped to the field budget on both paths. The generator
+    already guarantees both for anything it writes, but this function is also
+    the last stop for hand-edited and externally produced stats.json — and an
+    over-long category would overrun exactly the budget that dropping the
+    " POKEMON" suffix was meant to reclaim.
+    """
+    category = data.get("category")
+    if isinstance(category, str) and category.strip():
+        return category.upper().strip()[:_MAX_CATEGORY_LEN].strip()
+    return data["types"][0].upper()[:_MAX_CATEGORY_LEN]
 
 
 def _dex_number(name: str) -> int:
@@ -217,11 +247,7 @@ def export_ini(stage_dir: Path) -> Path:
     height_dm = _dimension(data, "height_dm", 5)
     weight_hg = _dimension(data, "weight_hg", 30)
 
-    category = data.get("category")
-    if isinstance(category, str) and category:
-        dex_type = category
-    else:
-        dex_type = data["types"][0].upper()
+    dex_type = _pokedex_type(data)
 
     ini_lines = [
         "[Pokemon]",

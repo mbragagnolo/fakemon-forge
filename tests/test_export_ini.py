@@ -62,7 +62,7 @@ def test_new_format_round_trip(tmp_path):
 
     assert fields["Hght"] == "7"
     assert fields["Wght"] == "120"
-    assert fields["PokedexType"] == "Flame"
+    assert fields["PokedexType"] == "FLAME"
     assert _abilities(fields) == (_BLAZE, _SAND_VEIL)
 
 
@@ -182,13 +182,36 @@ def test_ability_moves_stay_keyed_on_free_text_ability(tmp_path):
 
 def test_pokedex_type_from_category(tmp_path):
     fields = _export(tmp_path, {**_BASE, "category": "Flame"})
-    assert fields["PokedexType"] == "Flame"
+    assert fields["PokedexType"] == "FLAME"
     assert " POKEMON" not in fields["PokedexType"]
 
 
-def test_pokedex_type_category_emitted_verbatim(tmp_path):
-    """Free-text category is passed through, not upper-cased."""
-    assert _export(tmp_path, {**_BASE, "category": "Sea Otter"})["PokedexType"] == "Sea Otter"
+def test_pokedex_type_category_is_upper_cased(tmp_path):
+    """Both branches emit the same register — the type-word fallback is upper
+    case, so a category that isn't would read differently for no reason."""
+    assert _export(tmp_path, {**_BASE, "category": "Sea Otter"})["PokedexType"] == "SEA OTTER"
+
+
+def test_pokedex_type_category_is_clipped_to_the_field_budget(tmp_path):
+    """An over-long category would overrun exactly the budget that dropping
+    the " POKEMON" suffix reclaimed."""
+    fields = _export(tmp_path, {**_BASE, "category": "A REALLY LONG CATEGORY NOUN"})
+    assert fields["PokedexType"] == "A REALLY LO"
+    assert len(fields["PokedexType"]) == 11
+
+
+def test_pokedex_type_eleven_chars_survives(tmp_path):
+    """`> 11` is the failure condition, not `>= 11`."""
+    assert len("TINY TURTLE") == 11
+    assert _export(tmp_path, {**_BASE, "category": "TINY TURTLE"})["PokedexType"] == "TINY TURTLE"
+
+
+def test_pokedex_type_clip_leaves_no_trailing_space(tmp_path):
+    assert _export(tmp_path, {**_BASE, "category": "GIANT SEED PODS"})["PokedexType"] == "GIANT SEED"
+
+
+def test_pokedex_type_whitespace_only_category_falls_back(tmp_path):
+    assert _export(tmp_path, {**_BASE, "category": "   "})["PokedexType"] == "FIRE"
 
 
 @pytest.mark.parametrize("category", ["", None, 42, ["Flame"]])
