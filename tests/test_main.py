@@ -22,6 +22,18 @@ _STAGE_3 = {**_STAGE_1, "name": "Flamburron", "stage": 3, "pokedex_entry": "Melt
 _STAGE_LEVITATE = {**_STAGE_1, "name": "Floatburr", "levitates": True}
 
 
+def _write_pair(*args, **kwargs):
+    """side_effect for the generate_sprite_pair mock: touch both output files.
+
+    main's back-shiny step is guarded on sprite_back.png existing, so a mock
+    that writes nothing would make the txt2img path look like the (deliberate)
+    no-back-sprite degradation. Positional args 2 and 3 are the front and back
+    output paths.
+    """
+    Path(args[2]).write_bytes(b"")
+    Path(args[3]).write_bytes(b"")
+
+
 # ---------------------------------------------------------------------------
 # Fixture: patch every external call in main
 # ---------------------------------------------------------------------------
@@ -52,6 +64,7 @@ def ctx(tmp_path, monkeypatch):
         patch("fakemon_forge.main.write_output", return_value=[stage_dir]) as m_write,
         patch("fakemon_forge.main.export_ini")                     as m_export,
     ):
+        m_sprite.side_effect = _write_pair
         yield {
             "mistral": m_mistral, "vision": m_vision, "gen": m_gen,
             "t2i": m_t2i, "i2i": m_i2i, "make_i2i": m_make_i2i,
@@ -95,6 +108,7 @@ def ctx_line(tmp_path, monkeypatch):
         patch("fakemon_forge.main.write_output", return_value=dirs),
         patch("fakemon_forge.main.export_ini"),
     ):
+        m_sprite.side_effect = _write_pair
         yield {"gen": m_gen, "vision": m_vision,
                "sprite": m_sprite, "frame2": m_frame2, "shiny": m_shiny,
                "stitch": m_stitch, "footprint": m_footprint,
@@ -169,7 +183,7 @@ def test_txt2img_vision_step_skipped(ctx):
 def test_image_mode_uses_txt2img_pipeline(ctx, tmp_path):
     """Issue #69: --image mode now loads the same txt2img pipeline as
     text-only mode (load_img2img_pipeline is never called for the primary
-    sprite call — see spec.md's Approach B)."""
+    sprite call — Approach B, the drawing reaching sprites via vision text)."""
     img = tmp_path / "drawing.png"
     img.write_bytes(b"\x89PNG\r\n")
     main(["--image", str(img), "--description", "fire lizard"])
@@ -217,7 +231,7 @@ def test_image_mode_produces_back_sprite_pair(ctx, tmp_path):
     """--image mode's sprite_back.png regression (an earlier slice deleted the
     old img2img backside chain without a replacement) is fixed by routing
     --image mode through the same generate_sprite_pair call txt2img mode
-    uses (spec.md's Approach B: the drawing feeds sprite generation only via
+    uses (Approach B: the drawing feeds sprite generation only via
     describe_image's vision output, not via img2img on the raw pixels)."""
     img = tmp_path / "drawing.png"
     img.write_bytes(b"\x89PNG\r\n")
@@ -294,6 +308,23 @@ def test_image_line_mode_describes_once_and_pairs_per_stage(ctx_line, tmp_path):
     # Each stage still gets its own seed rather than sharing one.
     seeds = [c.kwargs["seed"] for c in ctx_line["sprite"].call_args_list]
     assert len(set(seeds)) == 3
+
+
+def test_skipped_back_sprite_skips_back_shiny_without_warning(ctx, capsys):
+    """A skipped back sprite means no back shiny — and no second warning.
+
+    generate_sprite_pair declines to save a back half it finds empty, warning
+    once itself. Shining the file it never wrote would raise FileNotFoundError
+    and get reported as "back shiny generation failed", pointing at the shiny
+    step for a gap that belongs to the sprite step.
+    """
+    ctx["sprite"].side_effect = lambda *a, **k: Path(a[2]).write_bytes(b"")   # front only
+
+    main(["--description", "fire lizard"])
+
+    targets = [c.args[2] for c in ctx["shiny"].call_args_list]
+    assert str(ctx["stage_dir"] / "sprite_back_shiny.png") not in targets
+    assert "back shiny generation failed" not in capsys.readouterr().err
 
 
 # ---------------------------------------------------------------------------
@@ -724,6 +755,7 @@ def ctx_two(tmp_path, monkeypatch):
         patch("fakemon_forge.main.write_output", return_value=dirs) as m_write,
         patch("fakemon_forge.main.export_ini"),
     ):
+        m_sprite.side_effect = _write_pair
         yield {"gen": m_gen, "sprite": m_sprite, "footprint": m_footprint,
                "icon": m_icon, "cry": m_cry, "write": m_write, "dirs": dirs}
 
