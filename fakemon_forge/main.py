@@ -70,11 +70,12 @@ def main(argv=None):
     # Always the txt2img pipeline, even for --image runs (issue #69): the
     # drawing's content reaches the sprite renderer only via describe_image's
     # vision output feeding into sprite_prompt (see the `combined` construction
-    # above), never via img2img on the raw pixels — img2img has no mechanism to
-    # turn a single front-facing drawing into a genuine back view.
-    # `load_img2img_pipeline` stays imported/unused-here so the chibi/frame2
-    # img2img calls below (which run on `img2img_pipeline`, the txt2img-derived
-    # one) keep their existing shape.
+    # above), never via img2img on the raw pixels — img2img seeded with a single
+    # front-facing drawing has no mechanism to turn it into a genuine back view
+    # for the right half of the front+back canvas.
+    # `load_img2img_pipeline` is consequently no longer called from here; it
+    # stays imported so the "--image runs never load it" regression test has a
+    # live binding to assert against.
     pipeline = load_txt2img_pipeline()
     img2img_pipeline = make_img2img_pipeline(pipeline)
 
