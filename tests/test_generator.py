@@ -598,6 +598,33 @@ def test_system_prompt_requires_growth_across_a_line():
 
 
 # ---------------------------------------------------------------------------
+# sprite_prompt carries the type conditioning
+# ---------------------------------------------------------------------------
+# The SDXL sprite backend dropped the SD1.5 LoRA's mechanical "firetype" tag
+# table (see build_prompt in sprites.py), so this prompt spec is now the only
+# thing putting a type signal in front of the image model. If it stops asking,
+# a Fire/Flying creature renders with nothing anywhere in the pipeline saying
+# so — and nothing downstream can notice, because sprites.py accepts `types`
+# without reading it.
+
+def test_system_prompt_requires_sprite_prompt_to_show_the_types():
+    assert "show the creature's types" in _SYSTEM_PROMPT
+
+
+def test_system_prompt_gives_type_to_visual_examples():
+    """Abstract "describe the types" under-delivers; the worked examples are
+    what turn a type into flames-and-embers wording the model can render."""
+    assert "embers for Fire" in _SYSTEM_PROMPT
+    assert "feathers for Flying" in _SYSTEM_PROMPT
+
+
+def test_system_prompt_says_the_sprite_model_never_sees_the_types_field():
+    """The reason the requirement is not optional — stated so a future edit
+    trimming the spec for length can see what it would be giving up."""
+    assert "never sees the types field" in _SYSTEM_PROMPT
+
+
+# ---------------------------------------------------------------------------
 # height_dm / weight_hg defaulting in _normalize
 # ---------------------------------------------------------------------------
 

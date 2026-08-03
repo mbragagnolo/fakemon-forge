@@ -37,7 +37,9 @@ from fakemon_forge.sprites import (
     _KEY_COLLISION_DISTANCE,
     load_txt2img_pipeline,
     load_img2img_pipeline,
+    make_img2img_pipeline,
     _BASE_MODEL_ID,
+    _LORA_PATH,
     _LORA_SCALE,
 )
 
@@ -102,27 +104,23 @@ def _anchor(bbox):
 # build_prompt()
 # ---------------------------------------------------------------------------
 
-def test_build_prompt_no_types_prepends_only_style_tag():
-    assert build_prompt("spiky wolf", []) == "gen3 spiky wolf"
+def test_build_prompt_no_extra_tags_uses_plain_formula():
+    assert build_prompt("spiky wolf") == "gen3, spiky wolf, white background"
 
 
-def test_build_prompt_single_type_prepends_tag():
-    result = build_prompt("fire lizard", ["Fire"])
-    assert result.startswith("firetype")
-    assert "fire lizard" in result
+def test_build_prompt_empty_extra_tags_list_matches_none():
+    assert build_prompt("spiky wolf", []) == build_prompt("spiky wolf", None)
+    assert build_prompt("spiky wolf", []) == "gen3, spiky wolf, white background"
 
 
-def test_build_prompt_two_types_prepends_both_tags():
-    result = build_prompt("rock crab", ["Rock", "Water"])
-    assert "rocktype" in result
-    assert "watertype" in result
-    assert "rock crab" in result
+def test_build_prompt_single_extra_tag_inserted_before_white_background():
+    result = build_prompt("fire lizard", ["backside"])
+    assert result == "gen3, fire lizard, backside, white background"
 
 
-def test_build_prompt_unknown_type_is_skipped():
-    result = build_prompt("mystery blob", ["Shadow"])
-    assert "shadowtype" not in result
-    assert result == "gen3 mystery blob"
+def test_build_prompt_multiple_extra_tags_joined_with_comma():
+    result = build_prompt("chibi crab", ["chibi", "big head", "small body"])
+    assert result == "gen3, chibi crab, chibi, big head, small body, white background"
 
 
 # ---------------------------------------------------------------------------
@@ -581,15 +579,28 @@ def test_flatten_gradient_border_warns_without_raising(capsys):
 # load_txt2img_pipeline()
 # ---------------------------------------------------------------------------
 
-def _make_lora_pipeline_mock():
+def test_backend_constants_point_at_the_sdxl_stack():
+    # Pins the backend swap itself: the SDXL base model and the "back&front"
+    # kohya LoRA filename (a manual Civitai download, never committed — the
+    # exact name is the contract with whoever downloads it).
+    assert _BASE_MODEL_ID == "Laxhar/noobai-XL-1.1"
+    assert _LORA_PATH.name == "pkspbf_nb_v1.safetensors"
+    assert _LORA_PATH.parent.name == "loras"
+
+
+def _make_lora_pipeline_mock(state_dict=None, network_alphas=None):
     mock_mixin = MagicMock()
-    mock_mixin.lora_state_dict.return_value = ({}, {}, None)
+    mock_mixin.lora_state_dict.return_value = (
+        {} if state_dict is None else state_dict,
+        {} if network_alphas is None else network_alphas,
+        None,
+    )
     mock_mod = MagicMock()
-    mock_mod.StableDiffusionLoraLoaderMixin = mock_mixin
+    mock_mod.StableDiffusionXLLoraLoaderMixin = mock_mixin
     return mock_mod
 
 
-def _mock_modules(pipe_side_effect=None, cuda=False):
+def _mock_modules(pipe_side_effect=None, cuda=False, lora_mod=None):
     mock_pipe_cls = MagicMock()
     if pipe_side_effect:
         mock_pipe_cls.from_pretrained.side_effect = pipe_side_effect
@@ -597,7 +608,7 @@ def _mock_modules(pipe_side_effect=None, cuda=False):
         mock_pipe_cls.from_pretrained.return_value = MagicMock()
 
     mock_diffusers = MagicMock()
-    mock_diffusers.StableDiffusionPipeline = mock_pipe_cls
+    mock_diffusers.StableDiffusionXLPipeline = mock_pipe_cls
 
     mock_torch = MagicMock()
     mock_torch.float32 = "float32"
@@ -608,8 +619,27 @@ def _mock_modules(pipe_side_effect=None, cuda=False):
         "diffusers": mock_diffusers,
         "torch": mock_torch,
         "diffusers.loaders": MagicMock(),
-        "diffusers.loaders.lora_pipeline": _make_lora_pipeline_mock(),
+        "diffusers.loaders.lora_pipeline": lora_mod or _make_lora_pipeline_mock(),
     }, mock_pipe_cls
+
+
+class _NoTilingPipe:
+    """A pipeline stand-in that lacks ``enable_vae_tiling`` (unlike MagicMock,
+    which auto-creates any attribute), so hasattr() genuinely reports False and
+    the ``pipe.vae.enable_tiling()`` fallback path can be exercised."""
+
+    def __init__(self):
+        self.to = MagicMock(side_effect=lambda device: self)
+        self.enable_model_cpu_offload = MagicMock()
+        self.vae = MagicMock()
+        self.unet = MagicMock()
+        self.text_encoder = MagicMock()
+        self.text_encoder_2 = MagicMock()
+        self.scheduler = MagicMock()
+        self.lora_scale = 1.0
+        self.load_lora_into_unet = MagicMock()
+        self.load_lora_into_text_encoder = MagicMock()
+        self.fuse_lora = MagicMock()
 
 
 def test_load_returns_pipeline():
@@ -627,14 +657,175 @@ def test_load_calls_from_pretrained_with_model_id():
     assert mock_pipe_cls.from_pretrained.call_args.args[0] == _BASE_MODEL_ID
 
 
+def test_load_does_not_pass_safety_checker():
+    # SDXL pipeline classes don't accept safety_checker (unlike SD1.5's) — a
+    # real .from_pretrained call would raise TypeError if it were still passed.
+    mods, mock_pipe_cls = _mock_modules()
+    with patch.dict("sys.modules", mods):
+        load_txt2img_pipeline()
+    assert "safety_checker" not in mock_pipe_cls.from_pretrained.call_args.kwargs
+
+
 def test_load_applies_lora_weights():
     mods, mock_pipe_cls = _mock_modules()
     with patch.dict("sys.modules", mods):
         load_txt2img_pipeline()
     pipe = mock_pipe_cls.from_pretrained.return_value
     pipe.load_lora_into_unet.assert_called_once()
-    pipe.load_lora_into_text_encoder.assert_called_once()
+    assert pipe.load_lora_into_text_encoder.call_count == 2
     pipe.fuse_lora.assert_called_once_with(lora_scale=_LORA_SCALE)
+
+
+def test_load_lora_state_dict_passes_unet_config():
+    mods, mock_pipe_cls = _mock_modules()
+    with patch.dict("sys.modules", mods):
+        load_txt2img_pipeline()
+    pipe = mock_pipe_cls.from_pretrained.return_value
+    mixin = mods["diffusers.loaders.lora_pipeline"].StableDiffusionXLLoraLoaderMixin
+    mixin.lora_state_dict.assert_called_once_with(
+        str(_LORA_PATH), return_lora_metadata=True, unet_config=pipe.unet.config
+    )
+
+
+def test_load_applies_lora_to_both_text_encoders():
+    mods, mock_pipe_cls = _mock_modules()
+    with patch.dict("sys.modules", mods):
+        load_txt2img_pipeline()
+    pipe = mock_pipe_cls.from_pretrained.return_value
+    calls = pipe.load_lora_into_text_encoder.call_args_list
+    encoders = {c.kwargs["text_encoder"] for c in calls}
+    prefixes = {c.kwargs["prefix"] for c in calls}
+    assert encoders == {pipe.text_encoder, pipe.text_encoder_2}
+    assert prefixes == {"text_encoder", "text_encoder_2"}
+
+
+# Kohya key shapes as diffusers hands them back from lora_state_dict(): both
+# text encoders arrive under a "{prefix}.text_model." level. te1
+# (CLIPTextModel) does NOT have that wrapper in its named_modules(), so its
+# keys must be stripped; te2 (CLIPTextModelWithProjection) does, so its keys
+# must survive untouched.
+_TE_KEY_1 = "text_encoder.text_model.encoder.layers.0.self_attn.q_proj.lora_A.weight"
+_TE_KEY_2 = "text_encoder_2.text_model.encoder.layers.0.self_attn.q_proj.lora_A.weight"
+_UNET_KEY = "unet.down_blocks.1.attentions.0.transformer_blocks.0.attn1.to_q.lora_A.weight"
+
+
+def _kohya_state_dict():
+    return {_UNET_KEY: "u", _TE_KEY_1: "a", _TE_KEY_2: "b"}
+
+
+def _text_encoder_calls(pipe):
+    """The two load_lora_into_text_encoder calls, keyed by their ``prefix``."""
+    return {c.kwargs["prefix"]: c for c in pipe.load_lora_into_text_encoder.call_args_list}
+
+
+def test_load_strips_text_model_level_for_text_encoder_1_only():
+    state_dict = _kohya_state_dict()
+    mods, mock_pipe_cls = _mock_modules(
+        lora_mod=_make_lora_pipeline_mock(state_dict, dict(state_dict))
+    )
+    with patch.dict("sys.modules", mods):
+        load_txt2img_pipeline()
+    calls = _text_encoder_calls(mock_pipe_cls.from_pretrained.return_value)
+
+    te1 = calls["text_encoder"].args[0]
+    assert "text_encoder.encoder.layers.0.self_attn.q_proj.lora_A.weight" in te1
+    assert _TE_KEY_1 not in te1
+    # Only te1's own level is stripped: te2 and unet keys ride along untouched.
+    assert _TE_KEY_2 in te1 and _UNET_KEY in te1
+
+
+def test_load_leaves_text_encoder_2_keys_untouched():
+    state_dict = _kohya_state_dict()
+    mods, mock_pipe_cls = _mock_modules(
+        lora_mod=_make_lora_pipeline_mock(state_dict, dict(state_dict))
+    )
+    with patch.dict("sys.modules", mods):
+        load_txt2img_pipeline()
+    calls = _text_encoder_calls(mock_pipe_cls.from_pretrained.return_value)
+
+    te2 = calls["text_encoder_2"].args[0]
+    # Blanket-applying the te1 strip here would silently break te2's weights.
+    assert _TE_KEY_2 in te2
+    assert "text_encoder_2.encoder.layers.0.self_attn.q_proj.lora_A.weight" not in te2
+
+
+def test_load_applies_the_same_key_fix_to_network_alphas():
+    state_dict = _kohya_state_dict()
+    mods, mock_pipe_cls = _mock_modules(
+        lora_mod=_make_lora_pipeline_mock(state_dict, dict(state_dict))
+    )
+    with patch.dict("sys.modules", mods):
+        load_txt2img_pipeline()
+    calls = _text_encoder_calls(mock_pipe_cls.from_pretrained.return_value)
+
+    assert _TE_KEY_1 not in calls["text_encoder"].kwargs["network_alphas"]
+    assert _TE_KEY_2 in calls["text_encoder_2"].kwargs["network_alphas"]
+
+
+def test_load_passes_unstripped_state_dict_to_the_unet():
+    state_dict = _kohya_state_dict()
+    mods, mock_pipe_cls = _mock_modules(lora_mod=_make_lora_pipeline_mock(state_dict))
+    with patch.dict("sys.modules", mods):
+        load_txt2img_pipeline()
+    pipe = mock_pipe_cls.from_pretrained.return_value
+    assert pipe.load_lora_into_unet.call_args.args[0] == state_dict
+
+
+def test_load_tolerates_empty_network_alphas():
+    # lora_state_dict() returns an empty/None alphas mapping for LoRAs that
+    # carry no alpha entries; the key fix must pass it straight through.
+    mods, mock_pipe_cls = _mock_modules(
+        lora_mod=_make_lora_pipeline_mock(_kohya_state_dict(), network_alphas=None)
+    )
+    with patch.dict("sys.modules", mods):
+        load_txt2img_pipeline()
+    calls = _text_encoder_calls(mock_pipe_cls.from_pretrained.return_value)
+    assert calls["text_encoder"].kwargs["network_alphas"] == {}
+
+
+def test_load_sets_euler_ancestral_scheduler():
+    mods, mock_pipe_cls = _mock_modules()
+    with patch.dict("sys.modules", mods):
+        load_txt2img_pipeline()
+    pipe = mock_pipe_cls.from_pretrained.return_value
+    scheduler_cls = mods["diffusers"].EulerAncestralDiscreteScheduler
+    scheduler_cls.from_config.assert_called_once()
+    assert pipe.scheduler is scheduler_cls.from_config.return_value
+
+
+def test_load_enables_model_cpu_offload_on_cuda():
+    mods, mock_pipe_cls = _mock_modules(cuda=True)
+    with patch.dict("sys.modules", mods):
+        load_txt2img_pipeline()
+    pipe = mock_pipe_cls.from_pretrained.return_value
+    pipe.enable_model_cpu_offload.assert_called_once()
+
+
+def test_load_enables_vae_tiling_on_cuda():
+    mods, mock_pipe_cls = _mock_modules(cuda=True)
+    with patch.dict("sys.modules", mods):
+        load_txt2img_pipeline()
+    pipe = mock_pipe_cls.from_pretrained.return_value
+    pipe.enable_vae_tiling.assert_called_once()
+
+
+def test_load_falls_back_to_vae_enable_tiling_when_pipeline_method_absent():
+    pipe_instance = _NoTilingPipe()
+    mods, mock_pipe_cls = _mock_modules(cuda=True)
+    mock_pipe_cls.from_pretrained.return_value = pipe_instance
+    with patch.dict("sys.modules", mods):
+        load_txt2img_pipeline()
+    pipe_instance.vae.enable_tiling.assert_called_once()
+
+
+def test_load_skips_offload_and_tiling_on_cpu():
+    mods, mock_pipe_cls = _mock_modules(cuda=False)
+    with patch.dict("sys.modules", mods):
+        load_txt2img_pipeline()
+    pipe = mock_pipe_cls.from_pretrained.return_value
+    pipe.enable_model_cpu_offload.assert_not_called()
+    pipe.enable_vae_tiling.assert_not_called()
+    pipe.vae.enable_tiling.assert_not_called()
 
 
 def test_load_exits_on_oom(capsys):
@@ -667,11 +858,15 @@ def test_load_uses_float32_when_no_cuda():
     assert mock_pipe_cls.from_pretrained.call_args.kwargs["torch_dtype"] == "float32"
 
 
-def test_load_moves_pipeline_to_cuda_when_available():
+def test_load_leaves_device_placement_to_the_offload_on_cuda():
+    # enable_model_cpu_offload() owns placement from the moment it is called;
+    # a .to("cuda") after it would make every component GPU-resident at once
+    # and give the offload's memory savings straight back.
     mods, mock_pipe_cls = _mock_modules(cuda=True)
     with patch.dict("sys.modules", mods):
-        load_txt2img_pipeline()
-    mock_pipe_cls.from_pretrained.return_value.to.assert_called_once_with("cuda")
+        pipe = load_txt2img_pipeline()
+    assert pipe is mock_pipe_cls.from_pretrained.return_value
+    pipe.to.assert_not_called()
 
 
 def test_load_moves_pipeline_to_cpu_when_no_cuda():
@@ -693,7 +888,7 @@ def _mock_img2img_modules(pipe_side_effect=None, cuda=False):
         mock_pipe_cls.from_pretrained.return_value = MagicMock()
 
     mock_diffusers = MagicMock()
-    mock_diffusers.StableDiffusionImg2ImgPipeline = mock_pipe_cls
+    mock_diffusers.StableDiffusionXLImg2ImgPipeline = mock_pipe_cls
 
     mock_torch = MagicMock()
     mock_torch.float32 = "float32"
@@ -728,8 +923,26 @@ def test_load_img2img_applies_lora_weights():
         load_img2img_pipeline()
     pipe = mock_pipe_cls.from_pretrained.return_value
     pipe.load_lora_into_unet.assert_called_once()
-    pipe.load_lora_into_text_encoder.assert_called_once()
+    assert pipe.load_lora_into_text_encoder.call_count == 2
     pipe.fuse_lora.assert_called_once_with(lora_scale=_LORA_SCALE)
+
+
+def test_load_img2img_sets_euler_ancestral_scheduler():
+    mods, mock_pipe_cls = _mock_img2img_modules()
+    with patch.dict("sys.modules", mods):
+        load_img2img_pipeline()
+    pipe = mock_pipe_cls.from_pretrained.return_value
+    scheduler_cls = mods["diffusers"].EulerAncestralDiscreteScheduler
+    assert pipe.scheduler is scheduler_cls.from_config.return_value
+
+
+def test_load_img2img_enables_offload_and_tiling_on_cuda():
+    mods, mock_pipe_cls = _mock_img2img_modules(cuda=True)
+    with patch.dict("sys.modules", mods):
+        load_img2img_pipeline()
+    pipe = mock_pipe_cls.from_pretrained.return_value
+    pipe.enable_model_cpu_offload.assert_called_once()
+    pipe.enable_vae_tiling.assert_called_once()
 
 
 def test_load_img2img_exits_on_failure(capsys):
@@ -746,6 +959,72 @@ def test_load_img2img_error_mentions_exception(capsys):
         with pytest.raises(SystemExit):
             load_img2img_pipeline()
     assert "missing weights" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# make_img2img_pipeline()
+# ---------------------------------------------------------------------------
+
+def _mock_img2img_class(cuda=False):
+    mock_cls = MagicMock()
+    mock_diffusers = MagicMock()
+    mock_diffusers.StableDiffusionXLImg2ImgPipeline = mock_cls
+
+    mock_torch = MagicMock()
+    mock_torch.cuda.is_available.return_value = cuda
+
+    return {"diffusers": mock_diffusers, "torch": mock_torch}, mock_cls
+
+
+def _txt2img_stub():
+    txt2img = MagicMock()
+    # SDXL's component set — note the second text encoder/tokenizer, which the
+    # SD1.5 pipeline this replaced did not have.
+    txt2img.components = {
+        "vae": "vae", "text_encoder": "te1", "text_encoder_2": "te2",
+        "tokenizer": "tok1", "tokenizer_2": "tok2", "unet": "unet",
+        "scheduler": "sched",
+    }
+    return txt2img
+
+
+def test_make_img2img_pipeline_reuses_txt2img_components():
+    mods, mock_cls = _mock_img2img_class()
+    txt2img = _txt2img_stub()
+    with patch.dict("sys.modules", mods):
+        pipe = make_img2img_pipeline(txt2img)
+    mock_cls.assert_called_once_with(**txt2img.components)
+    assert pipe is mock_cls.return_value
+
+
+def test_make_img2img_pipeline_enables_offload_and_tiling_on_cuda():
+    # Sharing the parent's components does NOT share the offload: `_all_hooks`
+    # is per-pipeline, so a derived pipe without its own enable_model_cpu_offload
+    # has a no-op maybe_free_model_hooks() and leaves its last-run component
+    # (the fp32-upcast VAE) sitting in VRAM between calls.
+    mods, mock_cls = _mock_img2img_class(cuda=True)
+    with patch.dict("sys.modules", mods):
+        pipe = make_img2img_pipeline(_txt2img_stub())
+    pipe.enable_model_cpu_offload.assert_called_once()
+    pipe.enable_vae_tiling.assert_called_once()
+
+
+def test_make_img2img_pipeline_leaves_device_placement_to_the_offload():
+    mods, _ = _mock_img2img_class(cuda=True)
+    with patch.dict("sys.modules", mods):
+        pipe = make_img2img_pipeline(_txt2img_stub())
+    pipe.to.assert_not_called()
+
+
+def test_make_img2img_pipeline_skips_offload_and_tiling_off_cuda():
+    # enable_model_cpu_offload() raises without an accelerator, and the shared
+    # components are already wherever the parent put them — nothing to do.
+    mods, _ = _mock_img2img_class(cuda=False)
+    with patch.dict("sys.modules", mods):
+        pipe = make_img2img_pipeline(_txt2img_stub())
+    pipe.enable_model_cpu_offload.assert_not_called()
+    pipe.enable_vae_tiling.assert_not_called()
+    pipe.to.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
