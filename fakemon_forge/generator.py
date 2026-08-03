@@ -5,6 +5,16 @@ from mistralai.client import Mistral
 
 _MODEL = "mistral-large-latest"
 
+_MAX_NAME_LEN = 10
+
+_ALLOWED_NAME_CHARS = set(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    "abcdefghijklmnopqrstuvwxyz"
+    "0123456789"
+    " é♂♀"
+    ".,'-…!?/()\":;"
+)
+
 _BST_TARGETS = {
     "standard": {"stage1": 300, "stage2": 420, "stage3": 520},
     "pseudo":   {"stage1": 300, "stage2": 420, "stage3": 600},
@@ -15,7 +25,8 @@ _BST_TARGETS = {
 _SYSTEM_PROMPT = """\
 You are a Pokémon game designer. Generate Fakemon data as a JSON array.
 Each element represents one evolutionary stage and must have exactly these fields:
-  name          – portmanteau-style name (string)
+  name          – portmanteau-style name (string); max 10 characters, using only
+    letters, digits, spaces, é, ♂, ♀ and the punctuation . , ' - … ! ? / ( ) " : ;
   stage         – stage number as an integer (1, 2, or 3)
   types         – list of 1 or 2 type strings, e.g. ["Fire"] or ["Water", "Flying"]
   ability       – one ability name (string)
@@ -83,6 +94,53 @@ def _strip_fences(text: str) -> str:
     return text.strip()
 
 
+def _name_violations(stages: list[dict]) -> tuple[list[str], list[str]]:
+    """Return (too_long_names, illegal_char_names) across all stages."""
+    too_long = []
+    illegal = []
+    for stage in stages:
+        # A present-but-non-string name is repaired via str(), not raised on —
+        # so it has to be measured the same way here or the two disagree.
+        name = str(stage["name"])
+        if len(name) > _MAX_NAME_LEN:
+            too_long.append(name)
+        if any(ch not in _ALLOWED_NAME_CHARS for ch in name):
+            illegal.append(name)
+    return too_long, illegal
+
+
+def _corrective_message(too_long: list[str], illegal: list[str]) -> str:
+    parts = []
+    if too_long:
+        parts.append(
+            "These names exceed 10 characters: " + ", ".join(too_long) +
+            ". Return the full array again with shorter names."
+        )
+    if illegal:
+        parts.append(
+            "These names contain characters that can't be used: " + ", ".join(illegal) +
+            ". Return the full array again using only letters, numbers, spaces, "
+            "é, ♂, ♀ and the punctuation . , ' - … ! ? / ( ) \" : ;"
+        )
+    return " ".join(parts)
+
+
+def _repair_name(name) -> str:
+    cleaned = "".join(ch for ch in str(name) if ch in _ALLOWED_NAME_CHARS)
+    return cleaned[:_MAX_NAME_LEN]
+
+
+def _normalize(stages: list[dict], mode: str, tier: str) -> list[dict]:
+    """Post-parse cleanup pass. Currently enforces the name contract only.
+
+    Repair is idempotent: a name already inside the Gen 3 contract comes out
+    of ``_repair_name`` unchanged, so valid names pass through untouched.
+    """
+    for stage in stages:
+        stage["name"] = _repair_name(stage["name"])
+    return stages
+
+
 def generate_fakemon(
     description: str,
     mode: str,
@@ -104,7 +162,7 @@ def generate_fakemon(
         try:
             response = client.chat.complete(model=_MODEL, messages=messages)
             raw = response.choices[0].message.content
-            return json.loads(_strip_fences(raw))
+            stages = json.loads(_strip_fences(raw))
         except json.JSONDecodeError:
             if attempt == 1:
                 print(
@@ -113,6 +171,7 @@ def generate_fakemon(
                     file=sys.stderr,
                 )
                 sys.exit(1)
+            continue
         except Exception as exc:
             print(
                 f"Error: Mistral API call failed ({exc}). "
@@ -120,3 +179,14 @@ def generate_fakemon(
                 file=sys.stderr,
             )
             sys.exit(1)
+
+        too_long, illegal = _name_violations(stages)
+        if (too_long or illegal) and attempt == 0:
+            # The offending array has to be in the conversation for "return the
+            # full array again" to mean anything — without it the model rebuilds
+            # the line from scratch and the already-valid sibling names change.
+            messages.append({"role": "assistant", "content": raw})
+            messages.append({"role": "user", "content": _corrective_message(too_long, illegal)})
+            continue
+
+        return _normalize(stages, mode, tier)

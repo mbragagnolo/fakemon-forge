@@ -2,7 +2,13 @@ import json
 import pytest
 from unittest.mock import MagicMock, patch
 
-from fakemon_forge.generator import generate_fakemon, _SYSTEM_PROMPT
+from fakemon_forge.generator import (
+    generate_fakemon,
+    _normalize,
+    _corrective_message,
+    _ALLOWED_NAME_CHARS,
+    _SYSTEM_PROMPT,
+)
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -165,6 +171,257 @@ def test_prints_raw_response_on_double_failure(capsys):
         generate_fakemon("fire lizard", "single", client=client)
     err = capsys.readouterr().err
     assert "garbage output 2" in err
+
+
+# ---------------------------------------------------------------------------
+# Name normalization (Gen 3 charset + 10-char limit)
+# ---------------------------------------------------------------------------
+
+def test_valid_name_passes_through_in_one_call():
+    client = _make_client(json.dumps([_STAGE_1]))
+    result = generate_fakemon("fire lizard", "single", client=client)
+    assert client.chat.complete.call_count == 1
+    assert result[0]["name"] == "Flamburr"
+
+
+def test_too_long_name_triggers_corrective_retry():
+    too_long = {**_STAGE_1, "name": "Flamburronix"}
+    good = {**_STAGE_1, "name": "Flamburron"}
+    client = _make_client(json.dumps([too_long]), json.dumps([good]))
+    result = generate_fakemon("fire lizard", "single", client=client)
+    assert client.chat.complete.call_count == 2
+    assert result[0]["name"] == "Flamburron"
+    second_call_messages = client.chat.complete.call_args.kwargs["messages"]
+    corrective = second_call_messages[-1]
+    assert corrective["role"] == "user"
+    assert "Flamburronix" in corrective["content"]
+
+
+def test_illegal_char_name_triggers_corrective_retry():
+    illegal = {**_STAGE_1, "name": "Flam@burr"}
+    good = {**_STAGE_1, "name": "Flamburr"}
+    client = _make_client(json.dumps([illegal]), json.dumps([good]))
+    result = generate_fakemon("fire lizard", "single", client=client)
+    assert client.chat.complete.call_count == 2
+    assert result[0]["name"] == "Flamburr"
+    second_call_messages = client.chat.complete.call_args.kwargs["messages"]
+    corrective = second_call_messages[-1]
+    assert corrective["role"] == "user"
+    assert "Flam@burr" in corrective["content"]
+
+
+def test_both_violations_at_once_trigger_single_retry():
+    both_bad = {**_STAGE_1, "name": "Flamburronix@"}
+    good = {**_STAGE_1, "name": "Flamburron"}
+    client = _make_client(json.dumps([both_bad]), json.dumps([good]))
+    result = generate_fakemon("fire lizard", "single", client=client)
+    assert client.chat.complete.call_count == 2
+    assert result[0]["name"] == "Flamburron"
+    second_call_messages = client.chat.complete.call_args.kwargs["messages"]
+    corrective = second_call_messages[-1]
+    assert "Flamburronix@" in corrective["content"]
+
+
+def test_last_resort_repair_truncates_too_long_name():
+    too_long = {**_STAGE_1, "name": "Flamburronix"}
+    still_too_long = {**_STAGE_1, "name": "Flamburronix"}
+    client = _make_client(json.dumps([too_long]), json.dumps([still_too_long]))
+    result = generate_fakemon("fire lizard", "single", client=client)
+    assert client.chat.complete.call_count == 2
+    assert result[0]["name"] == "Flamburronix"[:10]
+    assert len(result[0]["name"]) == 10
+
+
+def test_last_resort_repair_strips_illegal_chars():
+    illegal = {**_STAGE_1, "name": "Flam@burr"}
+    still_illegal = {**_STAGE_1, "name": "Flam@burr"}
+    client = _make_client(json.dumps([illegal]), json.dumps([still_illegal]))
+    result = generate_fakemon("fire lizard", "single", client=client)
+    assert client.chat.complete.call_count == 2
+    assert result[0]["name"] == "Flamburr"
+
+
+def test_last_resort_repair_strips_then_truncates():
+    both_bad = {**_STAGE_1, "name": "Flamburronix@wow"}
+    still_bad = {**_STAGE_1, "name": "Flamburronix@wow"}
+    client = _make_client(json.dumps([both_bad]), json.dumps([still_bad]))
+    result = generate_fakemon("fire lizard", "single", client=client)
+    assert client.chat.complete.call_count == 2
+    stripped = "Flamburronixwow"
+    assert result[0]["name"] == stripped[:10]
+
+
+def test_line_mode_only_names_offending_stages_in_corrective_message():
+    # Deliberately unrelated to the valid stage names so "not in" assertions
+    # below can't pass by substring accident.
+    bad_stage2 = {**_STAGE_2, "name": "Infernodrake"}
+    line = [_STAGE_1, bad_stage2, _STAGE_3]
+    good_line = _LINE
+    client = _make_client(json.dumps(line), json.dumps(good_line))
+    result = generate_fakemon("fire lizard", "line", client=client)
+    assert client.chat.complete.call_count == 2
+    assert [s["name"] for s in result] == ["Flamburr", "Flamburro", "Flamburron"]
+    second_call_messages = client.chat.complete.call_args.kwargs["messages"]
+    corrective = second_call_messages[-1]
+    assert "Infernodrake" in corrective["content"]
+    # The two already-valid stage names are not called out as offenders.
+    assert "Flamburr" not in corrective["content"]
+    assert "Flamburron" not in corrective["content"]
+
+
+def test_line_mode_repairs_only_the_offending_stage():
+    bad_stage2 = {**_STAGE_2, "name": "Infernodrake"}
+    line = [_STAGE_1, bad_stage2, _STAGE_3]
+    client = _make_client(json.dumps(line), json.dumps(line))
+    result = generate_fakemon("fire lizard", "line", client=client)
+    assert client.chat.complete.call_count == 2
+    # Valid siblings untouched; only the offender is truncated.
+    assert [s["name"] for s in result] == ["Flamburr", "Infernodra", "Flamburron"]
+
+
+# --- boundary and charset coverage ------------------------------------------
+
+def test_name_of_exactly_ten_chars_is_valid():
+    """`> 10` is the failure condition, not `>= 10`."""
+    exactly_ten = {**_STAGE_1, "name": "Flamburron"}
+    client = _make_client(json.dumps([exactly_ten]))
+    result = generate_fakemon("fire lizard", "single", client=client)
+    assert client.chat.complete.call_count == 1
+    assert result[0]["name"] == "Flamburron"
+
+
+@pytest.mark.parametrize("name", [
+    "Nidoran♂",   # ♂
+    "Nidoran♀",   # ♀
+    "Flambé",     # é
+    "Ho-Oh",
+    "Farfetch'd",
+    "Mr. Mime",
+    "Type: Null",
+    "A1.,'-…!?",  # … plus the rest of the punctuation set
+    "/()\":;",
+])
+def test_gen3_charset_names_pass_through_untouched(name):
+    stage = {**_STAGE_1, "name": name}
+    client = _make_client(json.dumps([stage]))
+    result = generate_fakemon("fire lizard", "single", client=client)
+    assert client.chat.complete.call_count == 1
+    assert result[0]["name"] == name
+
+
+def test_newline_in_name_is_an_illegal_char():
+    """Newline is never in the allowed set, so it takes the illegal-char path."""
+    bad = {**_STAGE_1, "name": "Flam\nburr"}
+    client = _make_client(json.dumps([bad]), json.dumps([bad]))
+    result = generate_fakemon("fire lizard", "single", client=client)
+    assert client.chat.complete.call_count == 2
+    assert result[0]["name"] == "Flamburr"
+
+
+# --- interaction with the shared 2-attempt budget ----------------------------
+
+def test_name_violation_then_malformed_json_still_exits(capsys):
+    """The pre-existing malformed-JSON exit wins on attempt 2."""
+    bad_name = {**_STAGE_1, "name": "Flamburronix"}
+    client = _make_client(json.dumps([bad_name]), "garbage output 2")
+    with pytest.raises(SystemExit) as exc:
+        generate_fakemon("fire lizard", "single", client=client)
+    assert exc.value.code == 1
+    assert client.chat.complete.call_count == 2
+    err = capsys.readouterr().err
+    assert "malformed JSON after 2 attempts" in err
+    assert "garbage output 2" in err
+
+
+def test_malformed_json_then_name_violation_repairs_without_third_call():
+    """A JSON retry spends attempt 1, so attempt 2 repairs instead of retrying."""
+    bad_name = {**_STAGE_1, "name": "Flamburronix"}
+    client = _make_client("garbage", json.dumps([bad_name]))
+    result = generate_fakemon("fire lizard", "single", client=client)
+    assert client.chat.complete.call_count == 2
+    assert result[0]["name"] == "Flamburron"
+
+
+# --- _normalize as a standalone scaffold -------------------------------------
+
+def test_normalize_enforces_contract_and_returns_stages():
+    stages = [
+        {**_STAGE_1, "name": "Flamburr"},
+        {**_STAGE_2, "name": "Flamburronix@wow"},
+    ]
+    result = _normalize(stages, "line", "standard")
+    assert [s["name"] for s in result] == ["Flamburr", "Flamburron"]
+    assert all(len(s["name"]) <= 10 for s in result)
+
+
+def test_normalize_makes_no_api_call():
+    """`_normalize` is pure post-processing — it must never touch a client."""
+    client = MagicMock()
+    with patch("fakemon_forge.generator.Mistral", return_value=client):
+        _normalize([{**_STAGE_1, "name": "Flamburronix"}], "single", "standard")
+    client.chat.complete.assert_not_called()
+
+
+# --- the prompt states the contract before the retry has to enforce it -------
+
+def test_system_prompt_states_the_name_length_limit():
+    """The retry is the fallback; the prompt is the first line of defence."""
+    assert "max 10 characters" in _SYSTEM_PROMPT
+
+
+@pytest.mark.parametrize("char", ["♂", "♀"])
+def test_system_prompt_states_the_name_charset(char):
+    """The gendered signs are the charset's least guessable members, and the
+    name spec is the only place they appear — so they pin the whole table."""
+    assert char in _SYSTEM_PROMPT
+
+
+def test_corrective_message_names_the_allowed_extras():
+    """The illegal-char corrective must not under-describe the charset — é/♂/♀
+    are legal, and a corrective that omits them makes the model over-restrict."""
+    message = _corrective_message([], ["Flam@burr"])
+    for char in "é♂♀":
+        assert char in message
+
+
+# --- the retry carries the offending array with it ---------------------------
+
+def test_corrective_retry_includes_the_offending_response():
+    raw = json.dumps([{**_STAGE_1, "name": "Flamburronix"}])
+    client = _make_client(raw, json.dumps([{**_STAGE_1, "name": "Flamburron"}]))
+    generate_fakemon("fire lizard", "single", client=client)
+    messages = client.chat.complete.call_args.kwargs["messages"]
+    assert [m["role"] for m in messages] == ["system", "user", "assistant", "user"]
+    assert messages[2]["content"] == raw
+
+
+def test_corrective_retry_keeps_valid_sibling_names_in_context():
+    """In line mode the two already-valid names must still be visible to the
+    model, or "return the full array again" silently rebuilds the whole line."""
+    bad_line = json.dumps([_STAGE_1, {**_STAGE_2, "name": "Infernodrake"}, _STAGE_3])
+    client = _make_client(bad_line, json.dumps(_LINE))
+    generate_fakemon("fire lizard", "line", client=client)
+    assistant = client.chat.complete.call_args.kwargs["messages"][2]
+    assert "Flamburr" in assistant["content"]
+    assert "Flamburron" in assistant["content"]
+
+
+# --- malformed model output degrades instead of raising ----------------------
+
+@pytest.mark.parametrize("bad_name", [42, None, 7.5, ["Flamburr"]])
+def test_non_string_name_is_repaired_not_raised(bad_name):
+    """`_normalize` never raises — a non-string name degrades to its str()
+    form, repaired against the same charset as any other name."""
+    result = _normalize([{**_STAGE_1, "name": bad_name}], "single", "standard")
+    assert isinstance(result[0]["name"], str)
+    assert len(result[0]["name"]) <= 10
+    assert all(ch in _ALLOWED_NAME_CHARS for ch in result[0]["name"])
+
+
+def test_non_string_name_does_not_crash_generate_fakemon():
+    client = _make_client(json.dumps([{**_STAGE_1, "name": 12345678901234}]))
+    result = generate_fakemon("fire lizard", "single", client=client)
+    assert result[0]["name"] == "1234567890"
 
 
 # ---------------------------------------------------------------------------
