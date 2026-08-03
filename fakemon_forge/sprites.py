@@ -5,8 +5,10 @@ from collections import Counter
 from pathlib import Path
 from PIL import Image, ImageDraw, ImageEnhance
 
-_BASE_MODEL_ID = "Lykon/dreamshaper-8"
-_LORA_PATH = Path(__file__).parent.parent / "models" / "loras" / "pksp768_V2-1.safetensors"
+_BASE_MODEL_ID = "Laxhar/noobai-XL-1.1"
+# Manual download required (never committed; models/ is gitignored): Civitai
+# model 378602, "Pokemon Sprite XL PixelArt back&front" (login required).
+_LORA_PATH = Path(__file__).parent.parent / "models" / "loras" / "pkspbf_nb_v1.safetensors"
 _LORA_SCALE = 0.7
 _GEN_SIZE = 768
 _NUM_STEPS = 30
@@ -52,29 +54,23 @@ _KEY_COLLISION_DISTANCE = 12
 _SPLIT_SEARCH_LOW = 0.4
 _SPLIT_SEARCH_HIGH = 0.6
 
-_TYPE_TAGS = {
-    "Normal": "normaltype", "Fire": "firetype", "Water": "watertype",
-    "Electric": "electrictype", "Grass": "grasstype", "Ice": "icetype",
-    "Fighting": "fightingtype", "Poison": "poisontype", "Ground": "groundtype",
-    "Flying": "flyingtype", "Psychic": "psychictype", "Bug": "bugtype",
-    "Rock": "rocktype", "Ghost": "ghosttype", "Dragon": "dragontype",
-    "Dark": "darktype", "Steel": "steeltype", "Fairy": "fairytype",
-}
-
-_GEN_STYLE = "gen3"
+_NEGATIVE_PROMPT = "worst quality, low quality, blurry, watermark, signature, text, jpeg artifacts"
 
 
-def build_prompt(sprite_prompt: str, types: list[str], extra_tags: list[str] | None = None) -> str:
-    type_tags = [_TYPE_TAGS[t] for t in types if t in _TYPE_TAGS]
-    all_tags = type_tags + [_GEN_STYLE] + (extra_tags or [])
-    tags = " ".join(all_tags)
-    return f"{tags} {sprite_prompt}".strip() if tags else sprite_prompt
-
-
-def _encode_prompt(prompt: str, pipeline):
-    from compel import Compel
-    compel = Compel(tokenizer=pipeline.tokenizer, text_encoder=pipeline.text_encoder)
-    return compel(prompt)
+# The SD1.5 LoRA this backend replaced had a trained "firetype"/"watertype"
+# trigger vocabulary, so type conditioning used to be mechanical: look the type
+# up in a table, prepend the tag. The SDXL LoRA knows no such vocabulary, so the
+# type signal has to arrive as ordinary description ("wreathed in embers"), and
+# only the LLM that picked the types can write it. That obligation is spelled
+# out in the ``sprite_prompt`` spec in ``generator.py`` (and pinned by a test
+# there) — it is the sole reason the ``types`` argument threaded through the
+# generate_* functions below is accepted but never read. Anything mechanical
+# here would just fight the prompt the LLM already wrote.
+def build_prompt(sprite_prompt: str, extra_tags: list[str] | None = None) -> str:
+    """Plain SDXL prompt string: type wording is baked into ``sprite_prompt`` upstream."""
+    if extra_tags:
+        return f"gen3, {sprite_prompt}, {', '.join(extra_tags)}, white background"
+    return f"gen3, {sprite_prompt}, white background"
 
 
 def k_centroid(image: Image.Image, width: int, height: int, centroids: int = 2) -> Image.Image:
@@ -707,9 +703,9 @@ def generate_sprite(
     prompt: str, types: list[str], output_path: str, *, pipeline,
     extra_tags: list[str] | None = None, seed: int | None = None,
 ) -> None:
-    conditioning = _encode_prompt(build_prompt(prompt, types, extra_tags), pipeline)
     result = pipeline(
-        prompt_embeds=conditioning,
+        prompt=build_prompt(prompt, extra_tags),
+        negative_prompt=_NEGATIVE_PROMPT,
         width=_GEN_SIZE,
         height=_GEN_SIZE,
         num_inference_steps=_NUM_STEPS,
@@ -738,9 +734,9 @@ def _run_img2img(
     ``build_frame2`` so it isn't double-quantized off frame 1's palette).
     """
     init = Image.open(image_path).convert("RGB").resize((_GEN_SIZE, _GEN_SIZE), Image.LANCZOS)
-    conditioning = _encode_prompt(build_prompt(prompt, types, extra_tags), pipeline)
     result = pipeline(
-        prompt_embeds=conditioning,
+        prompt=build_prompt(prompt, extra_tags),
+        negative_prompt=_NEGATIVE_PROMPT,
         image=init,
         num_inference_steps=_NUM_STEPS,
         guidance_scale=_CFG_SCALE,
@@ -836,8 +832,26 @@ def stitch_spritesheet(stage_dir: str, output_path: str, *, cell_size: int = 64)
 
 
 def make_img2img_pipeline(txt2img_pipe):
-    from diffusers import StableDiffusionImg2ImgPipeline
-    return StableDiffusionImg2ImgPipeline(**txt2img_pipe.components)
+    """Derive an img2img pipeline that reuses ``txt2img_pipe``'s loaded components.
+
+    The derived pipe gets its **own** ``enable_model_cpu_offload()`` rather than
+    riding on the parent's. The offload hooks live on the shared modules, but
+    the ``_all_hooks`` bookkeeping they are driven through lives on the
+    *pipeline* — so without this call the derived pipe's
+    ``maybe_free_model_hooks()`` (which every diffusers ``__call__`` runs on the
+    way out) silently does nothing, and whatever component ran last — the VAE,
+    upcast to fp32 to decode — stays GPU-resident until the next run evicts it.
+    That is the residency the 8GB budget cannot afford.
+
+    Enabling it on a pipe that shares another's components is safe here because
+    the two are the same pipeline in all the ways offload cares about: identical
+    ``model_cpu_offload_seq`` over identical modules. ``enable_model_cpu_offload``
+    strips every hook and reinstalls from scratch, so whichever pipe ran last
+    leaves the modules in exactly the state the other would have built anyway.
+    """
+    from diffusers import StableDiffusionXLImg2ImgPipeline
+    pipe = StableDiffusionXLImg2ImgPipeline(**txt2img_pipe.components)
+    return _enable_vram_measures(pipe)
 
 
 def _device_and_dtype():
@@ -848,63 +862,78 @@ def _device_and_dtype():
 
 
 def _apply_lora(pipe) -> None:
-    from diffusers.loaders.lora_pipeline import StableDiffusionLoraLoaderMixin
+    from diffusers.loaders.lora_pipeline import StableDiffusionXLLoraLoaderMixin
 
-    path = str(_LORA_PATH)
-    state_dict, network_alphas, metadata = StableDiffusionLoraLoaderMixin.lora_state_dict(
-        path, return_lora_metadata=True
+    state_dict, network_alphas, metadata = StableDiffusionXLLoraLoaderMixin.lora_state_dict(
+        str(_LORA_PATH), return_lora_metadata=True, unet_config=pipe.unet.config
     )
-
     pipe.load_lora_into_unet(
-        state_dict,
-        network_alphas=network_alphas,
-        unet=pipe.unet,
-        metadata=metadata,
-        _pipeline=pipe,
+        state_dict, network_alphas=network_alphas, unet=pipe.unet,
+        metadata=metadata, _pipeline=pipe,
     )
 
-    # diffusers converts kohya TE keys to "text_encoder.text_model.encoder.*" but
-    # the actual text encoder modules are named "encoder.*" (no text_model. wrapper),
-    # so rank detection fails.  Strip the extra level before handing off.
-    def _drop_text_model(d):
+    def _drop_text_model(d, prefix):
         if not d:
             return d
-        old = "text_encoder.text_model."
-        new = "text_encoder."
+        old = f"{prefix}.text_model."
+        new = f"{prefix}."
         return {new + k[len(old):] if k.startswith(old) else k: v for k, v in d.items()}
 
-    pipe.load_lora_into_text_encoder(
-        _drop_text_model(state_dict),
-        network_alphas=_drop_text_model(network_alphas),
-        text_encoder=pipe.text_encoder,
-        lora_scale=pipe.lora_scale,
-        metadata=metadata,
-        _pipeline=pipe,
-    )
+    # te1 (CLIPTextModel) names its modules WITHOUT the "text_model." wrapper level
+    # (needs the strip); te2 (CLIPTextModelWithProjection) names them WITH it (keys
+    # must stay untouched) -- verified against named_modules() of each encoder.
+    for encoder, prefix, fix in ((pipe.text_encoder, "text_encoder", True),
+                                 (pipe.text_encoder_2, "text_encoder_2", False)):
+        sd = _drop_text_model(state_dict, prefix) if fix else state_dict
+        al = _drop_text_model(network_alphas, prefix) if fix else network_alphas
+        pipe.load_lora_into_text_encoder(
+            sd, network_alphas=al, text_encoder=encoder, prefix=prefix,
+            lora_scale=pipe.lora_scale, metadata=metadata, _pipeline=pipe,
+        )
     pipe.fuse_lora(lora_scale=_LORA_SCALE)
 
 
-def _set_dpmpp_karras(pipe) -> None:
-    from diffusers import DPMSolverMultistepScheduler
-    pipe.scheduler = DPMSolverMultistepScheduler.from_config(
-        pipe.scheduler.config,
-        use_karras_sigmas=True,
-        algorithm_type="dpmsolver++",
-    )
+def _enable_vram_measures(pipe):
+    """Apply the CUDA-only VRAM measures to ``pipe`` and return it.
+
+    Mandatory on CUDA (not opt-in) to stay inside the 8GB budget, and applied to
+    every pipeline that is ever called — including one derived from another's
+    components (see ``make_img2img_pipeline``). Off CUDA this is a no-op:
+    ``enable_model_cpu_offload`` needs an accelerator and raises without one.
+
+    ``enable_model_cpu_offload`` installs hooks that move each component to the
+    GPU only while it runs, so from here on *it* owns device placement: a
+    ``pipe.to("cuda")`` afterwards would make every component resident at once
+    and hand the offload's savings straight back (diffusers warns on exactly
+    this combination), so the move is deliberately skipped on this path.
+    """
+    import torch
+    if not torch.cuda.is_available():
+        return pipe
+    pipe.enable_model_cpu_offload()
+    if hasattr(pipe, "enable_vae_tiling"):
+        pipe.enable_vae_tiling()
+    else:
+        pipe.vae.enable_tiling()
+    return pipe
 
 
 def _load_base_pipeline(pipe_cls):
+    from diffusers import EulerAncestralDiscreteScheduler
+
     device, dtype = _device_and_dtype()
-    pipe = pipe_cls.from_pretrained(_BASE_MODEL_ID, torch_dtype=dtype, safety_checker=None)
+    pipe = pipe_cls.from_pretrained(_BASE_MODEL_ID, torch_dtype=dtype)
     _apply_lora(pipe)
-    _set_dpmpp_karras(pipe)
-    return pipe.to(device)
+    pipe.scheduler = EulerAncestralDiscreteScheduler.from_config(pipe.scheduler.config)
+    if device != "cuda":
+        return pipe.to(device)
+    return _enable_vram_measures(pipe)
 
 
 def load_txt2img_pipeline():
     try:
-        from diffusers import StableDiffusionPipeline
-        return _load_base_pipeline(StableDiffusionPipeline)
+        from diffusers import StableDiffusionXLPipeline
+        return _load_base_pipeline(StableDiffusionXLPipeline)
     except Exception as exc:
         print(f"Error: failed to load model: {exc}", file=sys.stderr)
         sys.exit(1)
@@ -912,8 +941,8 @@ def load_txt2img_pipeline():
 
 def load_img2img_pipeline():
     try:
-        from diffusers import StableDiffusionImg2ImgPipeline
-        return _load_base_pipeline(StableDiffusionImg2ImgPipeline)
+        from diffusers import StableDiffusionXLImg2ImgPipeline
+        return _load_base_pipeline(StableDiffusionXLImg2ImgPipeline)
     except Exception as exc:
         print(f"Error: failed to load model: {exc}", file=sys.stderr)
         sys.exit(1)

@@ -75,7 +75,12 @@ Each element represents one evolutionary stage and must have exactly these field
     use only straight quotes and hyphens (' " -), never curly quotes or dashes.
     The display window fits 4 lines of 40 characters — anything past that is cut
     mid-sentence, so keep it comfortably short.
-  sprite_prompt – visual description for pixel-art sprite generation; max 75 words, lead with the creature's most distinctive shape and colour features (string)
+  sprite_prompt – visual description for pixel-art sprite generation; max 75 words, lead with the creature's most distinctive shape and colour features (string).
+    It must also show the creature's types through what it looks like — flames or
+    embers for Fire, fins or droplets for Water, wings or feathers for Flying, and
+    so on for every type you assigned. The sprite model is given this string and
+    nothing else: it never sees the types field, so a type you do not describe here
+    cannot reach the sprite.
   levitates     – boolean; true only if the creature levitates, is bodiless/gaseous/amorphous, or otherwise never touches the ground (e.g. floating orbs, ghosts, cloud/gas creatures); otherwise false
   height_dm – height in decimetres (integer).
   weight_hg – weight in hectograms (integer).
