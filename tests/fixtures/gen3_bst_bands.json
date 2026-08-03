@@ -1,0 +1,16 @@
+{
+  "_comment": "Observed Gen 3 base-stat-total bands. Aggregate statistics only - no species names, IDs or game-data references. Outer keys under stage-count buckets are 0-based stage indexes. Derived offline; regenerating requires excluding the unused placeholder slots, which the high-band count of 21 (legendary + mythical + box_legendary) verifies. box_legendary is recorded for completeness only - no tier targets it, since a fifth tier was declined during the #59 interview.",
+  "2": {
+    "0": {"median": 305, "p10": 240, "p90": 360, "n": 84},
+    "1": {"median": 468, "p10": 410, "p90": 515, "n": 84}
+  },
+  "3": {
+    "0": {"median": 295, "p10": 205, "p90": 314, "n": 37},
+    "1": {"median": 405, "p10": 278, "p90": 420, "n": 37},
+    "2": {"median": 518, "p10": 450, "p90": 600, "n": 37}
+  },
+  "standalone": {"median": 430, "p10": 336, "p90": 500, "n": 54},
+  "legendary": {"median": 580, "p10": 580, "p90": 580, "n": 9},
+  "mythical": {"median": 600, "p10": 600, "p90": 600, "n": 6},
+  "box_legendary": {"median": 680, "p10": 670, "p90": 680, "n": 6}
+}

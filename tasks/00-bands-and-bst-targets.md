@@ -1,6 +1,6 @@
 # Task 00 — Band fixture + `_BST_TARGETS` restructure
 
-- **Status:** pending
+- **Status:** done
 - **Wave:** 0
 - **Owns (the only files/dirs this task may create or modify):**
   - `tests/fixtures/gen3_bst_bands.json` (new)
@@ -88,15 +88,17 @@ This is what keeps the `ac5cf2f` / `0ae9a1d` scrub intact.
 
 ## Acceptance criteria (Definition of Done)
 
-- [ ] `tests/fixtures/gen3_bst_bands.json` exists with exactly the values above.
-- [ ] `_BST_TARGETS` is keyed by tier → stage count and supports all four lookups.
-- [ ] standard single is 430; 3-stage is 295 / 405 / 518; 2-stage is 305 / 468.
-- [ ] pseudo (300/420/600), legendary (580) and mythical (600) are unchanged.
-- [ ] Every target equals its band median, and lies within `[p10, p90]`.
-- [ ] The legendary + mythical band count asserts to exactly 21.
-- [ ] No species names, IDs, ROM offsets or slot ranges anywhere in the added files.
-- [ ] `fakemon_forge/` gained no file reads and no new dependency.
-- [ ] Full suite green: `pytest` from the repo root.
+- [x] `tests/fixtures/gen3_bst_bands.json` exists with exactly the values above,
+      **plus a `box_legendary` bucket** — see Notes.
+- [x] `_BST_TARGETS` is keyed by tier → stage count and supports all four lookups.
+- [x] standard single is 430; 3-stage is 295 / 405 / 518; 2-stage is 305 / 468.
+- [x] pseudo (300/420/600), legendary (580) and mythical (600) are unchanged.
+- [x] Every target equals its band median, and lies within `[p10, p90]`.
+- [x] The high band asserts to exactly 21 (legendary + mythical + box_legendary).
+- [x] No species names, IDs, ROM offsets or slot ranges anywhere in the added
+      files — verified by a test, itself verified to fail on a planted leak.
+- [x] `fakemon_forge/` gained no file reads and no new dependency.
+- [x] Full suite green: `pytest` from the repo root — 576 passed (baseline 541).
 
 ## Notes / assumptions
 
@@ -111,3 +113,29 @@ This is what keeps the `ac5cf2f` / `0ae9a1d` scrub intact.
 - The bands are already derived and validated (ten values cross-checked against
   the public Serebii listing, all matching). Do not re-derive them; the
   derivation utility belongs in the private injector repo.
+
+### Outcomes worth carrying forward
+
+- **A `box_legendary` band was added to the fixture** (n=6, median 680). The
+  21-member assertion caught that the originally specified fixture only carried
+  the legendary (9) and mythical (6) buckets, totalling 15 — the six
+  highest-tier species belong to no tier, because a fifth tier was declined
+  during the interview, and omitting them under-represented the data. No tier
+  targets this band; a test asserts it sits strictly above every tier target,
+  recording why.
+- **`_bst_row(tier, stage_count)` helper added to `generator.py`** as the
+  authorised minimum adapter. It falls back to a tier's only row when the
+  requested count is absent. This matters for `--tier pseudo --mode single`:
+  pseudo now has only a 3-stage row, and without the fallback that combination
+  would `KeyError` where it previously prompted ~300. It still prompts exactly
+  300. **Task 10 should generalise this to N stages, not delete it.**
+- **`--tier pseudo --mode single` is a live gap.** `README.md:107` already
+  documents pseudo as "only valid with `--mode line`", but `cli.py` does not
+  enforce it. Task 11 already rejects `pseudo` + 2 stages; it should reject
+  `pseudo` + `single` on the same grounds, at which point the fallback above
+  becomes unreachable for pseudo but still guards other tiers.
+- **The two adopted tests were strengthened, not just re-valued.**
+  `test_standard_tier_bst_in_prompt` asserted `"300" in text` against the whole
+  concatenated prompt; after the change to 430 it still passed, because `300`
+  appears in the system prompt's size anchors (`~10 dm / 300 hg`). Both now
+  assert the BST hint line itself.

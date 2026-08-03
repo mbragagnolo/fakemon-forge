@@ -32,11 +32,23 @@ _ALLOWED_NAME_CHARS = set(
     ".,'-…!?/()\":;"
 )
 
+# Base-stat-total targets, keyed tier -> stage count -> per-stage targets.
+# A stage count of 1 is a standalone species, not a juvenile: `standard` 1 is
+# deliberately far above `standard` 3's opening stage (issue #48 settled the
+# same reading for height/weight).
+#
+# Every value is the median of its observed Gen 3 band -- one rule, no
+# exceptions, so any number here can be re-derived and checked. The bands live
+# in tests/fixtures/gen3_bst_bands.json and tests/test_bst_targets.py enforces
+# the correspondence; nothing at runtime reads that file.
+#
+# `pseudo` has no 2-stage row on purpose -- every pseudo-legendary line is three
+# stages, and the CLI rejects the combination.
 _BST_TARGETS = {
-    "standard": {"stage1": 300, "stage2": 420, "stage3": 520},
-    "pseudo":   {"stage1": 300, "stage2": 420, "stage3": 600},
-    "legendary":{"stage1": 580},
-    "mythical": {"stage1": 600},
+    "standard":  {1: (430,), 2: (305, 468), 3: (295, 405, 518)},
+    "pseudo":    {3: (300, 420, 600)},
+    "legendary": {1: (580,)},
+    "mythical":  {1: (600,)},
 }
 
 _SYSTEM_PROMPT = f"""\
@@ -92,19 +104,31 @@ _TIER_NOTES = {
 }
 
 
-def _user_prompt(description: str, mode: str, tier: str) -> str:
-    targets = _BST_TARGETS[tier]
+def _bst_row(tier: str, stage_count: int) -> tuple[int, ...]:
+    """Per-stage BST targets for one tier and stage count.
 
+    A tier without a row for the requested count falls back to the one row it
+    does have. That keeps `--tier pseudo --mode single` prompting the value it
+    prompts today: pseudo has only a 3-stage row, and single mode reads the
+    first entry. The combination is already documented as line-only, and task 11
+    rejects it at the CLI; until then it must not crash.
+    """
+    rows = _BST_TARGETS[tier]
+    return rows.get(stage_count) or next(iter(rows.values()))
+
+
+def _user_prompt(description: str, mode: str, tier: str) -> str:
     if mode == "single":
         count = "one stage (stage 1 only)"
-        bst_hint = f"BST target: ~{targets['stage1']}."
+        bst_hint = f"BST target: ~{_bst_row(tier, 1)[0]}."
         evo_text = ""
     else:
+        row = _bst_row(tier, 3)
         count = "three evolutionary stages (stages 1, 2, and 3)"
         bst_hint = (
-            f"BST targets: stage 1 ~{targets['stage1']}, "
-            f"stage 2 ~{targets['stage2']}, "
-            f"stage 3 ~{targets['stage3']}."
+            f"BST targets: stage 1 ~{row[0]}, "
+            f"stage 2 ~{row[1]}, "
+            f"stage 3 ~{row[2]}."
         )
         evo_text = _EVO_PROGRESSION
 

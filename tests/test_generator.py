@@ -468,17 +468,24 @@ def _get_prompt_text(client):
 
 
 def test_standard_tier_bst_in_prompt():
+    """A standalone form gets the standalone budget, not a juvenile's (#59).
+
+    Asserts the BST hint itself, not a bare substring: the size anchors in the
+    system prompt contain other three-digit numbers, so `"430" in text` could
+    pass without the hint being right at all.
+    """
     client = _make_client(json.dumps([_STAGE_1]))
     generate_fakemon("fire lizard", "single", tier="standard", client=client)
-    text = _get_prompt_text(client)
-    assert "300" in text
+    assert "BST target: ~430." in _get_prompt_text(client)
 
 
 def test_standard_line_bst_includes_stage3_target():
     client = _make_client(json.dumps(_LINE))
     generate_fakemon("fire lizard", "line", tier="standard", client=client)
-    text = _get_prompt_text(client)
-    assert "520" in text
+    assert (
+        "BST targets: stage 1 ~295, stage 2 ~405, stage 3 ~518."
+        in _get_prompt_text(client)
+    )
 
 
 def test_pseudo_tier_bst_includes_600():
