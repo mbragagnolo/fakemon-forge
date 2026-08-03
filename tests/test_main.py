@@ -22,6 +22,18 @@ _STAGE_3 = {**_STAGE_1, "name": "Flamburron", "stage": 3, "pokedex_entry": "Melt
 _STAGE_LEVITATE = {**_STAGE_1, "name": "Floatburr", "levitates": True}
 
 
+def _write_pair(*args, **kwargs):
+    """side_effect for the generate_sprite_pair mock: touch both output files.
+
+    main's back-shiny step is guarded on sprite_back.png existing, so a mock
+    that writes nothing would make the txt2img path look like the (deliberate)
+    no-back-sprite degradation. Positional args 2 and 3 are the front and back
+    output paths.
+    """
+    Path(args[2]).write_bytes(b"")
+    Path(args[3]).write_bytes(b"")
+
+
 # ---------------------------------------------------------------------------
 # Fixture: patch every external call in main
 # ---------------------------------------------------------------------------
@@ -41,7 +53,7 @@ def ctx(tmp_path, monkeypatch):
         patch("fakemon_forge.main.load_txt2img_pipeline", return_value=MagicMock()) as m_t2i,
         patch("fakemon_forge.main.load_img2img_pipeline", return_value=MagicMock()) as m_i2i,
         patch("fakemon_forge.main.make_img2img_pipeline", return_value=MagicMock()) as m_make_i2i,
-        patch("fakemon_forge.main.generate_sprite")                as m_sprite,
+        patch("fakemon_forge.main.generate_sprite_pair")            as m_sprite,
         patch("fakemon_forge.main.generate_sprite_img2img")        as m_sprite_i2i,
         patch("fakemon_forge.main.generate_frame2")                as m_frame2,
         patch("fakemon_forge.main.generate_shiny")                 as m_shiny,
@@ -52,6 +64,7 @@ def ctx(tmp_path, monkeypatch):
         patch("fakemon_forge.main.write_output", return_value=[stage_dir]) as m_write,
         patch("fakemon_forge.main.export_ini")                     as m_export,
     ):
+        m_sprite.side_effect = _write_pair
         yield {
             "mistral": m_mistral, "vision": m_vision, "gen": m_gen,
             "t2i": m_t2i, "i2i": m_i2i, "make_i2i": m_make_i2i,
@@ -83,7 +96,7 @@ def ctx_line(tmp_path, monkeypatch):
         patch("fakemon_forge.main.load_txt2img_pipeline", return_value=MagicMock()),
         patch("fakemon_forge.main.load_img2img_pipeline", return_value=MagicMock()),
         patch("fakemon_forge.main.make_img2img_pipeline", return_value=MagicMock()),
-        patch("fakemon_forge.main.generate_sprite")           as m_sprite,
+        patch("fakemon_forge.main.generate_sprite_pair")      as m_sprite,
         patch("fakemon_forge.main.generate_sprite_img2img"),
         patch("fakemon_forge.main.generate_frame2")           as m_frame2,
         patch("fakemon_forge.main.generate_shiny")            as m_shiny,
@@ -94,6 +107,7 @@ def ctx_line(tmp_path, monkeypatch):
         patch("fakemon_forge.main.write_output", return_value=dirs),
         patch("fakemon_forge.main.export_ini"),
     ):
+        m_sprite.side_effect = _write_pair
         yield {"gen": m_gen,
                "sprite": m_sprite, "frame2": m_frame2, "shiny": m_shiny,
                "stitch": m_stitch, "footprint": m_footprint,
@@ -133,22 +147,25 @@ def test_txt2img_path_uses_txt2img_pipeline(ctx):
     ctx["i2i"].assert_not_called()
 
 
-def test_txt2img_path_calls_generate_sprite(ctx):
+def test_txt2img_path_calls_generate_sprite_pair(ctx):
     main(["--description", "fire lizard"])
     ctx["sprite"].assert_called_once()
-    # txt2img path now has 2 img2img calls per stage: back + chibi.
+    args = ctx["sprite"].call_args.args
+    assert args[2] == str(ctx["stage_dir"] / "sprite.png")        # front_output_path
+    assert args[3] == str(ctx["stage_dir"] / "sprite_back.png")   # back_output_path
+    # txt2img path now has exactly 1 img2img call per stage: chibi only (the
+    # old "backside" back-sprite call site is deleted).
     calls = ctx["sprite_i2i"].call_args_list
-    back = [c for c in calls if c.kwargs.get("extra_tags") == ["backside"]]
     chibi = [c for c in calls if c.kwargs.get("extra_tags") == _CHIBI_TAGS]
-    assert len(back) == 1
+    assert len(calls) == 1
     assert len(chibi) == 1
 
 
-def test_txt2img_sprite_called_with_user_description(ctx):
+def test_txt2img_sprite_called_with_stage_prompt(ctx):
     main(["--description", "fire lizard"])
     kwargs = ctx["sprite"].call_args.kwargs
     assert kwargs["pipeline"] is not None
-    assert ctx["sprite"].call_args.args[0] == "fire lizard"
+    assert ctx["sprite"].call_args.args[0] == _STAGE_1["sprite_prompt"]
 
 
 def test_txt2img_vision_step_skipped(ctx):
@@ -172,7 +189,7 @@ def test_img2img_path_calls_generate_sprite_img2img(ctx, tmp_path):
     img = tmp_path / "drawing.png"
     img.write_bytes(b"\x89PNG\r\n")
     main(["--image", str(img), "--description", "fire lizard"])
-    assert ctx["sprite_i2i"].call_count == 3   # front + chibi + back sprite
+    assert ctx["sprite_i2i"].call_count == 2   # front + chibi (no back sprite in --image mode)
     ctx["sprite"].assert_not_called()
 
 
@@ -191,40 +208,43 @@ def test_img2img_vision_image_path_passed(ctx, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Back sprite locked to frame 1's palette (reference_path=sprite.png)
+# --image mode produces no back sprite (known gap, closed by issue #69)
 # ---------------------------------------------------------------------------
 
-def test_txt2img_back_sprite_reference_is_frame1(ctx):
-    """The back-sprite call locks to frame 1's palette (sprite.png)."""
-    main(["--description", "fire lizard"])
-    calls = ctx["sprite_i2i"].call_args_list
-    back_call = next(c for c in calls if c.kwargs.get("extra_tags") == ["backside"])
-    assert back_call.kwargs["reference_path"] == str(ctx["stage_dir"] / "sprite.png")
+def test_img2img_path_produces_no_back_sprite_call(ctx, tmp_path):
+    """--image mode produces no back-sprite call at all in this slice.
 
-
-def test_img2img_back_sprite_inits_from_front_sprite(ctx, tmp_path):
-    """In the img2img path the back sprite inits from the generated front
-    sprite — not the user's drawing, which holds no backside information
-    (regression: #10). Palette reference stays frame 1 (sprite.png)."""
+    The old backside-img2img call site this test used to guard is deleted
+    here (issue #66), and generate_sprite_pair is txt2img-only, so nothing
+    writes sprite_back.png on the --image path. That is a real, temporary
+    regression against issue #10, accepted for this slice and closed by issue
+    #69, which routes --image through the pair path.
+    """
     img = tmp_path / "drawing.png"
     img.write_bytes(b"\x89PNG\r\n")
     main(["--image", str(img), "--description", "fire lizard"])
 
-    # Three img2img calls: front, chibi, and back. The chibi call also has
-    # reference_path=None (like the front), so distinguish by extra_tags.
     calls = ctx["sprite_i2i"].call_args_list
-    assert len(calls) == 3
-    front = [c for c in calls if c.kwargs.get("extra_tags") is None]
+    assert len(calls) == 2   # front + chibi only
     back = [c for c in calls if c.kwargs.get("extra_tags") == ["backside"]]
-    assert len(front) == 1 and len(back) == 1
+    assert back == []
+    ctx["sprite"].assert_not_called()   # generate_sprite_pair is txt2img-only
 
-    assert front[0].args[2] == str(img)   # front still seeds from the drawing
-    assert front[0].kwargs.get("reference_path") is None
-    back_call = back[0]
-    assert back_call.args[2] == str(ctx["stage_dir"] / "sprite.png")   # init = front sprite
-    assert back_call.kwargs["reference_path"] == str(ctx["stage_dir"] / "sprite.png")
-    assert back_call.kwargs["extra_tags"] == ["backside"]
-    assert back_call.kwargs["strength"] == 0.65
+
+def test_img2img_path_skips_back_shiny_without_warning(ctx, tmp_path, capsys):
+    """No back sprite means no back shiny — and no misleading warning about it.
+
+    Shining the absent sprite_back.png would raise FileNotFoundError and get
+    reported as "back shiny generation failed", pointing at the shiny step for
+    a gap that belongs to the sprite step.
+    """
+    img = tmp_path / "drawing.png"
+    img.write_bytes(b"\x89PNG\r\n")
+    main(["--image", str(img), "--description", "fire lizard"])
+
+    targets = [c.args[2] for c in ctx["shiny"].call_args_list]
+    assert str(ctx["stage_dir"] / "sprite_back_shiny.png") not in targets
+    assert "back shiny generation failed" not in capsys.readouterr().err
 
 
 # ---------------------------------------------------------------------------
@@ -618,7 +638,7 @@ def ctx_two(tmp_path, monkeypatch):
         patch("fakemon_forge.main.load_txt2img_pipeline", return_value=MagicMock()),
         patch("fakemon_forge.main.load_img2img_pipeline", return_value=MagicMock()),
         patch("fakemon_forge.main.make_img2img_pipeline", return_value=MagicMock()),
-        patch("fakemon_forge.main.generate_sprite")           as m_sprite,
+        patch("fakemon_forge.main.generate_sprite_pair")      as m_sprite,
         patch("fakemon_forge.main.generate_sprite_img2img"),
         patch("fakemon_forge.main.generate_frame2"),
         patch("fakemon_forge.main.generate_shiny"),
@@ -629,6 +649,7 @@ def ctx_two(tmp_path, monkeypatch):
         patch("fakemon_forge.main.write_output", return_value=dirs) as m_write,
         patch("fakemon_forge.main.export_ini"),
     ):
+        m_sprite.side_effect = _write_pair
         yield {"gen": m_gen, "sprite": m_sprite, "footprint": m_footprint,
                "icon": m_icon, "cry": m_cry, "write": m_write, "dirs": dirs}
 

@@ -53,6 +53,10 @@ _KEY_COLLISION_DISTANCE = 12
 # between the two sprites.
 _SPLIT_SEARCH_LOW = 0.4
 _SPLIT_SEARCH_HIGH = 0.6
+# Front+back pair canvas width (literal per the issue): the fused LoRA renders
+# front on the left half, back on the right half, at twice the single-sprite
+# width. Height stays ``_GEN_SIZE``.
+_PAIR_WIDTH = 1536
 
 _NEGATIVE_PROMPT = "worst quality, low quality, blurry, watermark, signature, text, jpeg artifacts"
 
@@ -587,6 +591,64 @@ def split_front_back_canvas(canvas: Image.Image) -> tuple[Image.Image, Image.Ima
     return canvas.crop((0, 0, cut, h)), canvas.crop((cut, 0, w, h))
 
 
+def _content_columns(image: Image.Image, background) -> tuple[int, int] | None:
+    """First and last columns of ``image`` holding a non-background pixel.
+
+    Column-wise rather than a full bbox because the only caller squares a
+    split half up, and that moves content horizontally only — the half is
+    already exactly as tall as the square it lands on. ``None`` when every
+    pixel is within ``_KEY_TOLERANCE`` of ``background`` (an empty half).
+    """
+    px = image.load()
+    w, h = image.size
+    columns = [
+        x for x in range(w)
+        if any(_rgb_distance(px[x, y], background) > _KEY_TOLERANCE for y in range(h))
+    ]
+    if not columns:
+        return None
+    return columns[0], columns[-1]
+
+
+def _fit_half_to_square(half: Image.Image) -> Image.Image:
+    """Sit a split half on a square background canvas without distorting it.
+
+    The content-aware cut lands anywhere in the middle 20% of the canvas, so
+    the two halves come out unequal widths: a gap centred at column 650 of a
+    1536-wide canvas yields a 650px front and an 886px back. Handing those
+    straight to ``postprocess`` / ``quantize_to_reference`` — both of which
+    *resize* to a square — would stretch that front +18% horizontally and
+    squeeze the back -13%, so front and back of one creature come out with
+    visibly different proportions. That is worse geometry than the
+    naive-midline fallback these halves exist to improve on, which cuts
+    768/768 and distorts nothing.
+
+    Pasting onto a square canvas of the half's own height keeps every pixel at
+    1:1 in both axes instead: a narrow half gains background padding, a wide
+    one is cropped to a square window, and a half that needs both gets both —
+    PIL clips a negative paste offset and leaves the canvas showing through a
+    positive one, so a single paste covers every case.
+
+    The window is centred on the half's *content*, not on the half itself, so
+    the creature lands mid-square however far off-centre the cut fell — which
+    is also what makes the crop safe. Cropping only ever removes columns the
+    content does not reach, so the sole way to lose content is a creature
+    wider than the square, where a centred window is the best available answer
+    anyway.
+    """
+    w, h = half.size
+    background = _detect_background(_border_ring(half))
+    columns = _content_columns(half, background)
+    if columns is None:
+        # Empty half: nothing to centre on, so centre the half itself.
+        left = round((h - w) / 2)
+    else:
+        left = round(h / 2 - (columns[0] + columns[1] + 1) / 2)
+    square = Image.new("RGB", (h, h), background)
+    square.paste(half, (left, 0))
+    return square
+
+
 def procedural_squash(frame1: Image.Image, amount_px: int | None = None) -> Image.Image:
     """Bottom-anchored vertical squash of ``frame1`` — the Gen-3 breathing frame.
 
@@ -723,11 +785,97 @@ def generate_sprite(
     sprite.save(output_path)
 
 
-def generate_back_sprite(
-    prompt: str, types: list[str], output_path: str, *, pipeline, seed: int | None = None
-) -> None:
-    generate_sprite(prompt, types, output_path, pipeline=pipeline, extra_tags=["backside"], seed=seed)
+def _split_front_back_with_retry(canvas: Image.Image, regenerate):
+    """Split a front/back canvas, rerolling once and falling back to a naive cut.
 
+    Torch-free: ``regenerate`` is a zero-arg callable the caller supplies to
+    produce a fresh canvas (``generate_sprite_pair`` wires it to a second
+    ``pipeline`` call), kept external so this retry/fallback decision stays a
+    plain, unit-testable function. Tries ``split_front_back_canvas`` on
+    ``canvas``; on failure calls ``regenerate()`` once and tries again on the
+    fresh canvas; on a second failure falls back to a naive midline split of
+    that fresh canvas and warns. Mirrors ``_flatten_background_to_key``'s
+    gradient-border fallback: a best-effort result plus a ``stderr`` warning,
+    never a raise — including when ``regenerate`` itself raises.
+    """
+    result = split_front_back_canvas(canvas)
+    if result is not None:
+        return result
+
+    try:
+        fresh = regenerate()
+    except Exception as exc:
+        # A failed reroll (a transient OOM on the second 1536-wide render, say)
+        # must not cost the caller the front sprite the first canvas can still
+        # give up — fall through to a naive split of the canvas already in hand.
+        print(
+            f"warning: _split_front_back_with_retry reroll render failed ({exc}); "
+            "falling back to a naive midline split of the first canvas",
+            file=sys.stderr,
+        )
+    else:
+        result = split_front_back_canvas(fresh)
+        if result is not None:
+            return result
+        canvas = fresh
+        print(
+            "warning: _split_front_back_with_retry found no clean split column even "
+            "after a reroll; falling back to a naive midline split",
+            file=sys.stderr,
+        )
+
+    w, h = canvas.size
+    cut = w // 2
+    return canvas.crop((0, 0, cut, h)), canvas.crop((cut, 0, w, h))
+
+
+def generate_sprite_pair(
+    prompt: str, types: list[str], front_output_path: str, back_output_path: str,
+    *, pipeline, seed: int | None = None,
+) -> None:
+    """Generate a front+back sprite pair from one side-by-side SDXL canvas.
+
+    One ``pipeline`` txt2img call renders a ``_PAIR_WIDTH`` x ``_GEN_SIZE``
+    canvas — front on the left half, back on the right half, per the fused
+    back&front LoRA. ``_split_front_back_with_retry`` cuts the two apart
+    (rerolling with ``seed + 1`` once, then falling back to a naive midline
+    split, if the content-aware split fails), and ``_fit_half_to_square``
+    squares each half up so the off-centre cut costs neither view its
+    proportions. The front is quantized adaptively via ``postprocess`` and
+    always saved. The back is locked to the front's exact palette via
+    ``quantize_to_reference``; if it comes back empty/background-only (every
+    pixel at the Gen-3 contract's key index 0), it is skipped with a ``stderr``
+    warning instead of being saved — this function never raises for a split or
+    empty-back degradation, only for a genuine ``pipeline`` failure.
+    """
+    def _render(render_seed):
+        result = pipeline(
+            prompt=build_prompt(prompt),
+            negative_prompt=_NEGATIVE_PROMPT,
+            width=_PAIR_WIDTH,
+            height=_GEN_SIZE,
+            num_inference_steps=_NUM_STEPS,
+            guidance_scale=_CFG_SCALE,
+            generator=_make_generator(render_seed),
+        )
+        return result.images[0]
+
+    canvas = _render(seed)
+    reroll_seed = seed + 1 if seed is not None else None
+    front_raw, back_raw = _split_front_back_with_retry(canvas, lambda: _render(reroll_seed))
+
+    front = postprocess(_fit_half_to_square(front_raw))
+    front.save(front_output_path)
+
+    back = quantize_to_reference(_fit_half_to_square(back_raw), front)
+    if _content_bbox(back, background=0) is None:
+        print(
+            f"warning: generate_sprite_pair back half for {back_output_path} is "
+            "empty/background-only; skipping back sprite",
+            file=sys.stderr,
+        )
+        return
+    back.save(back_output_path)
 
 
 def _run_img2img(

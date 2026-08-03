@@ -107,7 +107,7 @@ def forge(tmp_path, monkeypatch):
             patch("fakemon_forge.main.load_txt2img_pipeline", return_value=MagicMock()),
             patch("fakemon_forge.main.load_img2img_pipeline", return_value=MagicMock()),
             patch("fakemon_forge.main.make_img2img_pipeline", return_value=MagicMock()),
-            patch("fakemon_forge.main.generate_sprite"),
+            patch("fakemon_forge.main.generate_sprite_pair"),
             patch("fakemon_forge.main.generate_sprite_img2img"),
             patch("fakemon_forge.main.generate_frame2"),
             patch("fakemon_forge.main.generate_shiny"),
