@@ -46,6 +46,11 @@ _MAX_CREATURE_COLORS = 13
 # above): a creature colour within this Euclidean RGB distance of ``_KEY_COLOR``
 # is nudged away so it can never be mistaken for the transparency background.
 _KEY_COLLISION_DISTANCE = 12
+# Tunable eyeball placeholder: the middle 20% of a side-by-side front/back
+# canvas's columns (as fractions of width) searched for the background gap
+# between the two sprites.
+_SPLIT_SEARCH_LOW = 0.4
+_SPLIT_SEARCH_HIGH = 0.6
 
 _TYPE_TAGS = {
     "Normal": "normaltype", "Fire": "firetype", "Water": "watertype",
@@ -234,6 +239,31 @@ def _border_ring(image: Image.Image) -> list[tuple[int, int, int]]:
     return ring
 
 
+def _detect_background(ring) -> tuple[int, int, int]:
+    """The background colour of a ``_border_ring``: its per-channel mean.
+
+    The module's one convention for "what colour is the backdrop" — robust to
+    near-white noise and not assuming pure white, since SD sometimes paints
+    tints. Every site that needs it goes through here so the flatten and the
+    front/back split can't drift apart on the definition.
+    """
+    n = len(ring)
+    return tuple(round(sum(c[i] for c in ring) / n) for i in range(3))
+
+
+def _border_is_uniform(ring, bg) -> bool:
+    """Whether ``ring`` is a flat backdrop rather than a gradient/vignette.
+
+    True when at least ``_BORDER_UNIFORM_FRACTION`` of the ring sits within
+    ``_KEY_TOLERANCE`` of ``bg``. When it is false a single ``bg`` does not
+    describe the backdrop, and anything keyed off one — the flatten, the
+    front/back split — has to say so rather than quietly act on a colour that
+    matches nothing.
+    """
+    near = sum(1 for c in ring if _rgb_distance(c, bg) <= _KEY_TOLERANCE)
+    return near / len(ring) >= _BORDER_UNIFORM_FRACTION
+
+
 def _flatten_background_to_key(image: Image.Image) -> Image.Image:
     """Return a new RGB image with the background flattened to ``_KEY_COLOR``.
 
@@ -276,13 +306,10 @@ def _flatten_background_to_key(image: Image.Image) -> Image.Image:
     out = image.copy()
     w, h = out.size
     ring = _border_ring(out)
-    n = len(ring)
-    bg = tuple(round(sum(c[i] for c in ring) / n) for i in range(3))
-
-    near_fraction = sum(1 for c in ring if _rgb_distance(c, bg) <= _KEY_TOLERANCE) / n
+    bg = _detect_background(ring)
     px = out.load()
 
-    if near_fraction < _BORDER_UNIFORM_FRACTION:
+    if not _border_is_uniform(ring, bg):
         # Gradient/vignette border: don't flood a single bg (it could eat the
         # creature). Key only the dominant border colour and warn — never raise.
         dominant = Counter(ring).most_common(1)[0][0]
@@ -485,6 +512,76 @@ def _content_bbox(image: Image.Image, background: int):
     """Bounding box of the non-background region, or ``None`` if all background."""
     mask = image.point(lambda p: 255 if p != background else 0)
     return mask.getbbox()
+
+
+def split_front_back_canvas(canvas: Image.Image) -> tuple[Image.Image, Image.Image] | None:
+    """Cut a side-by-side front/back canvas into a front half and a back half.
+
+    ``canvas`` is assumed to hold a front sprite on the left and a back sprite
+    on the right, sharing one flat background (mirroring
+    ``_flatten_background_to_key``'s RGB assumption — not converted or
+    validated here). The background colour comes from ``_detect_background``,
+    the same convention the flatten uses.
+
+    Only the middle ``_SPLIT_SEARCH_LOW``-``_SPLIT_SEARCH_HIGH`` fraction of
+    columns is searched for the widest run of columns that are background for
+    their *full height* (every pixel within ``_KEY_TOLERANCE`` of ``bg``) —
+    that's where the gap between the two sprites is expected to fall. The cut
+    lands at the widest run's centre column; ties go to the first (leftmost)
+    run encountered. ``canvas`` is not mutated.
+
+    Returns ``(front_half, back_half)`` crops, or ``None``. Three things about
+    that contract the caller has to handle, none of which this slice decides:
+
+    * **The halves are not equal width.** The cut tracks the actual gap, so on
+      an off-centre generation one half is wider than the other — on a
+      1536-wide canvas each can run ~614-920px. A caller that resizes both to
+      one square distorts the two sprites by *different* aspect ratios; it
+      wants ``_content_bbox`` and padding, not a straight stretch.
+    * **``None`` means "no band", not "no two sprites".** A blank canvas, or
+      one holding a single sprite off to one side, has plenty of full-height
+      background and splits "successfully" into halves one of which is empty.
+      Reroll logic keyed only on ``None`` will happily accept that.
+    * **A gradient/vignette backdrop returns ``None``** even when the gap is
+      plainly there, because one mean ``bg`` doesn't describe such a backdrop
+      (the ring mean lands far from the gap's actual pixels). Rejected up front
+      rather than scanned against a colour that matches nothing — same reason
+      ``_flatten_background_to_key`` branches on ``_border_is_uniform``, though
+      it warns and degrades where this reports no band and lets the caller
+      reroll.
+    """
+    w, h = canvas.size
+    ring = _border_ring(canvas)
+    bg = _detect_background(ring)
+    if not _border_is_uniform(ring, bg):
+        return None
+
+    px = canvas.load()
+    x_start = int(_SPLIT_SEARCH_LOW * w)
+    x_end = int(_SPLIT_SEARCH_HIGH * w)
+
+    # Maximal ``[start, end)`` column ranges that are background for their full
+    # height. The window is only 20% of the canvas, so this list stays short.
+    runs = []
+    run_start = None
+    for x in range(x_start, x_end):
+        if all(_rgb_distance(px[x, y], bg) <= _KEY_TOLERANCE for y in range(h)):
+            if run_start is None:
+                run_start = x
+        elif run_start is not None:
+            runs.append((run_start, x))
+            run_start = None
+    if run_start is not None:
+        runs.append((run_start, x_end))
+
+    if not runs:
+        return None
+
+    # Widest run wins; ``max`` returns the first of equal-width runs, so a tie
+    # goes to the leftmost one.
+    start, end = max(runs, key=lambda run: run[1] - run[0])
+    cut = (start + end) // 2
+    return canvas.crop((0, 0, cut, h)), canvas.crop((cut, 0, w, h))
 
 
 def procedural_squash(frame1: Image.Image, amount_px: int | None = None) -> Image.Image:

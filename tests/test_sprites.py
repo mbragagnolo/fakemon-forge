@@ -27,7 +27,12 @@ from fakemon_forge.sprites import (
     _flatten_background_to_key,
     _quantize_gen3,
     _rgb_distance,
+    split_front_back_canvas,
+    _border_ring,
+    _border_is_uniform,
+    _detect_background,
     _KEY_COLOR,
+    _KEY_TOLERANCE,
     _MAX_CREATURE_COLORS,
     _KEY_COLLISION_DISTANCE,
     load_txt2img_pipeline,
@@ -752,6 +757,278 @@ def test_background_index_is_most_common_index():
     bg = _background_index(frame1)
     counts = {i: c for c, i in frame1.getcolors()}
     assert bg == max(counts, key=counts.get)
+
+
+# ---------------------------------------------------------------------------
+# split_front_back_canvas()
+# ---------------------------------------------------------------------------
+# All canvases below are 200x100 RGB, background (250, 250, 250). The middle
+# 20% search window is columns [80, 120) (`int(0.4 * 200)` to `int(0.6 * 200)`).
+#
+# Content never touches row 0 or row 99: the background colour is detected from
+# the 1-px border ring, so a band bleeding into it would skew `bg` away from
+# (250, 250, 250) and the tests would stop exercising what they claim to.
+# `_SPLIT_ROWS` is the safe row span for a full-height-blocking band.
+
+_SPLIT_BG = (250, 250, 250)
+_SPLIT_FRONT_COLOR = (30, 60, 90)
+_SPLIT_BACK_COLOR = (90, 30, 60)
+_SPLIT_ROWS = (1, 98)
+
+
+def _split_canvas(*bands):
+    """A 200x100 background canvas with ``(x0, x1, colour)`` bands drawn on it.
+
+    Each band spans `_SPLIT_ROWS`, so every column it covers has at least one
+    non-background pixel (disqualifying it as a full-height background column)
+    while the border ring stays pure background.
+    """
+    canvas = Image.new("RGB", (200, 100), _SPLIT_BG)
+    d = ImageDraw.Draw(canvas)
+    for x0, x1, color in bands:
+        d.rectangle((x0, _SPLIT_ROWS[0], x1, _SPLIT_ROWS[1]), fill=color)
+    return canvas
+
+
+def test_split_clean_centered_gap_cuts_at_gap_centre():
+    # Front square at columns 30-94 (rows 20-79), back square at columns
+    # 105-170 (rows 20-79): the only full-height background run in the
+    # [80, 120) window is columns 95-104, centred in the window.
+    canvas = Image.new("RGB", (200, 100), _SPLIT_BG)
+    d = ImageDraw.Draw(canvas)
+    d.rectangle((30, 20, 94, 79), fill=_SPLIT_FRONT_COLOR)
+    d.rectangle((105, 20, 170, 79), fill=_SPLIT_BACK_COLOR)
+    before = canvas.tobytes()
+
+    result = split_front_back_canvas(canvas)
+    assert result is not None
+    front_half, back_half = result
+    assert front_half.size == (100, 100)
+    assert back_half.size == (100, 100)
+
+    # Front half holds the front square untouched.
+    assert front_half.getpixel((60, 50)) == _SPLIT_FRONT_COLOR
+    # Back half holds the back square, shifted left by the cut column.
+    assert back_half.getpixel((105 - 100, 50)) == _SPLIT_BACK_COLOR
+    assert back_half.getpixel((170 - 100, 50)) == _SPLIT_BACK_COLOR
+    # The halves are fresh crops — the caller's canvas is untouched.
+    assert canvas.tobytes() == before
+
+
+def test_split_widest_run_wins_over_narrower_earlier_run():
+    # Column bands across the [80, 120) window:
+    #   80-95 content, 96-99 bg (narrow gap, width 4), 100-105 content,
+    #   106-118 bg (wide gap, width 13), 119 content.
+    # The narrow gap is both encountered first *and* closer to the literal
+    # midline (column 100), yet the wide gap must still win the cut.
+    canvas = _split_canvas(
+        (80, 95, _SPLIT_FRONT_COLOR),
+        (100, 105, _SPLIT_BACK_COLOR),
+        (119, 119, _SPLIT_FRONT_COLOR),
+    )
+
+    result = split_front_back_canvas(canvas)
+    assert result is not None
+    front_half, back_half = result
+    # Widest run is columns 106-118 (run_start=106, run_end=119); centre = 112.
+    assert front_half.size == (112, 100)
+    assert back_half.size == (200 - 112, 100)
+    # The narrow gap's own centre (97) would have landed mid-front-square.
+    assert front_half.getpixel((103, 50)) == _SPLIT_BACK_COLOR
+    assert back_half.getpixel((119 - 112, 50)) == _SPLIT_FRONT_COLOR
+
+
+def test_split_equal_width_runs_tie_break_to_the_leftmost():
+    # Two background gaps of the same width (88-92 and 106-110): the documented
+    # tie-break picks the leftmost, so the cut is that run's centre (90).
+    canvas = _split_canvas(
+        (80, 87, _SPLIT_FRONT_COLOR),
+        (93, 105, _SPLIT_BACK_COLOR),
+        (111, 119, _SPLIT_FRONT_COLOR),
+    )
+
+    result = split_front_back_canvas(canvas)
+    assert result is not None
+    front_half, _back_half = result
+    assert front_half.size == (90, 100)
+
+
+def test_split_single_column_run_is_a_valid_run():
+    # Exactly one background column (100) in the window; its "centre" is itself.
+    canvas = _split_canvas(
+        (80, 99, _SPLIT_FRONT_COLOR),
+        (101, 119, _SPLIT_BACK_COLOR),
+    )
+
+    result = split_front_back_canvas(canvas)
+    assert result is not None
+    front_half, back_half = result
+    assert front_half.size == (100, 100)
+    assert back_half.size == (100, 100)
+
+
+def test_split_entire_window_background_cuts_at_window_centre():
+    # Both subjects sit well outside the [80, 120) window, so the whole window
+    # is one run — no special casing, the cut is just its centre (100).
+    canvas = _split_canvas(
+        (20, 70, _SPLIT_FRONT_COLOR),
+        (130, 180, _SPLIT_BACK_COLOR),
+    )
+
+    result = split_front_back_canvas(canvas)
+    assert result is not None
+    front_half, back_half = result
+    assert front_half.size == (100, 100)
+    assert back_half.size == (100, 100)
+    assert front_half.getpixel((50, 50)) == _SPLIT_FRONT_COLOR
+    assert back_half.getpixel((150 - 100, 50)) == _SPLIT_BACK_COLOR
+
+
+def test_split_no_full_height_background_run_returns_none():
+    # A single band spans columns 70-130, covering the entire [80, 120) search
+    # window, so no column in it is background for its full height.
+    canvas = _split_canvas((70, 130, _SPLIT_FRONT_COLOR))
+
+    assert split_front_back_canvas(canvas) is None
+
+
+def test_split_one_off_tolerance_pixel_disqualifies_the_column():
+    # Same layout as the clean-gap test (gap at columns 95-104, centre 100) but
+    # with a single speck at (99, 50) further than `_KEY_TOLERANCE` from the
+    # background. "Full height" is strict, so column 99 is no longer background
+    # and the gap splits into runs 95-98 (width 4) and 100-104 (width 5) — the
+    # wider right-hand one wins, moving the cut to 102.
+    canvas = _split_canvas(
+        (30, 94, _SPLIT_FRONT_COLOR),
+        (105, 170, _SPLIT_BACK_COLOR),
+    )
+    speck = (210, 250, 250)
+    assert _rgb_distance(speck, _SPLIT_BG) > _KEY_TOLERANCE
+    canvas.putpixel((99, 50), speck)
+
+    result = split_front_back_canvas(canvas)
+    assert result is not None
+    front_half, _back_half = result
+    assert front_half.size == (102, 100)
+
+
+def test_split_within_tolerance_noise_still_counts_as_background():
+    # The mirror of the test above: a speck *within* `_KEY_TOLERANCE` (the
+    # near-white noise SD actually paints) leaves the column background, so the
+    # gap stays whole and the cut stays at its centre (100).
+    canvas = _split_canvas(
+        (30, 94, _SPLIT_FRONT_COLOR),
+        (105, 170, _SPLIT_BACK_COLOR),
+    )
+    speck = (235, 235, 245)
+    assert _rgb_distance(speck, _SPLIT_BG) <= _KEY_TOLERANCE
+    canvas.putpixel((99, 50), speck)
+
+    result = split_front_back_canvas(canvas)
+    assert result is not None
+    front_half, _back_half = result
+    assert front_half.size == (100, 100)
+
+
+def test_split_detects_a_tinted_background_from_the_border_ring():
+    # SD paints tints/vignettes, not pure white, so the gap is only found if the
+    # background colour comes from the border ring (as `_flatten_background_to_key`
+    # computes it) rather than being assumed white. This canvas's backdrop is far
+    # enough from white that a hardcoded one would match no column at all.
+    tint = (180, 200, 210)
+    assert _rgb_distance(tint, (255, 255, 255)) > _KEY_TOLERANCE
+    canvas = Image.new("RGB", (200, 100), tint)
+    d = ImageDraw.Draw(canvas)
+    d.rectangle((30, 20, 94, 79), fill=_SPLIT_FRONT_COLOR)
+    d.rectangle((105, 20, 170, 79), fill=_SPLIT_BACK_COLOR)
+
+    result = split_front_back_canvas(canvas)
+    assert result is not None
+    front_half, back_half = result
+    assert front_half.size == (100, 100)
+    assert back_half.size == (100, 100)
+
+
+def test_split_degenerate_search_window_returns_none():
+    # A canvas so narrow that `int(0.6 * w) <= int(0.4 * w)`: the window holds
+    # zero columns, so no run can exist and there is nothing to cut at.
+    canvas = Image.new("RGB", (1, 100), _SPLIT_BG)
+
+    assert split_front_back_canvas(canvas) is None
+
+
+def test_split_vignetted_background_returns_none():
+    """A gradient backdrop reports "no band" rather than splitting on a bad `bg`.
+
+    One mean colour does not describe a vignette — the ring mean lands far from
+    the gap's actual pixels — so the scan would be measuring against a colour
+    that matches nothing. Rejected up front, the same condition
+    `_flatten_background_to_key` branches on, leaving the caller to reroll.
+    """
+    canvas = Image.new("RGB", (200, 100))
+    px = canvas.load()
+    for y in range(100):
+        for x in range(200):
+            # Bright at the centre, falling off towards every edge.
+            fade = 1 - (abs(x - 100) / 100) * 0.5 - (abs(y - 50) / 50) * 0.2
+            v = int(250 * fade)
+            px[x, y] = (v, v, v)
+    d = ImageDraw.Draw(canvas)
+    d.rectangle((30, 20, 94, 79), fill=_SPLIT_FRONT_COLOR)
+    d.rectangle((105, 20, 170, 79), fill=_SPLIT_BACK_COLOR)
+
+    ring = _border_ring(canvas)
+    assert not _border_is_uniform(ring, _detect_background(ring))
+    assert split_front_back_canvas(canvas) is None
+
+
+def test_split_halves_are_unequal_when_the_gap_is_off_centre():
+    """The cut tracks the gap, so the halves are *not* each half the width.
+
+    Pins the contract a caller has to honour: resizing both halves to one
+    square would stretch the two sprites by different aspect ratios.
+    """
+    # Only full-height background run in [80, 120) is columns 81-89, so the cut
+    # lands at 85 — well off the 100px midline. Bands stop short of columns 0
+    # and 199 for the same reason they stop short of rows 0 and 99: the border
+    # ring is where `bg` comes from.
+    canvas = _split_canvas((20, 80, _SPLIT_FRONT_COLOR), (90, 180, _SPLIT_BACK_COLOR))
+
+    result = split_front_back_canvas(canvas)
+    assert result is not None
+    front_half, back_half = result
+    assert front_half.size == (85, 100)
+    assert back_half.size == (115, 100)
+    assert front_half.width != back_half.width
+
+
+def test_split_blank_canvas_succeeds_with_two_empty_halves():
+    """`None` means "no band", not "two sprites present".
+
+    An empty canvas is all background, so the widest run is the whole window
+    and the split "succeeds" into two sprite-less halves. Pins the gap a caller
+    branching only on `None` has to close itself.
+    """
+    result = split_front_back_canvas(Image.new("RGB", (200, 100), _SPLIT_BG))
+    assert result is not None
+    front_half, back_half = result
+    assert set(front_half.get_flattened_data()) == {_SPLIT_BG}
+    assert set(back_half.get_flattened_data()) == {_SPLIT_BG}
+
+
+def test_split_single_sprite_canvas_succeeds_with_one_empty_half():
+    """The same gap with real content: one sprite off to the left still splits.
+
+    Everything right of it is background, so a run is found and the back half
+    comes back empty — indistinguishable from a good split by return type.
+    """
+    canvas = _split_canvas((30, 94, _SPLIT_FRONT_COLOR))
+
+    result = split_front_back_canvas(canvas)
+    assert result is not None
+    front_half, back_half = result
+    assert _SPLIT_FRONT_COLOR in set(front_half.get_flattened_data())
+    assert set(back_half.get_flattened_data()) == {_SPLIT_BG}
 
 
 # ---------------------------------------------------------------------------
