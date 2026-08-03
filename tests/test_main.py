@@ -163,20 +163,32 @@ def test_txt2img_vision_step_skipped(ctx):
 # img2img path (image provided)
 # ---------------------------------------------------------------------------
 
-def test_img2img_path_uses_img2img_pipeline(ctx, tmp_path):
+def test_img2img_path_uses_txt2img_pipeline(ctx, tmp_path):
+    """Issue #69: --image mode now loads the same txt2img pipeline as
+    text-only mode (load_img2img_pipeline is never called for the primary
+    sprite call — see spec.md's Approach B)."""
     img = tmp_path / "drawing.png"
     img.write_bytes(b"\x89PNG\r\n")
     main(["--image", str(img), "--description", "fire lizard"])
-    ctx["i2i"].assert_called_once()
-    ctx["t2i"].assert_not_called()
+    ctx["t2i"].assert_called_once()
+    ctx["i2i"].assert_not_called()
 
 
-def test_img2img_path_calls_generate_sprite_img2img(ctx, tmp_path):
+def test_img2img_path_calls_generate_sprite_pair(ctx, tmp_path):
+    """Issue #69: --image mode now produces a front+back pair via the same
+    generate_sprite_pair call txt2img mode uses; generate_sprite_img2img is
+    only called for the chibi enhancement."""
     img = tmp_path / "drawing.png"
     img.write_bytes(b"\x89PNG\r\n")
     main(["--image", str(img), "--description", "fire lizard"])
-    assert ctx["sprite_i2i"].call_count == 2   # front + chibi (no back sprite in --image mode)
-    ctx["sprite"].assert_not_called()
+    ctx["sprite"].assert_called_once()
+    args = ctx["sprite"].call_args.args
+    assert args[2] == str(ctx["stage_dir"] / "sprite.png")        # front_output_path
+    assert args[3] == str(ctx["stage_dir"] / "sprite_back.png")   # back_output_path
+    calls = ctx["sprite_i2i"].call_args_list
+    chibi = [c for c in calls if c.kwargs.get("extra_tags") == _CHIBI_TAGS]
+    assert len(calls) == 1
+    assert len(chibi) == 1
 
 
 def test_img2img_vision_step_called(ctx, tmp_path):
@@ -194,25 +206,25 @@ def test_img2img_vision_image_path_passed(ctx, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# --image mode produces no back-sprite call (regression flag: see spec.md)
+# --image mode produces a back-sprite pair (issue #69, fixing the regression
+# tracked in an earlier slice of this same issue)
 # ---------------------------------------------------------------------------
 
-def test_img2img_path_produces_no_back_sprite_call(ctx, tmp_path):
-    """--image mode no longer produces any back-sprite call: the old
-    backside-img2img call site this test used to guard is deleted by this
-    slice, and no replacement mechanism for an img2img-seeded front+back pair
-    is implemented yet. Consequence (flagged explicitly in spec.md's
-    Assumptions, a real regression against issue #10): sprite_back.png /
-    sprite_back_shiny.png are no longer produced for --image runs."""
+def test_img2img_path_produces_back_sprite_pair(ctx, tmp_path):
+    """--image mode's sprite_back.png regression (an earlier slice deleted the
+    old img2img backside chain without a replacement) is fixed by routing
+    --image mode through the same generate_sprite_pair call txt2img mode
+    uses (spec.md's Approach B: the drawing feeds sprite generation only via
+    describe_image's vision output, not via img2img on the raw pixels)."""
     img = tmp_path / "drawing.png"
     img.write_bytes(b"\x89PNG\r\n")
     main(["--image", str(img), "--description", "fire lizard"])
 
+    ctx["sprite"].assert_called_once()
+    args = ctx["sprite"].call_args.args
+    assert args[3] == str(ctx["stage_dir"] / "sprite_back.png")   # back_output_path
     calls = ctx["sprite_i2i"].call_args_list
-    assert len(calls) == 2   # front + chibi only
-    back = [c for c in calls if c.kwargs.get("extra_tags") == ["backside"]]
-    assert back == []
-    ctx["sprite"].assert_not_called()   # generate_sprite_pair is txt2img-only
+    assert len(calls) == 1   # chibi only — no img2img call against the raw drawing
 
 
 # ---------------------------------------------------------------------------
@@ -451,9 +463,10 @@ def test_chibi_render_uses_the_txt2img_derived_img2img_pipeline(ctx):
     assert chibi[0].kwargs["pipeline"] is ctx["make_i2i"].return_value
 
 
-def test_chibi_render_uses_the_loaded_img2img_pipeline_in_image_mode(ctx, tmp_path):
-    """--image path: the chibi pass reuses load_img2img_pipeline()'s SDXL
-    pipeline, the same one that rendered the front sprite."""
+def test_chibi_render_uses_the_txt2img_derived_img2img_pipeline_in_image_mode(ctx, tmp_path):
+    """Issue #69: --image mode now loads only the txt2img pipeline (same as
+    text-only mode), so the chibi pass runs on make_img2img_pipeline's
+    derived pipeline, not a separately loaded img2img one."""
     img = tmp_path / "drawing.png"
     img.write_bytes(b"\x89PNG\r\n")
     main(["--image", str(img), "--description", "fire lizard"])
@@ -461,7 +474,7 @@ def test_chibi_render_uses_the_loaded_img2img_pipeline_in_image_mode(ctx, tmp_pa
     chibi = [c for c in ctx["sprite_i2i"].call_args_list
              if c.kwargs.get("extra_tags") == _CHIBI_TAGS]
     assert len(chibi) == 1
-    assert chibi[0].kwargs["pipeline"] is ctx["i2i"].return_value
+    assert chibi[0].kwargs["pipeline"] is ctx["make_i2i"].return_value
 
 
 def test_icon_generated_three_times_in_line_mode(ctx_line):
