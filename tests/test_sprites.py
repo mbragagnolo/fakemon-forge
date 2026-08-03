@@ -27,12 +27,19 @@ from fakemon_forge.sprites import (
     _flatten_background_to_key,
     _quantize_gen3,
     _rgb_distance,
+    split_front_back_canvas,
+    _border_ring,
+    _border_is_uniform,
+    _detect_background,
     _KEY_COLOR,
+    _KEY_TOLERANCE,
     _MAX_CREATURE_COLORS,
     _KEY_COLLISION_DISTANCE,
     load_txt2img_pipeline,
     load_img2img_pipeline,
+    make_img2img_pipeline,
     _BASE_MODEL_ID,
+    _LORA_PATH,
     _LORA_SCALE,
 )
 
@@ -97,27 +104,23 @@ def _anchor(bbox):
 # build_prompt()
 # ---------------------------------------------------------------------------
 
-def test_build_prompt_no_types_prepends_only_style_tag():
-    assert build_prompt("spiky wolf", []) == "gen3 spiky wolf"
+def test_build_prompt_no_extra_tags_uses_plain_formula():
+    assert build_prompt("spiky wolf") == "gen3, spiky wolf, white background"
 
 
-def test_build_prompt_single_type_prepends_tag():
-    result = build_prompt("fire lizard", ["Fire"])
-    assert result.startswith("firetype")
-    assert "fire lizard" in result
+def test_build_prompt_empty_extra_tags_list_matches_none():
+    assert build_prompt("spiky wolf", []) == build_prompt("spiky wolf", None)
+    assert build_prompt("spiky wolf", []) == "gen3, spiky wolf, white background"
 
 
-def test_build_prompt_two_types_prepends_both_tags():
-    result = build_prompt("rock crab", ["Rock", "Water"])
-    assert "rocktype" in result
-    assert "watertype" in result
-    assert "rock crab" in result
+def test_build_prompt_single_extra_tag_inserted_before_white_background():
+    result = build_prompt("fire lizard", ["backside"])
+    assert result == "gen3, fire lizard, backside, white background"
 
 
-def test_build_prompt_unknown_type_is_skipped():
-    result = build_prompt("mystery blob", ["Shadow"])
-    assert "shadowtype" not in result
-    assert result == "gen3 mystery blob"
+def test_build_prompt_multiple_extra_tags_joined_with_comma():
+    result = build_prompt("chibi crab", ["chibi", "big head", "small body"])
+    assert result == "gen3, chibi crab, chibi, big head, small body, white background"
 
 
 # ---------------------------------------------------------------------------
@@ -337,12 +340,26 @@ def _noisy_border_sprite():
     return img
 
 
+_OUTLINE = (20, 24, 40)   # dark silhouette edge, as the pixel-art LoRA renders it
+_BODY = (60, 120, 200)
+
+
 def _ring_sprite():
-    """96x96 RGB: a creature disc with a background-coloured hole punched in it."""
+    """96x96 RGB: a creature disc with a background-coloured hole punched in it.
+
+    Drawn with the dark silhouette outline a real render carries, around the
+    outside *and* around the hole — seeing through the sprite is exactly what
+    puts an outline there, and it is the only thing that distinguishes this
+    hole from ``_highlight_sprite``'s painted patch. Without it the two images
+    are structurally identical (a near-bg island surrounded by body colour) and
+    no rule could key one and spare the other.
+    """
     img = Image.new("RGB", (96, 96), (250, 250, 250))
     d = ImageDraw.Draw(img)
-    d.ellipse((20, 20, 76, 76), fill=(60, 120, 200))
-    d.ellipse((40, 40, 56, 56), fill=(250, 250, 250))  # enclosed background pocket
+    d.ellipse((20, 20, 76, 76), fill=_OUTLINE)
+    d.ellipse((23, 23, 73, 73), fill=_BODY)
+    d.ellipse((40, 40, 56, 56), fill=_OUTLINE)         # the hole's outline rim
+    d.ellipse((43, 43, 53, 53), fill=(250, 250, 250))  # enclosed background pocket
     return img
 
 
@@ -376,15 +393,167 @@ def test_flatten_keys_every_border_pixel_and_leaves_creature():
         assert px[point] == (200, 80, 60)
 
 
-def test_flatten_keys_enclosed_pocket_via_global_sweep():
+def test_flatten_keys_enclosed_pocket_via_connected_component_scan():
     img = _ring_sprite()
     out = _flatten_background_to_key(img)
     px = out.load()
-    # The enclosed hole the outer flood cannot reach is keyed by the sweep.
+    # The enclosed hole the outer flood cannot reach is keyed by the scan.
     for point in ((48, 48), (46, 48), (48, 46)):
         assert px[point] == _KEY_COLOR
     # The creature ring itself is unchanged.
     assert px[28, 48] == (60, 120, 200)
+
+
+def _highlight_sprite(box=(44, 44, 52, 52)):
+    """96x96 RGB: a creature disc with a near-bg detail patch painted on it.
+
+    Unlike ``_ring_sprite``'s hole, this patch is not a background pocket — it's
+    a same-coloured detail (a shield highlight, a white belly patch) that just
+    happens to be within ``_KEY_TOLERANCE`` of the background colour. It sits on
+    body colour with no outline around it, because you cannot see through it.
+    """
+    img = Image.new("RGB", (96, 96), (250, 250, 250))
+    d = ImageDraw.Draw(img)
+    d.ellipse((20, 20, 76, 76), fill=_OUTLINE)
+    d.ellipse((23, 23, 73, 73), fill=_BODY)
+    d.rectangle(box, fill=(245, 245, 245))  # near-bg detail, not a pocket
+    return img
+
+
+def test_flatten_leaves_isolated_near_background_detail_patch_untouched():
+    img = _highlight_sprite()
+    out = _flatten_background_to_key(img)
+    px = out.load()
+    # The highlight is colour-close to bg, but it is walled by body colour
+    # rather than by the silhouette outline, so it must survive untouched.
+    for point in ((48, 48), (46, 48), (48, 46)):
+        assert px[point] == (245, 245, 245)
+    # The creature disc itself is unchanged.
+    assert px[28, 48] == _BODY
+
+
+def test_flatten_leaves_large_near_background_detail_patch_untouched():
+    """A belly patch is spared however big it is — size does not decide this.
+
+    Regression test: gating on a minimum area keyed anything past the gate, so
+    a patch this size came out as a hole punched through the creature.
+    """
+    img = _highlight_sprite(box=(38, 38, 58, 58))  # 21x21, ~4.8% of the image
+    out = _flatten_background_to_key(img)
+    px = out.load()
+    for point in ((48, 48), (40, 40), (56, 56)):
+        assert px[point] == (245, 245, 245)
+
+
+def _small_gap_sprite():
+    """96x96 RGB: an outlined creature disc with a tiny see-through gap in it."""
+    img = Image.new("RGB", (96, 96), (250, 250, 250))
+    d = ImageDraw.Draw(img)
+    d.ellipse((10, 10, 86, 86), fill=_OUTLINE)
+    d.ellipse((13, 13, 83, 83), fill=_BODY)
+    d.ellipse((43, 43, 53, 53), fill=_OUTLINE)
+    d.ellipse((45, 45, 51, 51), fill=(250, 250, 250))  # 7x7, ~0.5% of the image
+    return img
+
+
+def test_flatten_keys_small_enclosed_pocket():
+    """A real gap is keyed however small — size does not decide this either.
+
+    Regression test: gating on a minimum area left gaps under the gate
+    background-coloured, so a between-the-legs gap shipped as a white wedge.
+    """
+    out = _flatten_background_to_key(_small_gap_sprite())
+    px = out.load()
+    assert px[48, 48] == _KEY_COLOR
+    assert px[28, 48] == _BODY  # the creature body is unchanged
+
+
+def _open_notch_sprite():
+    """96x96 RGB: a U-shaped creature whose notch opens onto the top border.
+
+    The notch is background-coloured, and the corner flood fill cannot reach it
+    (the creature walls it off from every corner) — but it runs to the image
+    border, so it is outer background seen between the walls, not creature.
+    """
+    img = Image.new("RGB", (96, 96), (250, 250, 250))
+    d = ImageDraw.Draw(img)
+    d.rectangle((30, 0, 37, 50), fill=_BODY)   # left wall, touches top border
+    d.rectangle((58, 0, 65, 50), fill=_BODY)   # right wall, touches top border
+    d.rectangle((30, 44, 65, 50), fill=_BODY)  # floor
+    return img
+
+
+def test_flatten_keys_border_touching_background_component():
+    """Background that reaches the image edge is keyed even if the flood misses it.
+
+    Regression test: treating "touches the border" as *disqualifying* left this
+    notch unkeyed, so a leg gap opening onto an edge shipped opaque.
+    """
+    img = _open_notch_sprite()
+    out = _flatten_background_to_key(img)
+    px = out.load()
+    for point in ((48, 0), (48, 20), (40, 40)):
+        assert px[point] == _KEY_COLOR
+    # Outside the walls, the corner flood still keys the outer background.
+    assert px[10, 20] == _KEY_COLOR
+    assert px[90, 20] == _KEY_COLOR
+    # The walls themselves survive.
+    assert px[34, 20] == _BODY
+
+
+def _dark_creature(gap: bool):
+    """96x96 RGB: a near-black creature with either a see-through gap or a highlight.
+
+    The hard case for telling outline from body by brightness: the whole
+    creature is dark, so any *absolute* dark-cutoff calls the body outline too.
+    """
+    img = Image.new("RGB", (96, 96), (250, 250, 250))
+    d = ImageDraw.Draw(img)
+    d.ellipse((10, 10, 86, 86), fill=(8, 8, 12))     # outline
+    d.ellipse((13, 13, 83, 83), fill=(34, 30, 46))   # near-black body
+    if gap:
+        d.ellipse((42, 42, 54, 54), fill=(8, 8, 12))
+        d.ellipse((45, 45, 51, 51), fill=(250, 250, 250))
+    else:
+        d.rectangle((42, 42, 54, 54), fill=(245, 245, 245))
+    return img
+
+
+def test_flatten_keys_see_through_gap_in_a_near_black_creature():
+    out = _flatten_background_to_key(_dark_creature(gap=True))
+    assert out.load()[48, 48] == _KEY_COLOR
+
+
+def test_flatten_leaves_highlight_on_a_near_black_creature_untouched():
+    """A white marking on a black body is detail, not a pocket.
+
+    The outline cutoff scales with the creature's own mean luma for this: a
+    fixed margin below the mean goes negative on a body this dark, at which
+    point nothing counts as outline and every real gap would ship opaque.
+    """
+    out = _flatten_background_to_key(_dark_creature(gap=False))
+    assert out.load()[48, 48] == (245, 245, 245)
+
+
+def test_flatten_keys_background_fleck_the_flood_cannot_cross():
+    """Open-background pixels the stage-1 flood steps over are still keyed.
+
+    ``ImageDraw.floodfill`` thresholds on Manhattan distance and walks
+    4-connected, while the stage-2 scan uses Euclidean ``_rgb_distance`` and
+    8-connectivity, so pixels like ``(230, 230, 250)`` against a ``(250, 250,
+    250)`` background are inside one metric and outside the other. Regression
+    test: such flecks survived into the sprite, inflating its content bbox and
+    misaligning the frame-2 recentre.
+    """
+    img = Image.new("RGB", (96, 96), (250, 250, 250))
+    d = ImageDraw.Draw(img)
+    d.ellipse((30, 30, 66, 66), fill=_BODY)
+    d.point((12, 12), fill=(230, 230, 250))  # euclid 28.3 (in), manhattan 40 (out)
+    d.point((84, 70), fill=(230, 230, 250))
+    out = _flatten_background_to_key(img)
+    px = out.load()
+    assert px[12, 12] == _KEY_COLOR
+    assert px[84, 70] == _KEY_COLOR
 
 
 def test_flatten_does_not_mutate_input():
@@ -410,15 +579,28 @@ def test_flatten_gradient_border_warns_without_raising(capsys):
 # load_txt2img_pipeline()
 # ---------------------------------------------------------------------------
 
-def _make_lora_pipeline_mock():
+def test_backend_constants_point_at_the_sdxl_stack():
+    # Pins the backend swap itself: the SDXL base model and the "back&front"
+    # kohya LoRA filename (a manual Civitai download, never committed — the
+    # exact name is the contract with whoever downloads it).
+    assert _BASE_MODEL_ID == "Laxhar/noobai-XL-1.1"
+    assert _LORA_PATH.name == "pkspbf_nb_v1.safetensors"
+    assert _LORA_PATH.parent.name == "loras"
+
+
+def _make_lora_pipeline_mock(state_dict=None, network_alphas=None):
     mock_mixin = MagicMock()
-    mock_mixin.lora_state_dict.return_value = ({}, {}, None)
+    mock_mixin.lora_state_dict.return_value = (
+        {} if state_dict is None else state_dict,
+        {} if network_alphas is None else network_alphas,
+        None,
+    )
     mock_mod = MagicMock()
-    mock_mod.StableDiffusionLoraLoaderMixin = mock_mixin
+    mock_mod.StableDiffusionXLLoraLoaderMixin = mock_mixin
     return mock_mod
 
 
-def _mock_modules(pipe_side_effect=None, cuda=False):
+def _mock_modules(pipe_side_effect=None, cuda=False, lora_mod=None):
     mock_pipe_cls = MagicMock()
     if pipe_side_effect:
         mock_pipe_cls.from_pretrained.side_effect = pipe_side_effect
@@ -426,7 +608,7 @@ def _mock_modules(pipe_side_effect=None, cuda=False):
         mock_pipe_cls.from_pretrained.return_value = MagicMock()
 
     mock_diffusers = MagicMock()
-    mock_diffusers.StableDiffusionPipeline = mock_pipe_cls
+    mock_diffusers.StableDiffusionXLPipeline = mock_pipe_cls
 
     mock_torch = MagicMock()
     mock_torch.float32 = "float32"
@@ -437,8 +619,27 @@ def _mock_modules(pipe_side_effect=None, cuda=False):
         "diffusers": mock_diffusers,
         "torch": mock_torch,
         "diffusers.loaders": MagicMock(),
-        "diffusers.loaders.lora_pipeline": _make_lora_pipeline_mock(),
+        "diffusers.loaders.lora_pipeline": lora_mod or _make_lora_pipeline_mock(),
     }, mock_pipe_cls
+
+
+class _NoTilingPipe:
+    """A pipeline stand-in that lacks ``enable_vae_tiling`` (unlike MagicMock,
+    which auto-creates any attribute), so hasattr() genuinely reports False and
+    the ``pipe.vae.enable_tiling()`` fallback path can be exercised."""
+
+    def __init__(self):
+        self.to = MagicMock(side_effect=lambda device: self)
+        self.enable_model_cpu_offload = MagicMock()
+        self.vae = MagicMock()
+        self.unet = MagicMock()
+        self.text_encoder = MagicMock()
+        self.text_encoder_2 = MagicMock()
+        self.scheduler = MagicMock()
+        self.lora_scale = 1.0
+        self.load_lora_into_unet = MagicMock()
+        self.load_lora_into_text_encoder = MagicMock()
+        self.fuse_lora = MagicMock()
 
 
 def test_load_returns_pipeline():
@@ -456,14 +657,175 @@ def test_load_calls_from_pretrained_with_model_id():
     assert mock_pipe_cls.from_pretrained.call_args.args[0] == _BASE_MODEL_ID
 
 
+def test_load_does_not_pass_safety_checker():
+    # SDXL pipeline classes don't accept safety_checker (unlike SD1.5's) — a
+    # real .from_pretrained call would raise TypeError if it were still passed.
+    mods, mock_pipe_cls = _mock_modules()
+    with patch.dict("sys.modules", mods):
+        load_txt2img_pipeline()
+    assert "safety_checker" not in mock_pipe_cls.from_pretrained.call_args.kwargs
+
+
 def test_load_applies_lora_weights():
     mods, mock_pipe_cls = _mock_modules()
     with patch.dict("sys.modules", mods):
         load_txt2img_pipeline()
     pipe = mock_pipe_cls.from_pretrained.return_value
     pipe.load_lora_into_unet.assert_called_once()
-    pipe.load_lora_into_text_encoder.assert_called_once()
+    assert pipe.load_lora_into_text_encoder.call_count == 2
     pipe.fuse_lora.assert_called_once_with(lora_scale=_LORA_SCALE)
+
+
+def test_load_lora_state_dict_passes_unet_config():
+    mods, mock_pipe_cls = _mock_modules()
+    with patch.dict("sys.modules", mods):
+        load_txt2img_pipeline()
+    pipe = mock_pipe_cls.from_pretrained.return_value
+    mixin = mods["diffusers.loaders.lora_pipeline"].StableDiffusionXLLoraLoaderMixin
+    mixin.lora_state_dict.assert_called_once_with(
+        str(_LORA_PATH), return_lora_metadata=True, unet_config=pipe.unet.config
+    )
+
+
+def test_load_applies_lora_to_both_text_encoders():
+    mods, mock_pipe_cls = _mock_modules()
+    with patch.dict("sys.modules", mods):
+        load_txt2img_pipeline()
+    pipe = mock_pipe_cls.from_pretrained.return_value
+    calls = pipe.load_lora_into_text_encoder.call_args_list
+    encoders = {c.kwargs["text_encoder"] for c in calls}
+    prefixes = {c.kwargs["prefix"] for c in calls}
+    assert encoders == {pipe.text_encoder, pipe.text_encoder_2}
+    assert prefixes == {"text_encoder", "text_encoder_2"}
+
+
+# Kohya key shapes as diffusers hands them back from lora_state_dict(): both
+# text encoders arrive under a "{prefix}.text_model." level. te1
+# (CLIPTextModel) does NOT have that wrapper in its named_modules(), so its
+# keys must be stripped; te2 (CLIPTextModelWithProjection) does, so its keys
+# must survive untouched.
+_TE_KEY_1 = "text_encoder.text_model.encoder.layers.0.self_attn.q_proj.lora_A.weight"
+_TE_KEY_2 = "text_encoder_2.text_model.encoder.layers.0.self_attn.q_proj.lora_A.weight"
+_UNET_KEY = "unet.down_blocks.1.attentions.0.transformer_blocks.0.attn1.to_q.lora_A.weight"
+
+
+def _kohya_state_dict():
+    return {_UNET_KEY: "u", _TE_KEY_1: "a", _TE_KEY_2: "b"}
+
+
+def _text_encoder_calls(pipe):
+    """The two load_lora_into_text_encoder calls, keyed by their ``prefix``."""
+    return {c.kwargs["prefix"]: c for c in pipe.load_lora_into_text_encoder.call_args_list}
+
+
+def test_load_strips_text_model_level_for_text_encoder_1_only():
+    state_dict = _kohya_state_dict()
+    mods, mock_pipe_cls = _mock_modules(
+        lora_mod=_make_lora_pipeline_mock(state_dict, dict(state_dict))
+    )
+    with patch.dict("sys.modules", mods):
+        load_txt2img_pipeline()
+    calls = _text_encoder_calls(mock_pipe_cls.from_pretrained.return_value)
+
+    te1 = calls["text_encoder"].args[0]
+    assert "text_encoder.encoder.layers.0.self_attn.q_proj.lora_A.weight" in te1
+    assert _TE_KEY_1 not in te1
+    # Only te1's own level is stripped: te2 and unet keys ride along untouched.
+    assert _TE_KEY_2 in te1 and _UNET_KEY in te1
+
+
+def test_load_leaves_text_encoder_2_keys_untouched():
+    state_dict = _kohya_state_dict()
+    mods, mock_pipe_cls = _mock_modules(
+        lora_mod=_make_lora_pipeline_mock(state_dict, dict(state_dict))
+    )
+    with patch.dict("sys.modules", mods):
+        load_txt2img_pipeline()
+    calls = _text_encoder_calls(mock_pipe_cls.from_pretrained.return_value)
+
+    te2 = calls["text_encoder_2"].args[0]
+    # Blanket-applying the te1 strip here would silently break te2's weights.
+    assert _TE_KEY_2 in te2
+    assert "text_encoder_2.encoder.layers.0.self_attn.q_proj.lora_A.weight" not in te2
+
+
+def test_load_applies_the_same_key_fix_to_network_alphas():
+    state_dict = _kohya_state_dict()
+    mods, mock_pipe_cls = _mock_modules(
+        lora_mod=_make_lora_pipeline_mock(state_dict, dict(state_dict))
+    )
+    with patch.dict("sys.modules", mods):
+        load_txt2img_pipeline()
+    calls = _text_encoder_calls(mock_pipe_cls.from_pretrained.return_value)
+
+    assert _TE_KEY_1 not in calls["text_encoder"].kwargs["network_alphas"]
+    assert _TE_KEY_2 in calls["text_encoder_2"].kwargs["network_alphas"]
+
+
+def test_load_passes_unstripped_state_dict_to_the_unet():
+    state_dict = _kohya_state_dict()
+    mods, mock_pipe_cls = _mock_modules(lora_mod=_make_lora_pipeline_mock(state_dict))
+    with patch.dict("sys.modules", mods):
+        load_txt2img_pipeline()
+    pipe = mock_pipe_cls.from_pretrained.return_value
+    assert pipe.load_lora_into_unet.call_args.args[0] == state_dict
+
+
+def test_load_tolerates_empty_network_alphas():
+    # lora_state_dict() returns an empty/None alphas mapping for LoRAs that
+    # carry no alpha entries; the key fix must pass it straight through.
+    mods, mock_pipe_cls = _mock_modules(
+        lora_mod=_make_lora_pipeline_mock(_kohya_state_dict(), network_alphas=None)
+    )
+    with patch.dict("sys.modules", mods):
+        load_txt2img_pipeline()
+    calls = _text_encoder_calls(mock_pipe_cls.from_pretrained.return_value)
+    assert calls["text_encoder"].kwargs["network_alphas"] == {}
+
+
+def test_load_sets_euler_ancestral_scheduler():
+    mods, mock_pipe_cls = _mock_modules()
+    with patch.dict("sys.modules", mods):
+        load_txt2img_pipeline()
+    pipe = mock_pipe_cls.from_pretrained.return_value
+    scheduler_cls = mods["diffusers"].EulerAncestralDiscreteScheduler
+    scheduler_cls.from_config.assert_called_once()
+    assert pipe.scheduler is scheduler_cls.from_config.return_value
+
+
+def test_load_enables_model_cpu_offload_on_cuda():
+    mods, mock_pipe_cls = _mock_modules(cuda=True)
+    with patch.dict("sys.modules", mods):
+        load_txt2img_pipeline()
+    pipe = mock_pipe_cls.from_pretrained.return_value
+    pipe.enable_model_cpu_offload.assert_called_once()
+
+
+def test_load_enables_vae_tiling_on_cuda():
+    mods, mock_pipe_cls = _mock_modules(cuda=True)
+    with patch.dict("sys.modules", mods):
+        load_txt2img_pipeline()
+    pipe = mock_pipe_cls.from_pretrained.return_value
+    pipe.enable_vae_tiling.assert_called_once()
+
+
+def test_load_falls_back_to_vae_enable_tiling_when_pipeline_method_absent():
+    pipe_instance = _NoTilingPipe()
+    mods, mock_pipe_cls = _mock_modules(cuda=True)
+    mock_pipe_cls.from_pretrained.return_value = pipe_instance
+    with patch.dict("sys.modules", mods):
+        load_txt2img_pipeline()
+    pipe_instance.vae.enable_tiling.assert_called_once()
+
+
+def test_load_skips_offload_and_tiling_on_cpu():
+    mods, mock_pipe_cls = _mock_modules(cuda=False)
+    with patch.dict("sys.modules", mods):
+        load_txt2img_pipeline()
+    pipe = mock_pipe_cls.from_pretrained.return_value
+    pipe.enable_model_cpu_offload.assert_not_called()
+    pipe.enable_vae_tiling.assert_not_called()
+    pipe.vae.enable_tiling.assert_not_called()
 
 
 def test_load_exits_on_oom(capsys):
@@ -496,11 +858,15 @@ def test_load_uses_float32_when_no_cuda():
     assert mock_pipe_cls.from_pretrained.call_args.kwargs["torch_dtype"] == "float32"
 
 
-def test_load_moves_pipeline_to_cuda_when_available():
+def test_load_leaves_device_placement_to_the_offload_on_cuda():
+    # enable_model_cpu_offload() owns placement from the moment it is called;
+    # a .to("cuda") after it would make every component GPU-resident at once
+    # and give the offload's memory savings straight back.
     mods, mock_pipe_cls = _mock_modules(cuda=True)
     with patch.dict("sys.modules", mods):
-        load_txt2img_pipeline()
-    mock_pipe_cls.from_pretrained.return_value.to.assert_called_once_with("cuda")
+        pipe = load_txt2img_pipeline()
+    assert pipe is mock_pipe_cls.from_pretrained.return_value
+    pipe.to.assert_not_called()
 
 
 def test_load_moves_pipeline_to_cpu_when_no_cuda():
@@ -522,7 +888,7 @@ def _mock_img2img_modules(pipe_side_effect=None, cuda=False):
         mock_pipe_cls.from_pretrained.return_value = MagicMock()
 
     mock_diffusers = MagicMock()
-    mock_diffusers.StableDiffusionImg2ImgPipeline = mock_pipe_cls
+    mock_diffusers.StableDiffusionXLImg2ImgPipeline = mock_pipe_cls
 
     mock_torch = MagicMock()
     mock_torch.float32 = "float32"
@@ -557,8 +923,26 @@ def test_load_img2img_applies_lora_weights():
         load_img2img_pipeline()
     pipe = mock_pipe_cls.from_pretrained.return_value
     pipe.load_lora_into_unet.assert_called_once()
-    pipe.load_lora_into_text_encoder.assert_called_once()
+    assert pipe.load_lora_into_text_encoder.call_count == 2
     pipe.fuse_lora.assert_called_once_with(lora_scale=_LORA_SCALE)
+
+
+def test_load_img2img_sets_euler_ancestral_scheduler():
+    mods, mock_pipe_cls = _mock_img2img_modules()
+    with patch.dict("sys.modules", mods):
+        load_img2img_pipeline()
+    pipe = mock_pipe_cls.from_pretrained.return_value
+    scheduler_cls = mods["diffusers"].EulerAncestralDiscreteScheduler
+    assert pipe.scheduler is scheduler_cls.from_config.return_value
+
+
+def test_load_img2img_enables_offload_and_tiling_on_cuda():
+    mods, mock_pipe_cls = _mock_img2img_modules(cuda=True)
+    with patch.dict("sys.modules", mods):
+        load_img2img_pipeline()
+    pipe = mock_pipe_cls.from_pretrained.return_value
+    pipe.enable_model_cpu_offload.assert_called_once()
+    pipe.enable_vae_tiling.assert_called_once()
 
 
 def test_load_img2img_exits_on_failure(capsys):
@@ -578,6 +962,72 @@ def test_load_img2img_error_mentions_exception(capsys):
 
 
 # ---------------------------------------------------------------------------
+# make_img2img_pipeline()
+# ---------------------------------------------------------------------------
+
+def _mock_img2img_class(cuda=False):
+    mock_cls = MagicMock()
+    mock_diffusers = MagicMock()
+    mock_diffusers.StableDiffusionXLImg2ImgPipeline = mock_cls
+
+    mock_torch = MagicMock()
+    mock_torch.cuda.is_available.return_value = cuda
+
+    return {"diffusers": mock_diffusers, "torch": mock_torch}, mock_cls
+
+
+def _txt2img_stub():
+    txt2img = MagicMock()
+    # SDXL's component set — note the second text encoder/tokenizer, which the
+    # SD1.5 pipeline this replaced did not have.
+    txt2img.components = {
+        "vae": "vae", "text_encoder": "te1", "text_encoder_2": "te2",
+        "tokenizer": "tok1", "tokenizer_2": "tok2", "unet": "unet",
+        "scheduler": "sched",
+    }
+    return txt2img
+
+
+def test_make_img2img_pipeline_reuses_txt2img_components():
+    mods, mock_cls = _mock_img2img_class()
+    txt2img = _txt2img_stub()
+    with patch.dict("sys.modules", mods):
+        pipe = make_img2img_pipeline(txt2img)
+    mock_cls.assert_called_once_with(**txt2img.components)
+    assert pipe is mock_cls.return_value
+
+
+def test_make_img2img_pipeline_enables_offload_and_tiling_on_cuda():
+    # Sharing the parent's components does NOT share the offload: `_all_hooks`
+    # is per-pipeline, so a derived pipe without its own enable_model_cpu_offload
+    # has a no-op maybe_free_model_hooks() and leaves its last-run component
+    # (the fp32-upcast VAE) sitting in VRAM between calls.
+    mods, mock_cls = _mock_img2img_class(cuda=True)
+    with patch.dict("sys.modules", mods):
+        pipe = make_img2img_pipeline(_txt2img_stub())
+    pipe.enable_model_cpu_offload.assert_called_once()
+    pipe.enable_vae_tiling.assert_called_once()
+
+
+def test_make_img2img_pipeline_leaves_device_placement_to_the_offload():
+    mods, _ = _mock_img2img_class(cuda=True)
+    with patch.dict("sys.modules", mods):
+        pipe = make_img2img_pipeline(_txt2img_stub())
+    pipe.to.assert_not_called()
+
+
+def test_make_img2img_pipeline_skips_offload_and_tiling_off_cuda():
+    # enable_model_cpu_offload() raises without an accelerator, and the shared
+    # components are already wherever the parent put them — nothing to do.
+    mods, _ = _mock_img2img_class(cuda=False)
+    with patch.dict("sys.modules", mods):
+        pipe = make_img2img_pipeline(_txt2img_stub())
+    pipe.enable_model_cpu_offload.assert_not_called()
+    pipe.enable_vae_tiling.assert_not_called()
+    pipe.to.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
 # _background_index()
 # ---------------------------------------------------------------------------
 
@@ -586,6 +1036,278 @@ def test_background_index_is_most_common_index():
     bg = _background_index(frame1)
     counts = {i: c for c, i in frame1.getcolors()}
     assert bg == max(counts, key=counts.get)
+
+
+# ---------------------------------------------------------------------------
+# split_front_back_canvas()
+# ---------------------------------------------------------------------------
+# All canvases below are 200x100 RGB, background (250, 250, 250). The middle
+# 20% search window is columns [80, 120) (`int(0.4 * 200)` to `int(0.6 * 200)`).
+#
+# Content never touches row 0 or row 99: the background colour is detected from
+# the 1-px border ring, so a band bleeding into it would skew `bg` away from
+# (250, 250, 250) and the tests would stop exercising what they claim to.
+# `_SPLIT_ROWS` is the safe row span for a full-height-blocking band.
+
+_SPLIT_BG = (250, 250, 250)
+_SPLIT_FRONT_COLOR = (30, 60, 90)
+_SPLIT_BACK_COLOR = (90, 30, 60)
+_SPLIT_ROWS = (1, 98)
+
+
+def _split_canvas(*bands):
+    """A 200x100 background canvas with ``(x0, x1, colour)`` bands drawn on it.
+
+    Each band spans `_SPLIT_ROWS`, so every column it covers has at least one
+    non-background pixel (disqualifying it as a full-height background column)
+    while the border ring stays pure background.
+    """
+    canvas = Image.new("RGB", (200, 100), _SPLIT_BG)
+    d = ImageDraw.Draw(canvas)
+    for x0, x1, color in bands:
+        d.rectangle((x0, _SPLIT_ROWS[0], x1, _SPLIT_ROWS[1]), fill=color)
+    return canvas
+
+
+def test_split_clean_centered_gap_cuts_at_gap_centre():
+    # Front square at columns 30-94 (rows 20-79), back square at columns
+    # 105-170 (rows 20-79): the only full-height background run in the
+    # [80, 120) window is columns 95-104, centred in the window.
+    canvas = Image.new("RGB", (200, 100), _SPLIT_BG)
+    d = ImageDraw.Draw(canvas)
+    d.rectangle((30, 20, 94, 79), fill=_SPLIT_FRONT_COLOR)
+    d.rectangle((105, 20, 170, 79), fill=_SPLIT_BACK_COLOR)
+    before = canvas.tobytes()
+
+    result = split_front_back_canvas(canvas)
+    assert result is not None
+    front_half, back_half = result
+    assert front_half.size == (100, 100)
+    assert back_half.size == (100, 100)
+
+    # Front half holds the front square untouched.
+    assert front_half.getpixel((60, 50)) == _SPLIT_FRONT_COLOR
+    # Back half holds the back square, shifted left by the cut column.
+    assert back_half.getpixel((105 - 100, 50)) == _SPLIT_BACK_COLOR
+    assert back_half.getpixel((170 - 100, 50)) == _SPLIT_BACK_COLOR
+    # The halves are fresh crops — the caller's canvas is untouched.
+    assert canvas.tobytes() == before
+
+
+def test_split_widest_run_wins_over_narrower_earlier_run():
+    # Column bands across the [80, 120) window:
+    #   80-95 content, 96-99 bg (narrow gap, width 4), 100-105 content,
+    #   106-118 bg (wide gap, width 13), 119 content.
+    # The narrow gap is both encountered first *and* closer to the literal
+    # midline (column 100), yet the wide gap must still win the cut.
+    canvas = _split_canvas(
+        (80, 95, _SPLIT_FRONT_COLOR),
+        (100, 105, _SPLIT_BACK_COLOR),
+        (119, 119, _SPLIT_FRONT_COLOR),
+    )
+
+    result = split_front_back_canvas(canvas)
+    assert result is not None
+    front_half, back_half = result
+    # Widest run is columns 106-118 (run_start=106, run_end=119); centre = 112.
+    assert front_half.size == (112, 100)
+    assert back_half.size == (200 - 112, 100)
+    # The narrow gap's own centre (97) would have landed mid-front-square.
+    assert front_half.getpixel((103, 50)) == _SPLIT_BACK_COLOR
+    assert back_half.getpixel((119 - 112, 50)) == _SPLIT_FRONT_COLOR
+
+
+def test_split_equal_width_runs_tie_break_to_the_leftmost():
+    # Two background gaps of the same width (88-92 and 106-110): the documented
+    # tie-break picks the leftmost, so the cut is that run's centre (90).
+    canvas = _split_canvas(
+        (80, 87, _SPLIT_FRONT_COLOR),
+        (93, 105, _SPLIT_BACK_COLOR),
+        (111, 119, _SPLIT_FRONT_COLOR),
+    )
+
+    result = split_front_back_canvas(canvas)
+    assert result is not None
+    front_half, _back_half = result
+    assert front_half.size == (90, 100)
+
+
+def test_split_single_column_run_is_a_valid_run():
+    # Exactly one background column (100) in the window; its "centre" is itself.
+    canvas = _split_canvas(
+        (80, 99, _SPLIT_FRONT_COLOR),
+        (101, 119, _SPLIT_BACK_COLOR),
+    )
+
+    result = split_front_back_canvas(canvas)
+    assert result is not None
+    front_half, back_half = result
+    assert front_half.size == (100, 100)
+    assert back_half.size == (100, 100)
+
+
+def test_split_entire_window_background_cuts_at_window_centre():
+    # Both subjects sit well outside the [80, 120) window, so the whole window
+    # is one run — no special casing, the cut is just its centre (100).
+    canvas = _split_canvas(
+        (20, 70, _SPLIT_FRONT_COLOR),
+        (130, 180, _SPLIT_BACK_COLOR),
+    )
+
+    result = split_front_back_canvas(canvas)
+    assert result is not None
+    front_half, back_half = result
+    assert front_half.size == (100, 100)
+    assert back_half.size == (100, 100)
+    assert front_half.getpixel((50, 50)) == _SPLIT_FRONT_COLOR
+    assert back_half.getpixel((150 - 100, 50)) == _SPLIT_BACK_COLOR
+
+
+def test_split_no_full_height_background_run_returns_none():
+    # A single band spans columns 70-130, covering the entire [80, 120) search
+    # window, so no column in it is background for its full height.
+    canvas = _split_canvas((70, 130, _SPLIT_FRONT_COLOR))
+
+    assert split_front_back_canvas(canvas) is None
+
+
+def test_split_one_off_tolerance_pixel_disqualifies_the_column():
+    # Same layout as the clean-gap test (gap at columns 95-104, centre 100) but
+    # with a single speck at (99, 50) further than `_KEY_TOLERANCE` from the
+    # background. "Full height" is strict, so column 99 is no longer background
+    # and the gap splits into runs 95-98 (width 4) and 100-104 (width 5) — the
+    # wider right-hand one wins, moving the cut to 102.
+    canvas = _split_canvas(
+        (30, 94, _SPLIT_FRONT_COLOR),
+        (105, 170, _SPLIT_BACK_COLOR),
+    )
+    speck = (210, 250, 250)
+    assert _rgb_distance(speck, _SPLIT_BG) > _KEY_TOLERANCE
+    canvas.putpixel((99, 50), speck)
+
+    result = split_front_back_canvas(canvas)
+    assert result is not None
+    front_half, _back_half = result
+    assert front_half.size == (102, 100)
+
+
+def test_split_within_tolerance_noise_still_counts_as_background():
+    # The mirror of the test above: a speck *within* `_KEY_TOLERANCE` (the
+    # near-white noise SD actually paints) leaves the column background, so the
+    # gap stays whole and the cut stays at its centre (100).
+    canvas = _split_canvas(
+        (30, 94, _SPLIT_FRONT_COLOR),
+        (105, 170, _SPLIT_BACK_COLOR),
+    )
+    speck = (235, 235, 245)
+    assert _rgb_distance(speck, _SPLIT_BG) <= _KEY_TOLERANCE
+    canvas.putpixel((99, 50), speck)
+
+    result = split_front_back_canvas(canvas)
+    assert result is not None
+    front_half, _back_half = result
+    assert front_half.size == (100, 100)
+
+
+def test_split_detects_a_tinted_background_from_the_border_ring():
+    # SD paints tints/vignettes, not pure white, so the gap is only found if the
+    # background colour comes from the border ring (as `_flatten_background_to_key`
+    # computes it) rather than being assumed white. This canvas's backdrop is far
+    # enough from white that a hardcoded one would match no column at all.
+    tint = (180, 200, 210)
+    assert _rgb_distance(tint, (255, 255, 255)) > _KEY_TOLERANCE
+    canvas = Image.new("RGB", (200, 100), tint)
+    d = ImageDraw.Draw(canvas)
+    d.rectangle((30, 20, 94, 79), fill=_SPLIT_FRONT_COLOR)
+    d.rectangle((105, 20, 170, 79), fill=_SPLIT_BACK_COLOR)
+
+    result = split_front_back_canvas(canvas)
+    assert result is not None
+    front_half, back_half = result
+    assert front_half.size == (100, 100)
+    assert back_half.size == (100, 100)
+
+
+def test_split_degenerate_search_window_returns_none():
+    # A canvas so narrow that `int(0.6 * w) <= int(0.4 * w)`: the window holds
+    # zero columns, so no run can exist and there is nothing to cut at.
+    canvas = Image.new("RGB", (1, 100), _SPLIT_BG)
+
+    assert split_front_back_canvas(canvas) is None
+
+
+def test_split_vignetted_background_returns_none():
+    """A gradient backdrop reports "no band" rather than splitting on a bad `bg`.
+
+    One mean colour does not describe a vignette — the ring mean lands far from
+    the gap's actual pixels — so the scan would be measuring against a colour
+    that matches nothing. Rejected up front, the same condition
+    `_flatten_background_to_key` branches on, leaving the caller to reroll.
+    """
+    canvas = Image.new("RGB", (200, 100))
+    px = canvas.load()
+    for y in range(100):
+        for x in range(200):
+            # Bright at the centre, falling off towards every edge.
+            fade = 1 - (abs(x - 100) / 100) * 0.5 - (abs(y - 50) / 50) * 0.2
+            v = int(250 * fade)
+            px[x, y] = (v, v, v)
+    d = ImageDraw.Draw(canvas)
+    d.rectangle((30, 20, 94, 79), fill=_SPLIT_FRONT_COLOR)
+    d.rectangle((105, 20, 170, 79), fill=_SPLIT_BACK_COLOR)
+
+    ring = _border_ring(canvas)
+    assert not _border_is_uniform(ring, _detect_background(ring))
+    assert split_front_back_canvas(canvas) is None
+
+
+def test_split_halves_are_unequal_when_the_gap_is_off_centre():
+    """The cut tracks the gap, so the halves are *not* each half the width.
+
+    Pins the contract a caller has to honour: resizing both halves to one
+    square would stretch the two sprites by different aspect ratios.
+    """
+    # Only full-height background run in [80, 120) is columns 81-89, so the cut
+    # lands at 85 — well off the 100px midline. Bands stop short of columns 0
+    # and 199 for the same reason they stop short of rows 0 and 99: the border
+    # ring is where `bg` comes from.
+    canvas = _split_canvas((20, 80, _SPLIT_FRONT_COLOR), (90, 180, _SPLIT_BACK_COLOR))
+
+    result = split_front_back_canvas(canvas)
+    assert result is not None
+    front_half, back_half = result
+    assert front_half.size == (85, 100)
+    assert back_half.size == (115, 100)
+    assert front_half.width != back_half.width
+
+
+def test_split_blank_canvas_succeeds_with_two_empty_halves():
+    """`None` means "no band", not "two sprites present".
+
+    An empty canvas is all background, so the widest run is the whole window
+    and the split "succeeds" into two sprite-less halves. Pins the gap a caller
+    branching only on `None` has to close itself.
+    """
+    result = split_front_back_canvas(Image.new("RGB", (200, 100), _SPLIT_BG))
+    assert result is not None
+    front_half, back_half = result
+    assert set(front_half.get_flattened_data()) == {_SPLIT_BG}
+    assert set(back_half.get_flattened_data()) == {_SPLIT_BG}
+
+
+def test_split_single_sprite_canvas_succeeds_with_one_empty_half():
+    """The same gap with real content: one sprite off to the left still splits.
+
+    Everything right of it is background, so a run is found and the back half
+    comes back empty — indistinguishable from a good split by return type.
+    """
+    canvas = _split_canvas((30, 94, _SPLIT_FRONT_COLOR))
+
+    result = split_front_back_canvas(canvas)
+    assert result is not None
+    front_half, back_half = result
+    assert _SPLIT_FRONT_COLOR in set(front_half.get_flattened_data())
+    assert set(back_half.get_flattened_data()) == {_SPLIT_BG}
 
 
 # ---------------------------------------------------------------------------

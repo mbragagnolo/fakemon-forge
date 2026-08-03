@@ -5,8 +5,10 @@ from collections import Counter
 from pathlib import Path
 from PIL import Image, ImageDraw, ImageEnhance
 
-_BASE_MODEL_ID = "Lykon/dreamshaper-8"
-_LORA_PATH = Path(__file__).parent.parent / "models" / "loras" / "pksp768_V2-1.safetensors"
+_BASE_MODEL_ID = "Laxhar/noobai-XL-1.1"
+# Manual download required (never committed; models/ is gitignored): Civitai
+# model 378602, "Pokemon Sprite XL PixelArt back&front" (login required).
+_LORA_PATH = Path(__file__).parent.parent / "models" / "loras" / "pkspbf_nb_v1.safetensors"
 _LORA_SCALE = 0.7
 _GEN_SIZE = 768
 _NUM_STEPS = 30
@@ -17,12 +19,28 @@ _KEY_COLOR = (200, 200, 168)  # Gen-3 transparency key colour (RGB).
 # Tunable eyeball placeholder (see the module spec, cf. procedural_squash's
 # ``amount_px`` / build_frame2's ``low``/``high``): a pixel within this
 # Euclidean RGB distance of the detected border background counts as
-# background — both for the border flood fill and the global sweep.
+# background — both for the border flood fill and the enclosed-pocket scan.
 _KEY_TOLERANCE = 30
 # Tunable eyeball placeholder: the border ring is treated as near-uniform (a
 # flat backdrop, not a gradient/vignette) when at least this fraction of its
 # pixels are within ``_KEY_TOLERANCE`` of the mean border colour.
 _BORDER_UNIFORM_FRACTION = 0.9
+# Tunable eyeball placeholders: colour + connectivity alone can't tell a real
+# background pocket (a leg gap, a ring hole) from a same-coloured creature
+# detail (a highlight, a belly patch) — both are just an 8-connected island of
+# near-background pixels sitting inside the silhouette. What separates them is
+# what walls them in: you see through a pocket, so it is rimmed by the
+# creature's dark *outline*, whereas painted detail sits on mid-tone body
+# colour. "Dark" is measured relative to the creature's own mean luma, not as
+# an absolute cutoff, so a black-bodied Fakemon's highlights are not mistaken
+# for pockets: a boundary pixel counts as outline when its luma falls below
+# this fraction of that mean, and the component is treated as a pocket once
+# that much of its boundary reaches ``_POCKET_OUTLINE_FRACTION``. Scaling the
+# cutoff rather than subtracting a fixed margin is what makes it hold at both
+# ends — on a near-black creature every fixed margin worth using on a bright
+# one drops the cutoff below zero, and no pocket would ever key again.
+_OUTLINE_LUMA_RATIO = 0.65
+_POCKET_OUTLINE_FRACTION = 0.55
 # Gen-3 palette contract: 3 reserved slots (key, black, white) plus at most this
 # many creature colours, so the whole palette stays <= 16.
 _MAX_CREATURE_COLORS = 13
@@ -30,30 +48,29 @@ _MAX_CREATURE_COLORS = 13
 # above): a creature colour within this Euclidean RGB distance of ``_KEY_COLOR``
 # is nudged away so it can never be mistaken for the transparency background.
 _KEY_COLLISION_DISTANCE = 12
+# Tunable eyeball placeholder: the middle 20% of a side-by-side front/back
+# canvas's columns (as fractions of width) searched for the background gap
+# between the two sprites.
+_SPLIT_SEARCH_LOW = 0.4
+_SPLIT_SEARCH_HIGH = 0.6
 
-_TYPE_TAGS = {
-    "Normal": "normaltype", "Fire": "firetype", "Water": "watertype",
-    "Electric": "electrictype", "Grass": "grasstype", "Ice": "icetype",
-    "Fighting": "fightingtype", "Poison": "poisontype", "Ground": "groundtype",
-    "Flying": "flyingtype", "Psychic": "psychictype", "Bug": "bugtype",
-    "Rock": "rocktype", "Ghost": "ghosttype", "Dragon": "dragontype",
-    "Dark": "darktype", "Steel": "steeltype", "Fairy": "fairytype",
-}
-
-_GEN_STYLE = "gen3"
+_NEGATIVE_PROMPT = "worst quality, low quality, blurry, watermark, signature, text, jpeg artifacts"
 
 
-def build_prompt(sprite_prompt: str, types: list[str], extra_tags: list[str] | None = None) -> str:
-    type_tags = [_TYPE_TAGS[t] for t in types if t in _TYPE_TAGS]
-    all_tags = type_tags + [_GEN_STYLE] + (extra_tags or [])
-    tags = " ".join(all_tags)
-    return f"{tags} {sprite_prompt}".strip() if tags else sprite_prompt
-
-
-def _encode_prompt(prompt: str, pipeline):
-    from compel import Compel
-    compel = Compel(tokenizer=pipeline.tokenizer, text_encoder=pipeline.text_encoder)
-    return compel(prompt)
+# The SD1.5 LoRA this backend replaced had a trained "firetype"/"watertype"
+# trigger vocabulary, so type conditioning used to be mechanical: look the type
+# up in a table, prepend the tag. The SDXL LoRA knows no such vocabulary, so the
+# type signal has to arrive as ordinary description ("wreathed in embers"), and
+# only the LLM that picked the types can write it. That obligation is spelled
+# out in the ``sprite_prompt`` spec in ``generator.py`` (and pinned by a test
+# there) — it is the sole reason the ``types`` argument threaded through the
+# generate_* functions below is accepted but never read. Anything mechanical
+# here would just fight the prompt the LLM already wrote.
+def build_prompt(sprite_prompt: str, extra_tags: list[str] | None = None) -> str:
+    """Plain SDXL prompt string: type wording is baked into ``sprite_prompt`` upstream."""
+    if extra_tags:
+        return f"gen3, {sprite_prompt}, {', '.join(extra_tags)}, white background"
+    return f"gen3, {sprite_prompt}, white background"
 
 
 def k_centroid(image: Image.Image, width: int, height: int, centroids: int = 2) -> Image.Image:
@@ -138,6 +155,56 @@ def _rgb_distance(a, b) -> float:
     return ((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2) ** 0.5
 
 
+def _relative_luma(color) -> float:
+    """Perceived brightness of an RGB colour (Rec. 601 luma), 0-255.
+
+    Used to tell the creature's dark outline from its mid-tone body, which is
+    a brightness judgement rather than a hue one — a red outline on a red body
+    still reads as the edge.
+    """
+    return 0.299 * color[0] + 0.587 * color[1] + 0.114 * color[2]
+
+
+def _creature_luma_mean(image: Image.Image, bg) -> float:
+    """Mean ``_relative_luma`` of the non-background pixels of a keyed image.
+
+    The reference brightness "outline" is judged against, so the judgement
+    adapts to the creature instead of assuming a light one: on a black-bodied
+    Fakemon an absolute dark-cutoff would call the whole body outline and key
+    every highlight as a pocket. Returns ``0.0`` when there is no creature at
+    all (an all-background image), which leaves nothing for it to gate.
+
+    Area-weighted, so the body the creature is mostly made of is what sets the
+    mean — "outline" means "darker than the body", so a one-pixel speck must
+    not count for as much as the torso. Tallied via ``Counter`` over a flat
+    ``get_flattened_data`` pass, which costs one C-level count plus a loop over
+    the distinct colours instead of 590k ``px[x, y]`` lookups at 768px.
+    """
+    total = 0.0
+    count = 0
+    for p, n in Counter(image.get_flattened_data()).items():
+        if p == _KEY_COLOR or _rgb_distance(p, bg) <= _KEY_TOLERANCE:
+            continue
+        total += _relative_luma(p) * n
+        count += n
+    return total / count if count else 0.0
+
+
+def _is_background_pocket(touches_border, abuts_keyed, boundary, outline) -> bool:
+    """Whether a near-background component is background, not creature detail.
+
+    See ``_flatten_background_to_key``'s stage 2 for the three ways a component
+    qualifies. ``boundary`` and ``outline`` count contacts with creature pixels
+    and with outline-dark ones respectively, so a long run of outline weighs
+    more than a single touching corner. A component with no boundary at all
+    never touched a creature pixel, so there is no creature for it to be detail
+    *of* — it is background.
+    """
+    if touches_border or abuts_keyed or not boundary:
+        return True
+    return outline / boundary >= _POCKET_OUTLINE_FRACTION
+
+
 def _display_key(color) -> tuple[int, int, int]:
     """The colour as Gen 3 actually displays it: 5 bits per channel.
 
@@ -175,6 +242,31 @@ def _border_ring(image: Image.Image) -> list[tuple[int, int, int]]:
     return ring
 
 
+def _detect_background(ring) -> tuple[int, int, int]:
+    """The background colour of a ``_border_ring``: its per-channel mean.
+
+    The module's one convention for "what colour is the backdrop" — robust to
+    near-white noise and not assuming pure white, since SD sometimes paints
+    tints. Every site that needs it goes through here so the flatten and the
+    front/back split can't drift apart on the definition.
+    """
+    n = len(ring)
+    return tuple(round(sum(c[i] for c in ring) / n) for i in range(3))
+
+
+def _border_is_uniform(ring, bg) -> bool:
+    """Whether ``ring`` is a flat backdrop rather than a gradient/vignette.
+
+    True when at least ``_BORDER_UNIFORM_FRACTION`` of the ring sits within
+    ``_KEY_TOLERANCE`` of ``bg``. When it is false a single ``bg`` does not
+    describe the backdrop, and anything keyed off one — the flatten, the
+    front/back split — has to say so rather than quietly act on a colour that
+    matches nothing.
+    """
+    near = sum(1 for c in ring if _rgb_distance(c, bg) <= _KEY_TOLERANCE)
+    return near / len(ring) >= _BORDER_UNIFORM_FRACTION
+
+
 def _flatten_background_to_key(image: Image.Image) -> Image.Image:
     """Return a new RGB image with the background flattened to ``_KEY_COLOR``.
 
@@ -187,10 +279,24 @@ def _flatten_background_to_key(image: Image.Image) -> Image.Image:
        and not assuming pure white — SD sometimes paints tints/vignettes). The
        connected outer background is flood-filled from the corners with a
        ``_KEY_TOLERANCE`` threshold (an exact match won't do on noisy pixels).
-    2. **Global near-background sweep.** Any remaining pixel within
-       ``_KEY_TOLERANCE`` of ``bg`` is keyed too, so enclosed pockets (gaps
-       between legs, the hole of a ring-shaped creature) the flood cannot reach
-       are keyed as well — as authentic sprites have their interior gaps keyed.
+    2. **Background-pocket scan.** The remaining pixels within
+       ``_KEY_TOLERANCE`` of ``bg`` are grouped into 8-connected components, and
+       each component is keyed only if it is background rather than creature
+       detail. Three ways to qualify:
+
+       * it touches the image border — outer background the flood walled itself
+         out of (a leg gap opening onto the bottom edge);
+       * it abuts pixels stage 1 already keyed — background the flood tried and
+         failed to cross, because ``ImageDraw.floodfill`` thresholds on
+         *Manhattan* distance and walks 4-connected while this scan uses
+         Euclidean ``_rgb_distance`` and 8-connectivity;
+       * it is rimmed by the creature's dark outline — you see *through* a real
+         pocket (gaps between legs, the hole of a ring-shaped creature), so its
+         boundary is silhouette edge, not body.
+
+       Anything left is a same-coloured creature detail (a shield highlight, a
+       white belly patch) that just happens to be near ``bg`` in colour, and is
+       left untouched — keying it would punch a hole through the creature.
 
     Robustness fallback: if the border ring is *not* near-uniform (a gradient /
     vignette background), keying a single ``bg`` could eat the creature, so
@@ -203,13 +309,10 @@ def _flatten_background_to_key(image: Image.Image) -> Image.Image:
     out = image.copy()
     w, h = out.size
     ring = _border_ring(out)
-    n = len(ring)
-    bg = tuple(round(sum(c[i] for c in ring) / n) for i in range(3))
-
-    near_fraction = sum(1 for c in ring if _rgb_distance(c, bg) <= _KEY_TOLERANCE) / n
+    bg = _detect_background(ring)
     px = out.load()
 
-    if near_fraction < _BORDER_UNIFORM_FRACTION:
+    if not _border_is_uniform(ring, bg):
         # Gradient/vignette border: don't flood a single bg (it could eat the
         # creature). Key only the dominant border colour and warn — never raise.
         dominant = Counter(ring).most_common(1)[0][0]
@@ -229,13 +332,57 @@ def _flatten_background_to_key(image: Image.Image) -> Image.Image:
         if _rgb_distance(px[seed[0], seed[1]], bg) <= _KEY_TOLERANCE:
             ImageDraw.floodfill(out, seed, _KEY_COLOR, thresh=_KEY_TOLERANCE)
 
-    # Stage 2: key any remaining near-background pixels (enclosed pockets).
+    # Stage 2: key the background pockets stage 1 could not reach, via
+    # connected-component analysis.
     px = out.load()
-    for y in range(h):
-        for x in range(w):
-            p = px[x, y]
-            if p != _KEY_COLOR and _rgb_distance(p, bg) <= _KEY_TOLERANCE:
-                px[x, y] = _KEY_COLOR
+    outline_max_luma = _creature_luma_mean(out, bg) * _OUTLINE_LUMA_RATIO
+    visited = [[False] * w for _ in range(h)]
+    for y0 in range(h):
+        for x0 in range(w):
+            if visited[y0][x0]:
+                continue
+            visited[y0][x0] = True
+            p = px[x0, y0]
+            if p == _KEY_COLOR or _rgb_distance(p, bg) > _KEY_TOLERANCE:
+                continue
+
+            # Flood this near-background component (8-connectivity), tallying
+            # what walls it in: the image border, pixels stage 1 already keyed,
+            # and how much of its contact with the creature is outline-dark.
+            # Contacts are counted, not pixels, so a long run of outline weighs
+            # more than a single touching corner.
+            component = [(x0, y0)]
+            touches_border = x0 in (0, w - 1) or y0 in (0, h - 1)
+            abuts_keyed = False
+            boundary = 0
+            outline = 0
+            stack = [(x0, y0)]
+            while stack:
+                x, y = stack.pop()
+                for nx in (x - 1, x, x + 1):
+                    for ny in (y - 1, y, y + 1):
+                        if (nx, ny) == (x, y) or not (0 <= nx < w and 0 <= ny < h):
+                            continue
+                        q = px[nx, ny]
+                        if q == _KEY_COLOR:
+                            abuts_keyed = True
+                            continue
+                        if _rgb_distance(q, bg) > _KEY_TOLERANCE:
+                            boundary += 1
+                            if _relative_luma(q) <= outline_max_luma:
+                                outline += 1
+                            continue
+                        if visited[ny][nx]:
+                            continue
+                        visited[ny][nx] = True
+                        component.append((nx, ny))
+                        if nx in (0, w - 1) or ny in (0, h - 1):
+                            touches_border = True
+                        stack.append((nx, ny))
+
+            if _is_background_pocket(touches_border, abuts_keyed, boundary, outline):
+                for (x, y) in component:
+                    px[x, y] = _KEY_COLOR
     return out
 
 
@@ -370,6 +517,76 @@ def _content_bbox(image: Image.Image, background: int):
     return mask.getbbox()
 
 
+def split_front_back_canvas(canvas: Image.Image) -> tuple[Image.Image, Image.Image] | None:
+    """Cut a side-by-side front/back canvas into a front half and a back half.
+
+    ``canvas`` is assumed to hold a front sprite on the left and a back sprite
+    on the right, sharing one flat background (mirroring
+    ``_flatten_background_to_key``'s RGB assumption — not converted or
+    validated here). The background colour comes from ``_detect_background``,
+    the same convention the flatten uses.
+
+    Only the middle ``_SPLIT_SEARCH_LOW``-``_SPLIT_SEARCH_HIGH`` fraction of
+    columns is searched for the widest run of columns that are background for
+    their *full height* (every pixel within ``_KEY_TOLERANCE`` of ``bg``) —
+    that's where the gap between the two sprites is expected to fall. The cut
+    lands at the widest run's centre column; ties go to the first (leftmost)
+    run encountered. ``canvas`` is not mutated.
+
+    Returns ``(front_half, back_half)`` crops, or ``None``. Three things about
+    that contract the caller has to handle, none of which this slice decides:
+
+    * **The halves are not equal width.** The cut tracks the actual gap, so on
+      an off-centre generation one half is wider than the other — on a
+      1536-wide canvas each can run ~614-920px. A caller that resizes both to
+      one square distorts the two sprites by *different* aspect ratios; it
+      wants ``_content_bbox`` and padding, not a straight stretch.
+    * **``None`` means "no band", not "no two sprites".** A blank canvas, or
+      one holding a single sprite off to one side, has plenty of full-height
+      background and splits "successfully" into halves one of which is empty.
+      Reroll logic keyed only on ``None`` will happily accept that.
+    * **A gradient/vignette backdrop returns ``None``** even when the gap is
+      plainly there, because one mean ``bg`` doesn't describe such a backdrop
+      (the ring mean lands far from the gap's actual pixels). Rejected up front
+      rather than scanned against a colour that matches nothing — same reason
+      ``_flatten_background_to_key`` branches on ``_border_is_uniform``, though
+      it warns and degrades where this reports no band and lets the caller
+      reroll.
+    """
+    w, h = canvas.size
+    ring = _border_ring(canvas)
+    bg = _detect_background(ring)
+    if not _border_is_uniform(ring, bg):
+        return None
+
+    px = canvas.load()
+    x_start = int(_SPLIT_SEARCH_LOW * w)
+    x_end = int(_SPLIT_SEARCH_HIGH * w)
+
+    # Maximal ``[start, end)`` column ranges that are background for their full
+    # height. The window is only 20% of the canvas, so this list stays short.
+    runs = []
+    run_start = None
+    for x in range(x_start, x_end):
+        if all(_rgb_distance(px[x, y], bg) <= _KEY_TOLERANCE for y in range(h)):
+            if run_start is None:
+                run_start = x
+        elif run_start is not None:
+            runs.append((run_start, x))
+            run_start = None
+    if run_start is not None:
+        runs.append((run_start, x_end))
+
+    if not runs:
+        return None
+
+    # Widest run wins; ``max`` returns the first of equal-width runs, so a tie
+    # goes to the leftmost one.
+    start, end = max(runs, key=lambda run: run[1] - run[0])
+    cut = (start + end) // 2
+    return canvas.crop((0, 0, cut, h)), canvas.crop((cut, 0, w, h))
+
+
 def procedural_squash(frame1: Image.Image, amount_px: int | None = None) -> Image.Image:
     """Bottom-anchored vertical squash of ``frame1`` — the Gen-3 breathing frame.
 
@@ -493,9 +710,9 @@ def generate_sprite(
     prompt: str, types: list[str], output_path: str, *, pipeline,
     extra_tags: list[str] | None = None, seed: int | None = None,
 ) -> None:
-    conditioning = _encode_prompt(build_prompt(prompt, types, extra_tags), pipeline)
     result = pipeline(
-        prompt_embeds=conditioning,
+        prompt=build_prompt(prompt, extra_tags),
+        negative_prompt=_NEGATIVE_PROMPT,
         width=_GEN_SIZE,
         height=_GEN_SIZE,
         num_inference_steps=_NUM_STEPS,
@@ -524,9 +741,9 @@ def _run_img2img(
     ``build_frame2`` so it isn't double-quantized off frame 1's palette).
     """
     init = Image.open(image_path).convert("RGB").resize((_GEN_SIZE, _GEN_SIZE), Image.LANCZOS)
-    conditioning = _encode_prompt(build_prompt(prompt, types, extra_tags), pipeline)
     result = pipeline(
-        prompt_embeds=conditioning,
+        prompt=build_prompt(prompt, extra_tags),
+        negative_prompt=_NEGATIVE_PROMPT,
         image=init,
         num_inference_steps=_NUM_STEPS,
         guidance_scale=_CFG_SCALE,
@@ -622,8 +839,26 @@ def stitch_spritesheet(stage_dir: str, output_path: str, *, cell_size: int = 64)
 
 
 def make_img2img_pipeline(txt2img_pipe):
-    from diffusers import StableDiffusionImg2ImgPipeline
-    return StableDiffusionImg2ImgPipeline(**txt2img_pipe.components)
+    """Derive an img2img pipeline that reuses ``txt2img_pipe``'s loaded components.
+
+    The derived pipe gets its **own** ``enable_model_cpu_offload()`` rather than
+    riding on the parent's. The offload hooks live on the shared modules, but
+    the ``_all_hooks`` bookkeeping they are driven through lives on the
+    *pipeline* — so without this call the derived pipe's
+    ``maybe_free_model_hooks()`` (which every diffusers ``__call__`` runs on the
+    way out) silently does nothing, and whatever component ran last — the VAE,
+    upcast to fp32 to decode — stays GPU-resident until the next run evicts it.
+    That is the residency the 8GB budget cannot afford.
+
+    Enabling it on a pipe that shares another's components is safe here because
+    the two are the same pipeline in all the ways offload cares about: identical
+    ``model_cpu_offload_seq`` over identical modules. ``enable_model_cpu_offload``
+    strips every hook and reinstalls from scratch, so whichever pipe ran last
+    leaves the modules in exactly the state the other would have built anyway.
+    """
+    from diffusers import StableDiffusionXLImg2ImgPipeline
+    pipe = StableDiffusionXLImg2ImgPipeline(**txt2img_pipe.components)
+    return _enable_vram_measures(pipe)
 
 
 def _device_and_dtype():
@@ -634,63 +869,78 @@ def _device_and_dtype():
 
 
 def _apply_lora(pipe) -> None:
-    from diffusers.loaders.lora_pipeline import StableDiffusionLoraLoaderMixin
+    from diffusers.loaders.lora_pipeline import StableDiffusionXLLoraLoaderMixin
 
-    path = str(_LORA_PATH)
-    state_dict, network_alphas, metadata = StableDiffusionLoraLoaderMixin.lora_state_dict(
-        path, return_lora_metadata=True
+    state_dict, network_alphas, metadata = StableDiffusionXLLoraLoaderMixin.lora_state_dict(
+        str(_LORA_PATH), return_lora_metadata=True, unet_config=pipe.unet.config
     )
-
     pipe.load_lora_into_unet(
-        state_dict,
-        network_alphas=network_alphas,
-        unet=pipe.unet,
-        metadata=metadata,
-        _pipeline=pipe,
+        state_dict, network_alphas=network_alphas, unet=pipe.unet,
+        metadata=metadata, _pipeline=pipe,
     )
 
-    # diffusers converts kohya TE keys to "text_encoder.text_model.encoder.*" but
-    # the actual text encoder modules are named "encoder.*" (no text_model. wrapper),
-    # so rank detection fails.  Strip the extra level before handing off.
-    def _drop_text_model(d):
+    def _drop_text_model(d, prefix):
         if not d:
             return d
-        old = "text_encoder.text_model."
-        new = "text_encoder."
+        old = f"{prefix}.text_model."
+        new = f"{prefix}."
         return {new + k[len(old):] if k.startswith(old) else k: v for k, v in d.items()}
 
-    pipe.load_lora_into_text_encoder(
-        _drop_text_model(state_dict),
-        network_alphas=_drop_text_model(network_alphas),
-        text_encoder=pipe.text_encoder,
-        lora_scale=pipe.lora_scale,
-        metadata=metadata,
-        _pipeline=pipe,
-    )
+    # te1 (CLIPTextModel) names its modules WITHOUT the "text_model." wrapper level
+    # (needs the strip); te2 (CLIPTextModelWithProjection) names them WITH it (keys
+    # must stay untouched) -- verified against named_modules() of each encoder.
+    for encoder, prefix, fix in ((pipe.text_encoder, "text_encoder", True),
+                                 (pipe.text_encoder_2, "text_encoder_2", False)):
+        sd = _drop_text_model(state_dict, prefix) if fix else state_dict
+        al = _drop_text_model(network_alphas, prefix) if fix else network_alphas
+        pipe.load_lora_into_text_encoder(
+            sd, network_alphas=al, text_encoder=encoder, prefix=prefix,
+            lora_scale=pipe.lora_scale, metadata=metadata, _pipeline=pipe,
+        )
     pipe.fuse_lora(lora_scale=_LORA_SCALE)
 
 
-def _set_dpmpp_karras(pipe) -> None:
-    from diffusers import DPMSolverMultistepScheduler
-    pipe.scheduler = DPMSolverMultistepScheduler.from_config(
-        pipe.scheduler.config,
-        use_karras_sigmas=True,
-        algorithm_type="dpmsolver++",
-    )
+def _enable_vram_measures(pipe):
+    """Apply the CUDA-only VRAM measures to ``pipe`` and return it.
+
+    Mandatory on CUDA (not opt-in) to stay inside the 8GB budget, and applied to
+    every pipeline that is ever called — including one derived from another's
+    components (see ``make_img2img_pipeline``). Off CUDA this is a no-op:
+    ``enable_model_cpu_offload`` needs an accelerator and raises without one.
+
+    ``enable_model_cpu_offload`` installs hooks that move each component to the
+    GPU only while it runs, so from here on *it* owns device placement: a
+    ``pipe.to("cuda")`` afterwards would make every component resident at once
+    and hand the offload's savings straight back (diffusers warns on exactly
+    this combination), so the move is deliberately skipped on this path.
+    """
+    import torch
+    if not torch.cuda.is_available():
+        return pipe
+    pipe.enable_model_cpu_offload()
+    if hasattr(pipe, "enable_vae_tiling"):
+        pipe.enable_vae_tiling()
+    else:
+        pipe.vae.enable_tiling()
+    return pipe
 
 
 def _load_base_pipeline(pipe_cls):
+    from diffusers import EulerAncestralDiscreteScheduler
+
     device, dtype = _device_and_dtype()
-    pipe = pipe_cls.from_pretrained(_BASE_MODEL_ID, torch_dtype=dtype, safety_checker=None)
+    pipe = pipe_cls.from_pretrained(_BASE_MODEL_ID, torch_dtype=dtype)
     _apply_lora(pipe)
-    _set_dpmpp_karras(pipe)
-    return pipe.to(device)
+    pipe.scheduler = EulerAncestralDiscreteScheduler.from_config(pipe.scheduler.config)
+    if device != "cuda":
+        return pipe.to(device)
+    return _enable_vram_measures(pipe)
 
 
 def load_txt2img_pipeline():
     try:
-        from diffusers import StableDiffusionPipeline
-        return _load_base_pipeline(StableDiffusionPipeline)
+        from diffusers import StableDiffusionXLPipeline
+        return _load_base_pipeline(StableDiffusionXLPipeline)
     except Exception as exc:
         print(f"Error: failed to load model: {exc}", file=sys.stderr)
         sys.exit(1)
@@ -698,8 +948,8 @@ def load_txt2img_pipeline():
 
 def load_img2img_pipeline():
     try:
-        from diffusers import StableDiffusionImg2ImgPipeline
-        return _load_base_pipeline(StableDiffusionImg2ImgPipeline)
+        from diffusers import StableDiffusionXLImg2ImgPipeline
+        return _load_base_pipeline(StableDiffusionXLImg2ImgPipeline)
     except Exception as exc:
         print(f"Error: failed to load model: {exc}", file=sys.stderr)
         sys.exit(1)
