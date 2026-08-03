@@ -28,6 +28,9 @@ from fakemon_forge.sprites import (
     _quantize_gen3,
     _rgb_distance,
     split_front_back_canvas,
+    _border_ring,
+    _border_is_uniform,
+    _detect_background,
     _KEY_COLOR,
     _KEY_TOLERANCE,
     _MAX_CREATURE_COLORS,
@@ -952,6 +955,80 @@ def test_split_degenerate_search_window_returns_none():
     canvas = Image.new("RGB", (1, 100), _SPLIT_BG)
 
     assert split_front_back_canvas(canvas) is None
+
+
+def test_split_vignetted_background_returns_none():
+    """A gradient backdrop reports "no band" rather than splitting on a bad `bg`.
+
+    One mean colour does not describe a vignette — the ring mean lands far from
+    the gap's actual pixels — so the scan would be measuring against a colour
+    that matches nothing. Rejected up front, the same condition
+    `_flatten_background_to_key` branches on, leaving the caller to reroll.
+    """
+    canvas = Image.new("RGB", (200, 100))
+    px = canvas.load()
+    for y in range(100):
+        for x in range(200):
+            # Bright at the centre, falling off towards every edge.
+            fade = 1 - (abs(x - 100) / 100) * 0.5 - (abs(y - 50) / 50) * 0.2
+            v = int(250 * fade)
+            px[x, y] = (v, v, v)
+    d = ImageDraw.Draw(canvas)
+    d.rectangle((30, 20, 94, 79), fill=_SPLIT_FRONT_COLOR)
+    d.rectangle((105, 20, 170, 79), fill=_SPLIT_BACK_COLOR)
+
+    ring = _border_ring(canvas)
+    assert not _border_is_uniform(ring, _detect_background(ring))
+    assert split_front_back_canvas(canvas) is None
+
+
+def test_split_halves_are_unequal_when_the_gap_is_off_centre():
+    """The cut tracks the gap, so the halves are *not* each half the width.
+
+    Pins the contract a caller has to honour: resizing both halves to one
+    square would stretch the two sprites by different aspect ratios.
+    """
+    # Only full-height background run in [80, 120) is columns 81-89, so the cut
+    # lands at 85 — well off the 100px midline. Bands stop short of columns 0
+    # and 199 for the same reason they stop short of rows 0 and 99: the border
+    # ring is where `bg` comes from.
+    canvas = _split_canvas((20, 80, _SPLIT_FRONT_COLOR), (90, 180, _SPLIT_BACK_COLOR))
+
+    result = split_front_back_canvas(canvas)
+    assert result is not None
+    front_half, back_half = result
+    assert front_half.size == (85, 100)
+    assert back_half.size == (115, 100)
+    assert front_half.width != back_half.width
+
+
+def test_split_blank_canvas_succeeds_with_two_empty_halves():
+    """`None` means "no band", not "two sprites present".
+
+    An empty canvas is all background, so the widest run is the whole window
+    and the split "succeeds" into two sprite-less halves. Pins the gap a caller
+    branching only on `None` has to close itself.
+    """
+    result = split_front_back_canvas(Image.new("RGB", (200, 100), _SPLIT_BG))
+    assert result is not None
+    front_half, back_half = result
+    assert set(front_half.get_flattened_data()) == {_SPLIT_BG}
+    assert set(back_half.get_flattened_data()) == {_SPLIT_BG}
+
+
+def test_split_single_sprite_canvas_succeeds_with_one_empty_half():
+    """The same gap with real content: one sprite off to the left still splits.
+
+    Everything right of it is background, so a run is found and the back half
+    comes back empty — indistinguishable from a good split by return type.
+    """
+    canvas = _split_canvas((30, 94, _SPLIT_FRONT_COLOR))
+
+    result = split_front_back_canvas(canvas)
+    assert result is not None
+    front_half, back_half = result
+    assert _SPLIT_FRONT_COLOR in set(front_half.get_flattened_data())
+    assert set(back_half.get_flattened_data()) == {_SPLIT_BG}
 
 
 # ---------------------------------------------------------------------------
