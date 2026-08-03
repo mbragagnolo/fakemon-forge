@@ -167,14 +167,20 @@ def main(argv=None):
                 file=sys.stderr,
             )
 
+        # A back sprite is not guaranteed: generate_sprite_pair skips saving a
+        # back half it finds empty, which is a deliberate, already-warned
+        # degradation. Shining a file that was never written would only add a
+        # misleading second warning pointing at the shiny step ("back shiny
+        # generation failed: FileNotFoundError") for a gap that isn't its.
         back_shiny_path = str(stage_dir / "sprite_back_shiny.png")
-        try:
-            generate_shiny(back_path, stage["name"], back_shiny_path)
-        except Exception as exc:
-            print(
-                f"Warning: back shiny generation failed for {stage['name']}: {exc}",
-                file=sys.stderr,
-            )
+        if os.path.exists(back_path):
+            try:
+                generate_shiny(back_path, stage["name"], back_shiny_path)
+            except Exception as exc:
+                print(
+                    f"Warning: back shiny generation failed for {stage['name']}: {exc}",
+                    file=sys.stderr,
+                )
 
         try:
             stitch_spritesheet(stage_dir, str(stage_dir / "spritesheet.png"))
