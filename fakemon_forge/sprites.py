@@ -23,14 +23,22 @@ _KEY_TOLERANCE = 30
 # flat backdrop, not a gradient/vignette) when at least this fraction of its
 # pixels are within ``_KEY_TOLERANCE`` of the mean border colour.
 _BORDER_UNIFORM_FRACTION = 0.9
-# Tunable eyeball placeholder: colour + connectivity alone can't tell a real
-# enclosed background pocket (a leg gap, a ring hole) from a same-coloured
-# creature detail (a highlight, a belly patch) — both are just an 8-connected
-# island of near-background pixels that never touches the border. Size is the
-# practical disambiguator: real pockets are a non-trivial fraction of the
-# sprite, colour-matched detail flecks are tiny by comparison. A component is
-# only keyed as a pocket once it reaches this fraction of the image area.
-_MIN_ENCLOSED_POCKET_AREA_FRACTION = 0.01
+# Tunable eyeball placeholders: colour + connectivity alone can't tell a real
+# background pocket (a leg gap, a ring hole) from a same-coloured creature
+# detail (a highlight, a belly patch) — both are just an 8-connected island of
+# near-background pixels sitting inside the silhouette. What separates them is
+# what walls them in: you see through a pocket, so it is rimmed by the
+# creature's dark *outline*, whereas painted detail sits on mid-tone body
+# colour. "Dark" is measured relative to the creature's own mean luma, not as
+# an absolute cutoff, so a black-bodied Fakemon's highlights are not mistaken
+# for pockets: a boundary pixel counts as outline when its luma falls below
+# this fraction of that mean, and the component is treated as a pocket once
+# that much of its boundary reaches ``_POCKET_OUTLINE_FRACTION``. Scaling the
+# cutoff rather than subtracting a fixed margin is what makes it hold at both
+# ends — on a near-black creature every fixed margin worth using on a bright
+# one drops the cutoff below zero, and no pocket would ever key again.
+_OUTLINE_LUMA_RATIO = 0.65
+_POCKET_OUTLINE_FRACTION = 0.55
 # Gen-3 palette contract: 3 reserved slots (key, black, white) plus at most this
 # many creature colours, so the whole palette stays <= 16.
 _MAX_CREATURE_COLORS = 13
@@ -139,6 +147,56 @@ def _rgb_distance(a, b) -> float:
     return ((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2) ** 0.5
 
 
+def _relative_luma(color) -> float:
+    """Perceived brightness of an RGB colour (Rec. 601 luma), 0-255.
+
+    Used to tell the creature's dark outline from its mid-tone body, which is
+    a brightness judgement rather than a hue one — a red outline on a red body
+    still reads as the edge.
+    """
+    return 0.299 * color[0] + 0.587 * color[1] + 0.114 * color[2]
+
+
+def _creature_luma_mean(image: Image.Image, bg) -> float:
+    """Mean ``_relative_luma`` of the non-background pixels of a keyed image.
+
+    The reference brightness "outline" is judged against, so the judgement
+    adapts to the creature instead of assuming a light one: on a black-bodied
+    Fakemon an absolute dark-cutoff would call the whole body outline and key
+    every highlight as a pocket. Returns ``0.0`` when there is no creature at
+    all (an all-background image), which leaves nothing for it to gate.
+
+    Area-weighted, so the body the creature is mostly made of is what sets the
+    mean — "outline" means "darker than the body", so a one-pixel speck must
+    not count for as much as the torso. Tallied via ``Counter`` over a flat
+    ``get_flattened_data`` pass, which costs one C-level count plus a loop over
+    the distinct colours instead of 590k ``px[x, y]`` lookups at 768px.
+    """
+    total = 0.0
+    count = 0
+    for p, n in Counter(image.get_flattened_data()).items():
+        if p == _KEY_COLOR or _rgb_distance(p, bg) <= _KEY_TOLERANCE:
+            continue
+        total += _relative_luma(p) * n
+        count += n
+    return total / count if count else 0.0
+
+
+def _is_background_pocket(touches_border, abuts_keyed, boundary, outline) -> bool:
+    """Whether a near-background component is background, not creature detail.
+
+    See ``_flatten_background_to_key``'s stage 2 for the three ways a component
+    qualifies. ``boundary`` and ``outline`` count contacts with creature pixels
+    and with outline-dark ones respectively, so a long run of outline weighs
+    more than a single touching corner. A component with no boundary at all
+    never touched a creature pixel, so there is no creature for it to be detail
+    *of* — it is background.
+    """
+    if touches_border or abuts_keyed or not boundary:
+        return True
+    return outline / boundary >= _POCKET_OUTLINE_FRACTION
+
+
 def _display_key(color) -> tuple[int, int, int]:
     """The colour as Gen 3 actually displays it: 5 bits per channel.
 
@@ -188,13 +246,24 @@ def _flatten_background_to_key(image: Image.Image) -> Image.Image:
        and not assuming pure white — SD sometimes paints tints/vignettes). The
        connected outer background is flood-filled from the corners with a
        ``_KEY_TOLERANCE`` threshold (an exact match won't do on noisy pixels).
-    2. **Enclosed-pocket scan.** The remaining pixels within ``_KEY_TOLERANCE``
-       of ``bg`` are grouped into 8-connected components. A component is keyed
-       only if it is enclosed — it never touches the image border (so it's not
-       background the flood fill merely failed to reach) and it's large enough
-       to plausibly be a real pocket (gaps between legs, the hole of a
-       ring-shaped creature) rather than a same-coloured creature detail (a
-       highlight, a belly patch) that just happens to be near ``bg`` in colour.
+    2. **Background-pocket scan.** The remaining pixels within
+       ``_KEY_TOLERANCE`` of ``bg`` are grouped into 8-connected components, and
+       each component is keyed only if it is background rather than creature
+       detail. Three ways to qualify:
+
+       * it touches the image border — outer background the flood walled itself
+         out of (a leg gap opening onto the bottom edge);
+       * it abuts pixels stage 1 already keyed — background the flood tried and
+         failed to cross, because ``ImageDraw.floodfill`` thresholds on
+         *Manhattan* distance and walks 4-connected while this scan uses
+         Euclidean ``_rgb_distance`` and 8-connectivity;
+       * it is rimmed by the creature's dark outline — you see *through* a real
+         pocket (gaps between legs, the hole of a ring-shaped creature), so its
+         boundary is silhouette edge, not body.
+
+       Anything left is a same-coloured creature detail (a shield highlight, a
+       white belly patch) that just happens to be near ``bg`` in colour, and is
+       left untouched — keying it would punch a hole through the creature.
 
     Robustness fallback: if the border ring is *not* near-uniform (a gradient /
     vignette background), keying a single ``bg`` could eat the creature, so
@@ -233,9 +302,10 @@ def _flatten_background_to_key(image: Image.Image) -> Image.Image:
         if _rgb_distance(px[seed[0], seed[1]], bg) <= _KEY_TOLERANCE:
             ImageDraw.floodfill(out, seed, _KEY_COLOR, thresh=_KEY_TOLERANCE)
 
-    # Stage 2: key enclosed background pockets via connected-component analysis.
+    # Stage 2: key the background pockets stage 1 could not reach, via
+    # connected-component analysis.
     px = out.load()
-    min_area = w * h * _MIN_ENCLOSED_POCKET_AREA_FRACTION
+    outline_max_luma = _creature_luma_mean(out, bg) * _OUTLINE_LUMA_RATIO
     visited = [[False] * w for _ in range(h)]
     for y0 in range(h):
         for x0 in range(w):
@@ -246,10 +316,16 @@ def _flatten_background_to_key(image: Image.Image) -> Image.Image:
             if p == _KEY_COLOR or _rgb_distance(p, bg) > _KEY_TOLERANCE:
                 continue
 
-            # Flood this near-background component (8-connectivity), tracking
-            # whether it touches the image border.
+            # Flood this near-background component (8-connectivity), tallying
+            # what walls it in: the image border, pixels stage 1 already keyed,
+            # and how much of its contact with the creature is outline-dark.
+            # Contacts are counted, not pixels, so a long run of outline weighs
+            # more than a single touching corner.
             component = [(x0, y0)]
             touches_border = x0 in (0, w - 1) or y0 in (0, h - 1)
+            abuts_keyed = False
+            boundary = 0
+            outline = 0
             stack = [(x0, y0)]
             while stack:
                 x, y = stack.pop()
@@ -257,18 +333,24 @@ def _flatten_background_to_key(image: Image.Image) -> Image.Image:
                     for ny in (y - 1, y, y + 1):
                         if (nx, ny) == (x, y) or not (0 <= nx < w and 0 <= ny < h):
                             continue
+                        q = px[nx, ny]
+                        if q == _KEY_COLOR:
+                            abuts_keyed = True
+                            continue
+                        if _rgb_distance(q, bg) > _KEY_TOLERANCE:
+                            boundary += 1
+                            if _relative_luma(q) <= outline_max_luma:
+                                outline += 1
+                            continue
                         if visited[ny][nx]:
                             continue
                         visited[ny][nx] = True
-                        q = px[nx, ny]
-                        if q == _KEY_COLOR or _rgb_distance(q, bg) > _KEY_TOLERANCE:
-                            continue
                         component.append((nx, ny))
                         if nx in (0, w - 1) or ny in (0, h - 1):
                             touches_border = True
                         stack.append((nx, ny))
 
-            if not touches_border and len(component) >= min_area:
+            if _is_background_pocket(touches_border, abuts_keyed, boundary, outline):
                 for (x, y) in component:
                     px[x, y] = _KEY_COLOR
     return out
