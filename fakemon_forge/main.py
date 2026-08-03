@@ -67,12 +67,17 @@ def main(argv=None):
         combined, args.mode, tier=args.tier, stages=args.stages, client=client
     )
 
-    if args.image:
-        pipeline = load_img2img_pipeline()
-        img2img_pipeline = pipeline
-    else:
-        pipeline = load_txt2img_pipeline()
-        img2img_pipeline = make_img2img_pipeline(pipeline)
+    # Always the txt2img pipeline, even for --image runs (issue #69): the
+    # drawing's content reaches the sprite renderer only via describe_image's
+    # vision output feeding into sprite_prompt (see the `combined` construction
+    # above), never via img2img on the raw pixels — img2img seeded with a single
+    # front-facing drawing has no mechanism to turn it into a genuine back view
+    # for the right half of the front+back canvas.
+    # `load_img2img_pipeline` is consequently no longer called from here; it
+    # stays imported so the "--image runs never load it" regression test has a
+    # live binding to assert against.
+    pipeline = load_txt2img_pipeline()
+    img2img_pipeline = make_img2img_pipeline(pipeline)
 
     stage_dirs = write_output(forms)
 
@@ -97,16 +102,10 @@ def main(argv=None):
         sprite_path = str(stage_dir / "sprite.png")
         back_path = str(stage_dir / "sprite_back.png")
         try:
-            if args.image:
-                generate_sprite_img2img(
-                    stage["sprite_prompt"], stage["types"], args.image, sprite_path,
-                    pipeline=pipeline, seed=seed,
-                )
-            else:
-                generate_sprite_pair(
-                    stage["sprite_prompt"], stage["types"], sprite_path, back_path,
-                    pipeline=pipeline, seed=seed,
-                )
+            generate_sprite_pair(
+                stage["sprite_prompt"], stage["types"], sprite_path, back_path,
+                pipeline=pipeline, seed=seed,
+            )
         except Exception as exc:
             print(
                 f"Warning: sprite generation failed for {stage['name']}: {exc}",
@@ -168,12 +167,11 @@ def main(argv=None):
                 file=sys.stderr,
             )
 
-        # A back sprite is not guaranteed: --image runs go through
-        # generate_sprite_img2img, which is front-only, and even on the
-        # txt2img path generate_sprite_pair skips saving a back half it finds
-        # empty. Both are deliberate, already-warned degradations, so shining a
-        # file that was never written would only add a misleading second
-        # warning ("back shiny generation failed: FileNotFoundError").
+        # A back sprite is not guaranteed: generate_sprite_pair skips saving a
+        # back half it finds empty, which is a deliberate, already-warned
+        # degradation. Shining a file that was never written would only add a
+        # misleading second warning pointing at the shiny step ("back shiny
+        # generation failed: FileNotFoundError") for a gap that isn't its.
         back_shiny_path = str(stage_dir / "sprite_back_shiny.png")
         if os.path.exists(back_path):
             try:

@@ -90,7 +90,8 @@ def ctx_line(tmp_path, monkeypatch):
 
     with (
         patch("fakemon_forge.main.Mistral"),
-        patch("fakemon_forge.main.describe_image",  return_value="a fire lizard"),
+        patch("fakemon_forge.main.describe_image",
+              return_value="a fire lizard")               as m_vision,
         patch("fakemon_forge.main.generate_fakemon",
               return_value=[_STAGE_1, _STAGE_2, _STAGE_3]) as m_gen,
         patch("fakemon_forge.main.load_txt2img_pipeline", return_value=MagicMock()),
@@ -108,7 +109,7 @@ def ctx_line(tmp_path, monkeypatch):
         patch("fakemon_forge.main.export_ini"),
     ):
         m_sprite.side_effect = _write_pair
-        yield {"gen": m_gen,
+        yield {"gen": m_gen, "vision": m_vision,
                "sprite": m_sprite, "frame2": m_frame2, "shiny": m_shiny,
                "stitch": m_stitch, "footprint": m_footprint,
                "icon": m_icon, "cry": m_cry, "dirs": dirs}
@@ -174,33 +175,47 @@ def test_txt2img_vision_step_skipped(ctx):
 
 
 # ---------------------------------------------------------------------------
-# img2img path (image provided)
+# --image mode (a drawing is provided). Since issue #69 this is no longer an
+# img2img path: the drawing feeds the vision step only, and sprite generation
+# runs on the same txt2img front+back call text-only mode uses.
 # ---------------------------------------------------------------------------
 
-def test_img2img_path_uses_img2img_pipeline(ctx, tmp_path):
+def test_image_mode_uses_txt2img_pipeline(ctx, tmp_path):
+    """Issue #69: --image mode now loads the same txt2img pipeline as
+    text-only mode (load_img2img_pipeline is never called for the primary
+    sprite call — Approach B, the drawing reaching sprites via vision text)."""
     img = tmp_path / "drawing.png"
     img.write_bytes(b"\x89PNG\r\n")
     main(["--image", str(img), "--description", "fire lizard"])
-    ctx["i2i"].assert_called_once()
-    ctx["t2i"].assert_not_called()
+    ctx["t2i"].assert_called_once()
+    ctx["i2i"].assert_not_called()
 
 
-def test_img2img_path_calls_generate_sprite_img2img(ctx, tmp_path):
+def test_image_mode_calls_generate_sprite_pair(ctx, tmp_path):
+    """Issue #69: --image mode now produces a front+back pair via the same
+    generate_sprite_pair call txt2img mode uses; generate_sprite_img2img is
+    only called for the chibi enhancement."""
     img = tmp_path / "drawing.png"
     img.write_bytes(b"\x89PNG\r\n")
     main(["--image", str(img), "--description", "fire lizard"])
-    assert ctx["sprite_i2i"].call_count == 2   # front + chibi (no back sprite in --image mode)
-    ctx["sprite"].assert_not_called()
+    ctx["sprite"].assert_called_once()
+    args = ctx["sprite"].call_args.args
+    assert args[2] == str(ctx["stage_dir"] / "sprite.png")        # front_output_path
+    assert args[3] == str(ctx["stage_dir"] / "sprite_back.png")   # back_output_path
+    calls = ctx["sprite_i2i"].call_args_list
+    chibi = [c for c in calls if c.kwargs.get("extra_tags") == _CHIBI_TAGS]
+    assert len(calls) == 1
+    assert len(chibi) == 1
 
 
-def test_img2img_vision_step_called(ctx, tmp_path):
+def test_image_mode_vision_step_called(ctx, tmp_path):
     img = tmp_path / "drawing.png"
     img.write_bytes(b"\x89PNG\r\n")
     main(["--image", str(img), "--description", "fire lizard"])
     ctx["vision"].assert_called_once()
 
 
-def test_img2img_vision_image_path_passed(ctx, tmp_path):
+def test_image_mode_vision_image_path_passed(ctx, tmp_path):
     img = tmp_path / "drawing.png"
     img.write_bytes(b"\x89PNG\r\n")
     main(["--image", str(img), "--description", "fire lizard"])
@@ -208,39 +223,104 @@ def test_img2img_vision_image_path_passed(ctx, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# --image mode produces no back sprite (known gap, closed by issue #69)
+# --image mode produces a back-sprite pair (issue #69, fixing the regression
+# tracked in an earlier slice of this same issue)
 # ---------------------------------------------------------------------------
 
-def test_img2img_path_produces_no_back_sprite_call(ctx, tmp_path):
-    """--image mode produces no back-sprite call at all in this slice.
-
-    The old backside-img2img call site this test used to guard is deleted
-    here (issue #66), and generate_sprite_pair is txt2img-only, so nothing
-    writes sprite_back.png on the --image path. That is a real, temporary
-    regression against issue #10, accepted for this slice and closed by issue
-    #69, which routes --image through the pair path.
-    """
+def test_image_mode_produces_back_sprite_pair(ctx, tmp_path):
+    """--image mode's sprite_back.png regression (an earlier slice deleted the
+    old img2img backside chain without a replacement) is fixed by routing
+    --image mode through the same generate_sprite_pair call txt2img mode
+    uses (Approach B: the drawing feeds sprite generation only via
+    describe_image's vision output, not via img2img on the raw pixels)."""
     img = tmp_path / "drawing.png"
     img.write_bytes(b"\x89PNG\r\n")
     main(["--image", str(img), "--description", "fire lizard"])
 
+    ctx["sprite"].assert_called_once()
+    args = ctx["sprite"].call_args.args
+    assert args[3] == str(ctx["stage_dir"] / "sprite_back.png")   # back_output_path
     calls = ctx["sprite_i2i"].call_args_list
-    assert len(calls) == 2   # front + chibi only
-    back = [c for c in calls if c.kwargs.get("extra_tags") == ["backside"]]
-    assert back == []
-    ctx["sprite"].assert_not_called()   # generate_sprite_pair is txt2img-only
+    assert len(calls) == 1   # chibi only — no img2img call against the raw drawing
 
 
-def test_img2img_path_skips_back_shiny_without_warning(ctx, tmp_path, capsys):
-    """No back sprite means no back shiny — and no misleading warning about it.
-
-    Shining the absent sprite_back.png would raise FileNotFoundError and get
-    reported as "back shiny generation failed", pointing at the shiny step for
-    a gap that belongs to the sprite step.
-    """
+def test_image_mode_sprite_called_with_stage_prompt(ctx, tmp_path):
+    """The drawing reaches sprite generation only through the LLM-authored
+    sprite_prompt (vision -> combined -> generate_fakemon -> sprite_prompt),
+    so --image mode passes exactly what text-only mode passes."""
     img = tmp_path / "drawing.png"
     img.write_bytes(b"\x89PNG\r\n")
     main(["--image", str(img), "--description", "fire lizard"])
+    args = ctx["sprite"].call_args.args
+    assert args[0] == _STAGE_1["sprite_prompt"]
+    assert args[1] == _STAGE_1["types"]
+    assert ctx["sprite"].call_args.kwargs["pipeline"] is ctx["t2i"].return_value
+
+
+def test_image_mode_back_shiny_derived_from_the_new_back_sprite(ctx, tmp_path):
+    """sprite_back_shiny.png starts working for --image runs too, since the
+    back sprite now exists — no change to generate_shiny required."""
+    img = tmp_path / "drawing.png"
+    img.write_bytes(b"\x89PNG\r\n")
+    main(["--image", str(img), "--description", "fire lizard"])
+    back_shiny = [
+        c for c in ctx["shiny"].call_args_list
+        if c.args[2] == str(ctx["stage_dir"] / "sprite_back_shiny.png")
+    ]
+    assert len(back_shiny) == 1
+    assert back_shiny[0].args[0] == str(ctx["stage_dir"] / "sprite_back.png")
+
+
+# --- edge case: --image with no --description -------------------------------
+
+def test_image_only_run_produces_the_sprite_pair(ctx, tmp_path):
+    """`--image` with no `--description` is valid (cli.validate_args); the
+    vision output is the whole prompt and the front+back pair is produced the
+    same way."""
+    img = tmp_path / "drawing.png"
+    img.write_bytes(b"\x89PNG\r\n")
+    main(["--image", str(img)])
+
+    assert ctx["gen"].call_args.args[0] == "a fire lizard"   # vision output only
+    ctx["t2i"].assert_called_once()
+    ctx["i2i"].assert_not_called()
+    ctx["sprite"].assert_called_once()
+    args = ctx["sprite"].call_args.args
+    assert args[2] == str(ctx["stage_dir"] / "sprite.png")
+    assert args[3] == str(ctx["stage_dir"] / "sprite_back.png")
+
+
+# --- edge case: --image in line mode ----------------------------------------
+
+def test_image_line_mode_describes_once_and_pairs_per_stage(ctx_line, tmp_path):
+    """The drawing is described once for the whole line; every stage then gets
+    its own front+back pair in its own stage directory."""
+    img = tmp_path / "drawing.png"
+    img.write_bytes(b"\x89PNG\r\n")
+    main(["--image", str(img), "--mode", "line"])
+
+    ctx_line["vision"].assert_called_once()
+    assert ctx_line["sprite"].call_count == 3
+    pairs = [(c.args[2], c.args[3]) for c in ctx_line["sprite"].call_args_list]
+    assert pairs == [
+        (str(d / "sprite.png"), str(d / "sprite_back.png")) for d in ctx_line["dirs"]
+    ]
+    # Each stage still gets its own seed rather than sharing one.
+    seeds = [c.kwargs["seed"] for c in ctx_line["sprite"].call_args_list]
+    assert len(set(seeds)) == 3
+
+
+def test_skipped_back_sprite_skips_back_shiny_without_warning(ctx, capsys):
+    """A skipped back sprite means no back shiny — and no second warning.
+
+    generate_sprite_pair declines to save a back half it finds empty, warning
+    once itself. Shining the file it never wrote would raise FileNotFoundError
+    and get reported as "back shiny generation failed", pointing at the shiny
+    step for a gap that belongs to the sprite step.
+    """
+    ctx["sprite"].side_effect = lambda *a, **k: Path(a[2]).write_bytes(b"")   # front only
+
+    main(["--description", "fire lizard"])
 
     targets = [c.args[2] for c in ctx["shiny"].call_args_list]
     assert str(ctx["stage_dir"] / "sprite_back_shiny.png") not in targets
@@ -300,7 +380,7 @@ def test_txt2img_frame2_uses_img2img_pipeline_and_seed(ctx):
     assert "seed" in kwargs
 
 
-def test_img2img_frame2_written_per_stage(ctx, tmp_path):
+def test_image_mode_frame2_written_per_stage(ctx, tmp_path):
     img = tmp_path / "drawing.png"
     img.write_bytes(b"\x89PNG\r\n")
     main(["--image", str(img), "--description", "fire lizard"])
@@ -483,9 +563,10 @@ def test_chibi_render_uses_the_txt2img_derived_img2img_pipeline(ctx):
     assert chibi[0].kwargs["pipeline"] is ctx["make_i2i"].return_value
 
 
-def test_chibi_render_uses_the_loaded_img2img_pipeline_in_image_mode(ctx, tmp_path):
-    """--image path: the chibi pass reuses load_img2img_pipeline()'s SDXL
-    pipeline, the same one that rendered the front sprite."""
+def test_chibi_render_uses_the_txt2img_derived_img2img_pipeline_in_image_mode(ctx, tmp_path):
+    """Issue #69: --image mode now loads only the txt2img pipeline (same as
+    text-only mode), so the chibi pass runs on make_img2img_pipeline's
+    derived pipeline, not a separately loaded img2img one."""
     img = tmp_path / "drawing.png"
     img.write_bytes(b"\x89PNG\r\n")
     main(["--image", str(img), "--description", "fire lizard"])
@@ -493,7 +574,7 @@ def test_chibi_render_uses_the_loaded_img2img_pipeline_in_image_mode(ctx, tmp_pa
     chibi = [c for c in ctx["sprite_i2i"].call_args_list
              if c.kwargs.get("extra_tags") == _CHIBI_TAGS]
     assert len(chibi) == 1
-    assert chibi[0].kwargs["pipeline"] is ctx["i2i"].return_value
+    assert chibi[0].kwargs["pipeline"] is ctx["make_i2i"].return_value
 
 
 def test_icon_generated_three_times_in_line_mode(ctx_line):
