@@ -1,0 +1,6 @@
+- [ ] Generate a sprite whose creature has near-white detail (shield highlight, white belly patch, teeth/eyes) and confirm the detail survives instead of turning into the transparency key
+- [ ] Generate a sprite with a real interior gap (between legs, a ring/hole shape) and confirm the gap is still keyed transparent in the exported Gen-3 sprite
+- [ ] Confirm the outer background is still fully keyed — check all four edges and corners of the exported sprite, plus the back sprite and frame 2
+- [ ] Run a full `fakemon-forge` generation end to end and confirm the .ini/palette export still shows the key colour at index 0 with no visible white halo or fringe
+- [ ] Feed a reference image with a gradient/vignette background and confirm the "non-uniform border" warning still prints to stderr and generation completes without raising
+- [ ] Spot-check timing: sprite post-processing should not feel slower than before (stage 2 now walks connected components at full 768px render size)

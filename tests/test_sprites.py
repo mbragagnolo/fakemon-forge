@@ -413,6 +413,35 @@ def test_flatten_leaves_isolated_near_background_detail_patch_untouched():
     assert px[28, 48] == (60, 120, 200)
 
 
+def _open_notch_sprite():
+    """96x96 RGB: a U-shaped creature whose notch opens onto the top border.
+
+    The notch is background-coloured and large, but the corner flood fill
+    cannot reach it (the creature walls it off from every corner). It touches
+    the image border, so it is outer background rather than an enclosed
+    pocket — stage 2 must leave it alone.
+    """
+    img = Image.new("RGB", (96, 96), (250, 250, 250))
+    d = ImageDraw.Draw(img)
+    d.rectangle((30, 0, 37, 50), fill=(60, 120, 200))   # left wall, touches top border
+    d.rectangle((58, 0, 65, 50), fill=(60, 120, 200))   # right wall, touches top border
+    d.rectangle((30, 44, 65, 50), fill=(60, 120, 200))  # floor
+    return img
+
+
+def test_flatten_leaves_border_touching_background_component_untouched():
+    img = _open_notch_sprite()
+    out = _flatten_background_to_key(img)
+    px = out.load()
+    # The notch is near-bg and far bigger than a detail fleck, but it touches
+    # the top border, so it is not an enclosed pocket and stage 2 skips it.
+    for point in ((48, 0), (48, 20), (40, 40)):
+        assert px[point] == (250, 250, 250)
+    # Outside the walls, the corner flood still keys the outer background.
+    assert px[10, 20] == _KEY_COLOR
+    assert px[90, 20] == _KEY_COLOR
+
+
 def test_flatten_does_not_mutate_input():
     img = _noisy_border_sprite()
     original_data = list(img.get_flattened_data())
