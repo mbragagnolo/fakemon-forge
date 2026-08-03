@@ -780,3 +780,89 @@ def test_generate_fakemon_always_emits_in_range_height_and_weight():
     for stage in generate_fakemon("fire lizard", "line", client=client):
         assert isinstance(stage["height_dm"], int) and 1 <= stage["height_dm"] <= 999
         assert isinstance(stage["weight_hg"], int) and 1 <= stage["weight_hg"] <= 9999
+
+
+# ---------------------------------------------------------------------------
+# Off-spec stage numbers and dimension types degrade instead of raising
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("stage_no", [4, 0, -1, None, "one", [1], {"stage": 1}])
+def test_off_spec_stage_number_falls_back_to_the_tier_table(stage_no):
+    """A hallucinated stage number must not KeyError out of _normalize, which
+    runs outside generate_fakemon's try/except."""
+    stage = {**_STAGE_1, "stage": stage_no}
+    stage.pop("height_dm", None)
+    stage.pop("weight_hg", None)
+    result = _normalize([stage], "line", "standard")
+    assert (result[0]["height_dm"], result[0]["weight_hg"]) == (10, 150)
+
+
+@pytest.mark.parametrize("stage_no", ["3", 3.0])
+def test_coercible_stage_number_recovers_the_line_table(stage_no):
+    """A stage number the model wrote as a string still resolves to its own
+    row — falling back to the tier table there would lose real information.
+    Stage 3 is deliberately chosen: its (17, 600) differs from the standard
+    tier fallback, so the assertion can't pass by coincidence."""
+    stage = {**_STAGE_1, "stage": stage_no}
+    stage.pop("height_dm", None)
+    stage.pop("weight_hg", None)
+    result = _normalize([stage], "line", "standard")
+    assert (result[0]["height_dm"], result[0]["weight_hg"]) == (17, 600)
+
+
+def test_missing_stage_key_falls_back_to_the_tier_table():
+    stage = {k: v for k, v in _STAGE_1.items() if k != "stage"}
+    result = _normalize([stage], "line", "pseudo")
+    assert (result[0]["height_dm"], result[0]["weight_hg"]) == (17, 600)
+
+
+def test_off_spec_stage_number_still_uses_the_line_table_when_valid():
+    """The fallback must not swallow the stage table for well-formed input."""
+    stage = {**_STAGE_1, "stage": 3}
+    stage.pop("height_dm", None)
+    stage.pop("weight_hg", None)
+    result = _normalize([stage], "line", "standard")
+    assert (result[0]["height_dm"], result[0]["weight_hg"]) == (17, 600)
+
+
+@pytest.mark.parametrize("value, expected", [
+    ("12", 12),        # JSON string instead of a number
+    (7.8, 7),          # float truncates rather than persisting a non-integer
+    (True, 5),         # bool is not a measurement
+    (None, 5),
+    ("tall", 5),
+    ([7], 5),
+    ({"dm": 7}, 5),
+])
+def test_non_integer_height_degrades_to_default_or_coerces(value, expected):
+    stage = {**_STAGE_1, "height_dm": value, "weight_hg": 30}
+    result = _normalize([stage], "line", "standard")
+    assert result[0]["height_dm"] == expected
+    assert isinstance(result[0]["height_dm"], int)
+
+
+@pytest.mark.parametrize("value, expected", [
+    ("400", 400),
+    (149.9, 149),
+    ("heavy", 30),
+    (None, 30),
+])
+def test_non_integer_weight_degrades_to_default_or_coerces(value, expected):
+    stage = {**_STAGE_1, "height_dm": 5, "weight_hg": value}
+    result = _normalize([stage], "line", "standard")
+    assert result[0]["weight_hg"] == expected
+    assert isinstance(result[0]["weight_hg"], int)
+
+
+def test_coerced_string_dimension_is_still_clamped():
+    """Coercion happens before the bounds check, not instead of it."""
+    stage = {**_STAGE_1, "height_dm": "50000", "weight_hg": "0"}
+    result = _normalize([stage], "line", "standard")
+    assert (result[0]["height_dm"], result[0]["weight_hg"]) == (999, 1)
+
+
+def test_generate_fakemon_survives_fully_off_spec_sizes():
+    stages = [{**_STAGE_1, "stage": 9, "height_dm": "big", "weight_hg": None}]
+    client = _make_client(json.dumps(stages))
+    result = generate_fakemon("fire lizard", "line", client=client)
+    assert (result[0]["height_dm"], result[0]["weight_hg"]) == (10, 150)

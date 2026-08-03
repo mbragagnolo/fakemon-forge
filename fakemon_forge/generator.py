@@ -149,6 +149,37 @@ _SIZE_DEFAULTS_BY_TIER = {
 }
 
 
+def _size_defaults(stage: dict, mode: str, tier: str) -> tuple[int, int]:
+    """Stage/tier-scaled (height_dm, weight_hg) fallbacks.
+
+    An off-spec stage number — missing, out of range, or a JSON string — falls
+    through to the tier table rather than raising KeyError, matching how
+    ``main.py`` already reads the same field for its sprite size fraction.
+    """
+    if mode == "line":
+        try:
+            return _SIZE_DEFAULTS_BY_LINE_STAGE[int(stage.get("stage"))]
+        except (TypeError, ValueError, KeyError):
+            pass
+    return _SIZE_DEFAULTS_BY_TIER.get(tier, _SIZE_DEFAULTS_BY_TIER["standard"])
+
+
+def _clamp_dimension(value, upper: int, fallback: int) -> int:
+    """Coerce to int and clamp to [1, upper]; unusable values take the default.
+
+    Both fields are 2-byte unsigned downstream, so a float would be as
+    unencodable as a string — the int() coercion is part of the contract, not
+    just defensive typing.
+    """
+    if isinstance(value, bool):
+        return fallback
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        return fallback
+    return max(1, min(upper, value))
+
+
 def _normalize(stages: list[dict], mode: str, tier: str) -> list[dict]:
     """Post-parse cleanup pass: enforces the name contract, and defaults/clamps
     height_dm and weight_hg.
@@ -159,18 +190,9 @@ def _normalize(stages: list[dict], mode: str, tier: str) -> list[dict]:
     for stage in stages:
         stage["name"] = _repair_name(stage["name"])
 
-        if "height_dm" not in stage or "weight_hg" not in stage:
-            if mode == "line":
-                height_default, weight_default = _SIZE_DEFAULTS_BY_LINE_STAGE[stage["stage"]]
-            else:
-                height_default, weight_default = _SIZE_DEFAULTS_BY_TIER[tier]
-            if "height_dm" not in stage:
-                stage["height_dm"] = height_default
-            if "weight_hg" not in stage:
-                stage["weight_hg"] = weight_default
-
-        stage["height_dm"] = max(1, min(999, stage["height_dm"]))
-        stage["weight_hg"] = max(1, min(9999, stage["weight_hg"]))
+        height_default, weight_default = _size_defaults(stage, mode, tier)
+        stage["height_dm"] = _clamp_dimension(stage.get("height_dm"), 999, height_default)
+        stage["weight_hg"] = _clamp_dimension(stage.get("weight_hg"), 9999, weight_default)
     return stages
 
 
