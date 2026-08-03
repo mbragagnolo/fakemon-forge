@@ -1,3 +1,4 @@
+import re
 import sys
 import pytest
 from pathlib import Path
@@ -77,7 +78,8 @@ def ctx_line(tmp_path, monkeypatch):
     with (
         patch("fakemon_forge.main.Mistral"),
         patch("fakemon_forge.main.describe_image",  return_value="a fire lizard"),
-        patch("fakemon_forge.main.generate_fakemon", return_value=[_STAGE_1, _STAGE_2, _STAGE_3]),
+        patch("fakemon_forge.main.generate_fakemon",
+              return_value=[_STAGE_1, _STAGE_2, _STAGE_3]) as m_gen,
         patch("fakemon_forge.main.load_txt2img_pipeline", return_value=MagicMock()),
         patch("fakemon_forge.main.load_img2img_pipeline", return_value=MagicMock()),
         patch("fakemon_forge.main.make_img2img_pipeline", return_value=MagicMock()),
@@ -92,7 +94,8 @@ def ctx_line(tmp_path, monkeypatch):
         patch("fakemon_forge.main.write_output", return_value=dirs),
         patch("fakemon_forge.main.export_ini"),
     ):
-        yield {"sprite": m_sprite, "frame2": m_frame2, "shiny": m_shiny,
+        yield {"gen": m_gen,
+               "sprite": m_sprite, "frame2": m_frame2, "shiny": m_shiny,
                "stitch": m_stitch, "footprint": m_footprint,
                "icon": m_icon, "cry": m_cry, "dirs": dirs}
 
@@ -590,3 +593,130 @@ def test_cry_failure_warns_but_does_not_exit(ctx, capsys):
     assert "Flamburr" in err
     # cry failure is isolated: the sprite block still runs afterward.
     ctx["sprite"].assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# --stages wiring (#59)
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def ctx_two(tmp_path, monkeypatch):
+    """Like ctx_line but a 2-stage line."""
+    monkeypatch.setenv("MISTRAL_API_KEY", "test-key-123")
+
+    dirs = []
+    for name in ["stage1_Flamburr", "stage2_Flamburro"]:
+        d = tmp_path / "Flamburr" / name
+        d.mkdir(parents=True)
+        dirs.append(d)
+
+    with (
+        patch("fakemon_forge.main.Mistral"),
+        patch("fakemon_forge.main.describe_image", return_value="a fire lizard"),
+        patch("fakemon_forge.main.generate_fakemon",
+              return_value=[_STAGE_1, _STAGE_2]) as m_gen,
+        patch("fakemon_forge.main.load_txt2img_pipeline", return_value=MagicMock()),
+        patch("fakemon_forge.main.load_img2img_pipeline", return_value=MagicMock()),
+        patch("fakemon_forge.main.make_img2img_pipeline", return_value=MagicMock()),
+        patch("fakemon_forge.main.generate_sprite")           as m_sprite,
+        patch("fakemon_forge.main.generate_sprite_img2img"),
+        patch("fakemon_forge.main.generate_frame2"),
+        patch("fakemon_forge.main.generate_shiny"),
+        patch("fakemon_forge.main.stitch_spritesheet"),
+        patch("fakemon_forge.main.generate_footprint")        as m_footprint,
+        patch("fakemon_forge.main.generate_icon")             as m_icon,
+        patch("fakemon_forge.main.generate_cry")              as m_cry,
+        patch("fakemon_forge.main.write_output", return_value=dirs) as m_write,
+        patch("fakemon_forge.main.export_ini"),
+    ):
+        yield {"gen": m_gen, "sprite": m_sprite, "footprint": m_footprint,
+               "icon": m_icon, "cry": m_cry, "write": m_write, "dirs": dirs}
+
+
+def _stages_kwarg(mock_gen):
+    return mock_gen.call_args.kwargs["stages"]
+
+
+# --- the count reaches the generator -----------------------------------------
+
+def test_stages_two_reaches_generate_fakemon(ctx_two):
+    main(["--description", "fire lizard", "--mode", "line", "--stages", "2"])
+    assert _stages_kwarg(ctx_two["gen"]) == 2
+
+
+def test_stages_three_reaches_generate_fakemon(ctx_line):
+    main(["--description", "fire lizard", "--mode", "line", "--stages", "3"])
+    assert _stages_kwarg(ctx_line["gen"]) == 3
+
+
+def test_omitting_stages_sends_three(ctx_line):
+    """The default must survive the trip through main, not be dropped."""
+    main(["--description", "fire lizard", "--mode", "line"])
+    assert _stages_kwarg(ctx_line["gen"]) == 3
+
+
+def test_single_mode_still_sends_the_default(ctx):
+    main(["--description", "fire lizard"])
+    assert _stages_kwarg(ctx["gen"]) == 3
+
+
+def test_stages_count_is_not_confused_with_the_returned_list(ctx_two):
+    """`args.stages` is a count; main's local holds the returned stage dicts.
+    Passing the list here would make _size_defaults raise on an unhashable
+    key -- the same shadowing that bit generator.py in task 10."""
+    main(["--description", "fire lizard", "--mode", "line", "--stages", "2"])
+    assert isinstance(_stages_kwarg(ctx_two["gen"]), int)
+
+
+# --- the run is sized by what came back --------------------------------------
+
+def test_two_stage_run_writes_two_stage_dirs(ctx_two):
+    main(["--description", "fire lizard", "--mode", "line", "--stages", "2"])
+    written = ctx_two["write"].call_args.args[0]
+    assert len(written) == 2
+    assert [s["stage"] for s in written] == [1, 2]
+
+
+def test_two_stage_run_creates_no_third_stage_dir(ctx_two):
+    main(["--description", "fire lizard", "--mode", "line", "--stages", "2"])
+    names = [d.name for d in ctx_two["dirs"]]
+    assert not any(n.startswith("stage3_") for n in names)
+    # The injector filters directories that don't match stage<digits>_, so a
+    # branched-style name would be silently dropped rather than rejected.
+    assert all(re.fullmatch(r"stage\d+_.+", n) for n in names)
+
+
+@pytest.mark.parametrize("asset", ["sprite", "icon", "cry", "footprint"])
+def test_two_stage_run_generates_each_asset_twice(ctx_two, asset):
+    main(["--description", "fire lizard", "--mode", "line", "--stages", "2"])
+    assert ctx_two[asset].call_count == 2
+
+
+@pytest.mark.parametrize("asset", ["sprite", "icon", "cry", "footprint"])
+def test_three_stage_run_generates_each_asset_three_times(ctx_line, asset):
+    main(["--description", "fire lizard", "--mode", "line"])
+    assert ctx_line[asset].call_count == 3
+
+
+# --- footprint scaling across a 2-stage line ---------------------------------
+
+def _size_fractions(mock_footprint):
+    return [c.kwargs["size_fraction"] for c in mock_footprint.call_args_list]
+
+
+def test_two_stage_footprints_mirror_the_three_stage_endpoints(ctx_two):
+    """A 2-stage line takes the first and last fractions, skipping the middle
+    -- the same shape as its height/weight defaults, where the final form
+    takes the stage-3 row."""
+    main(["--description", "fire lizard", "--mode", "line", "--stages", "2"])
+    assert _size_fractions(ctx_two["footprint"]) == [0.6, 0.9]
+
+
+def test_three_stage_footprint_scaling_is_unchanged(ctx_line):
+    main(["--description", "fire lizard", "--mode", "line"])
+    assert _size_fractions(ctx_line["footprint"]) == [0.6, 0.75, 0.9]
+
+
+def test_single_form_footprint_is_full_size(ctx):
+    main(["--description", "fire lizard"])
+    assert _size_fractions(ctx["footprint"]) == [0.9]

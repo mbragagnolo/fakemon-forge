@@ -1,6 +1,6 @@
 # Task 20 — Wire `--stages` through `main.py`
 
-- **Status:** pending
+- **Status:** done
 - **Wave:** 2
 - **Owns (the only files/dirs this task may create or modify):**
   - `fakemon_forge/main.py`
@@ -56,14 +56,17 @@ this stays torch-free and runs in the keep sandbox. No `@pytest.mark.ml`.
 
 ## Acceptance criteria (Definition of Done)
 
-- [ ] `args.stages` reaches `generate_fakemon` as the `stages` keyword.
-- [ ] Omitting `--stages` sends `stages=3`.
-- [ ] A 2-stage run produces exactly two `stageN_<name>` directories, no `stage3_*`.
-- [ ] The asset loop iterates once per generated stage, no more.
-- [ ] `stats.json` keys and the `stageN_<name>` naming are unchanged — the
-      injector reads these and must keep working.
-- [ ] The local-variable / `args.stages` name collision is resolved unambiguously.
-- [ ] Full suite green: `pytest` from the repo root.
+- [x] `args.stages` reaches `generate_fakemon` as the `stages` keyword.
+- [x] Omitting `--stages` sends `stages=3`.
+- [x] A 2-stage run produces exactly two `stageN_<name>` directories, no `stage3_*`.
+- [x] The asset loop iterates once per generated stage, no more — asserted for
+      sprite, icon, cry and footprint at both 2 and 3 stages.
+- [x] `stats.json` keys and the `stageN_<name>` naming are unchanged — the
+      injector reads these and must keep working. A test asserts every written
+      directory still matches `stage<digits>_`.
+- [x] The local-variable / `args.stages` name collision is resolved
+      unambiguously — the local is now `forms`.
+- [x] Full suite green: `pytest` from the repo root — 648 passed (was 630).
 
 ## Notes / assumptions
 
@@ -74,3 +77,23 @@ this stays torch-free and runs in the keep sandbox. No `@pytest.mark.ml`.
 - Branched evolution is explicitly out of scope for #59. Do not introduce
   `stage2a_*`-style names — the injector filters directories that don't match
   `stage<digits>_`, so such output would be silently dropped.
+
+### Outcomes worth carrying forward
+
+- **The local is now `forms`, not `stages`.** All four uses were renamed
+  (`write_output`, the `zip`, the `forms[0]["name"]` line-name lookup, and the
+  footprint branch). This was the collision the task file predicted, and the
+  same one that silently broke `generator.py` in task 10.
+- **A second, unplanned defect was found and fixed: footprint scaling.**
+  `main.py` scaled footprint size by stage position only when
+  `len(stages) == 3`, so a 2-stage line fell through to a flat full-size
+  footprint and its juvenile printed the same size as its final. Replaced with
+  `_FOOTPRINT_FRACTIONS`, keyed line length → stage number: a 2-stage line
+  takes `{1: 0.6, 2: 0.9}`, mirroring how task 10 gave a 2-stage final the
+  stage-3 height/weight row. The 3-stage and single-form fractions are
+  unchanged, and an unrecognised line length still falls through to full size.
+  *(User decision, asked during execution — the alternative considered was an
+  even split of 0.6 / 0.75, rejected because it contradicts the height/weight
+  treatment already shipped.)*
+- **`main.py` is now stage-count agnostic.** Nothing left in it branches on a
+  line being exactly three stages; everything sizes off `len(forms)`.
