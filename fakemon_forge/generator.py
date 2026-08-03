@@ -25,7 +25,8 @@ _BST_TARGETS = {
 _SYSTEM_PROMPT = """\
 You are a Pokémon game designer. Generate Fakemon data as a JSON array.
 Each element represents one evolutionary stage and must have exactly these fields:
-  name          – portmanteau-style name (string)
+  name          – portmanteau-style name (string); max 10 characters, using only
+    letters, digits, spaces, é, ♂, ♀ and the punctuation . , ' - … ! ? / ( ) " : ;
   stage         – stage number as an integer (1, 2, or 3)
   types         – list of 1 or 2 type strings, e.g. ["Fire"] or ["Water", "Flying"]
   ability       – one ability name (string)
@@ -98,7 +99,9 @@ def _name_violations(stages: list[dict]) -> tuple[list[str], list[str]]:
     too_long = []
     illegal = []
     for stage in stages:
-        name = stage["name"]
+        # A present-but-non-string name is repaired via str(), not raised on —
+        # so it has to be measured the same way here or the two disagree.
+        name = str(stage["name"])
         if len(name) > _MAX_NAME_LEN:
             too_long.append(name)
         if any(ch not in _ALLOWED_NAME_CHARS for ch in name):
@@ -117,13 +120,13 @@ def _corrective_message(too_long: list[str], illegal: list[str]) -> str:
         parts.append(
             "These names contain characters that can't be used: " + ", ".join(illegal) +
             ". Return the full array again using only letters, numbers, spaces, "
-            "and standard punctuation."
+            "é, ♂, ♀ and the punctuation . , ' - … ! ? / ( ) \" : ;"
         )
     return " ".join(parts)
 
 
-def _repair_name(name: str) -> str:
-    cleaned = "".join(ch for ch in name if ch in _ALLOWED_NAME_CHARS)
+def _repair_name(name) -> str:
+    cleaned = "".join(ch for ch in str(name) if ch in _ALLOWED_NAME_CHARS)
     return cleaned[:_MAX_NAME_LEN]
 
 
@@ -179,6 +182,10 @@ def generate_fakemon(
 
         too_long, illegal = _name_violations(stages)
         if (too_long or illegal) and attempt == 0:
+            # The offending array has to be in the conversation for "return the
+            # full array again" to mean anything — without it the model rebuilds
+            # the line from scratch and the already-valid sibling names change.
+            messages.append({"role": "assistant", "content": raw})
             messages.append({"role": "user", "content": _corrective_message(too_long, illegal)})
             continue
 
