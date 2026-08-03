@@ -518,7 +518,25 @@ def test_frame2_pipeline_called_with_low_strength(tmp_path):
     pipe = _fake_img2img_pipeline(_rgb_image(96, 96, color=(90, 160, 210)))
     out = tmp_path / "sprite_frame2.png"
     generate_frame2("fire lizard", [], str(front), str(out), pipeline=pipe)
-    assert pipe.call_args.kwargs["strength"] == 0.35
+    assert pipe.call_args.kwargs["strength"] == 0.30
+
+
+def test_frame2_pipeline_init_image_is_squashed_frame1_not_raw_front(tmp_path):
+    """Regression (issue #67): the img2img init image must be
+    ``procedural_squash(frame1)`` so there's real structural signal to clean
+    up, not the raw front sprite (which reads as colour jitter)."""
+    front = _frame1_file(tmp_path)
+    pipe = _fake_img2img_pipeline(_rgb_image(96, 96, color=(90, 160, 210)))
+    out = tmp_path / "sprite_frame2.png"
+    generate_frame2("fire lizard", [], str(front), str(out), pipeline=pipe)
+
+    frame1 = Image.open(str(front))
+    expected_init = procedural_squash(frame1).convert("RGB").resize((768, 768), Image.LANCZOS)
+    raw_init = frame1.convert("RGB").resize((768, 768), Image.LANCZOS)
+
+    actual_init = pipe.call_args.kwargs["image"]
+    assert actual_init.get_flattened_data() == expected_init.get_flattened_data()
+    assert actual_init.get_flattened_data() != raw_init.get_flattened_data()
 
 
 def test_frame2_default_extra_tags_include_open_mouth(tmp_path):

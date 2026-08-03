@@ -800,6 +800,28 @@ def generate_sprite_pair(
     back.save(back_output_path)
 
 
+def _run_img2img_on_image(
+    prompt: str, types: list[str], init: Image.Image, *, pipeline,
+    extra_tags: list[str] | None = None, seed: int | None = None, strength: float = 0.8,
+) -> Image.Image:
+    """Run the img2img pipeline against an already-prepared RGB init image.
+
+    Shared by ``_run_img2img`` (which loads the init image from disk) and
+    ``generate_frame2`` (which builds its init image in-memory from
+    ``procedural_squash`` rather than loading one from a path).
+    """
+    result = pipeline(
+        prompt=build_prompt(prompt, extra_tags),
+        negative_prompt=_NEGATIVE_PROMPT,
+        image=init,
+        num_inference_steps=_NUM_STEPS,
+        guidance_scale=_CFG_SCALE,
+        generator=_make_generator(seed),
+        strength=strength,
+    )
+    return result.images[0]
+
+
 def _run_img2img(
     prompt: str, types: list[str], image_path: str, *, pipeline,
     extra_tags: list[str] | None = None, seed: int | None = None, strength: float = 0.8,
@@ -811,16 +833,10 @@ def _run_img2img(
     ``build_frame2`` so it isn't double-quantized off frame 1's palette).
     """
     init = Image.open(image_path).convert("RGB").resize((_GEN_SIZE, _GEN_SIZE), Image.LANCZOS)
-    result = pipeline(
-        prompt=build_prompt(prompt, extra_tags),
-        negative_prompt=_NEGATIVE_PROMPT,
-        image=init,
-        num_inference_steps=_NUM_STEPS,
-        guidance_scale=_CFG_SCALE,
-        generator=_make_generator(seed),
-        strength=strength,
+    return _run_img2img_on_image(
+        prompt, types, init, pipeline=pipeline,
+        extra_tags=extra_tags, seed=seed, strength=strength,
     )
-    return result.images[0]
 
 
 def generate_sprite_img2img(
@@ -850,22 +866,28 @@ def generate_sprite_img2img(
 
 def generate_frame2(
     prompt: str, types: list[str], front_sprite_path: str, output_path: str, *, pipeline,
-    seed: int | None = None, strength: float = 0.35, extra_tags: list[str] | None = None,
+    seed: int | None = None, strength: float = 0.30, extra_tags: list[str] | None = None,
 ) -> None:
     """Generate the second front-animation frame and save it to ``output_path``.
 
-    Runs img2img from the finished front sprite at low ``strength`` with an
-    animation tag (defaults to ``["open mouth"]``) using frame 1's seed, then
-    hands the raw RGB candidate to ``build_frame2`` — which palette-locks +
-    recenters it, accepts it iff its difference from frame 1 is in-band, and
-    otherwise falls back to a procedural squash. The result always shares
-    frame 1's exact 16-colour palette.
+    Runs img2img from ``procedural_squash(frame1)`` (not the raw front
+    sprite) at low ``strength`` with an animation tag (defaults to
+    ``["open mouth"]``) using frame 1's seed. Seeding the init image with the
+    squash guarantees a real structural pose change to clean up, rather than
+    the near-identical recolour img2img produces from an unmodified init
+    image. The raw RGB candidate is then handed to ``build_frame2`` — which
+    palette-locks + recenters it, accepts it iff its difference from frame 1
+    is in-band, and otherwise falls back to the procedural squash itself. The
+    result always shares frame 1's exact 16-colour palette.
     """
-    candidate = _run_img2img(
-        prompt, types, front_sprite_path, pipeline=pipeline,
+    frame1 = Image.open(front_sprite_path)
+    squash_init = procedural_squash(frame1).convert("RGB").resize(
+        (_GEN_SIZE, _GEN_SIZE), Image.LANCZOS
+    )
+    candidate = _run_img2img_on_image(
+        prompt, types, squash_init, pipeline=pipeline,
         extra_tags=extra_tags or ["open mouth"], seed=seed, strength=strength,
     )
-    frame1 = Image.open(front_sprite_path)
     frame2 = build_frame2(frame1, candidate)
     frame2.save(output_path)
 
