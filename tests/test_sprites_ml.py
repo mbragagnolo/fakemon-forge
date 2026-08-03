@@ -419,6 +419,24 @@ def test_img2img_chibi_tags_folded_into_prompt_against_sdxl_pipeline(tmp_path):
     assert saved.mode == "P"
 
 
+def test_img2img_pipeline_error_propagates(tmp_path):
+    """generate_sprite_img2img swallows nothing — main.py's chibi fallback
+    (icon_source = sprite.png) only works because a pipeline crash during the
+    chibi render reaches the caller's except branch."""
+    from fakemon_forge.main import _CHIBI_TAGS
+
+    init_img = tmp_path / "drawing.png"
+    _rgb_image(100, 100).save(str(init_img))
+    pipe = MagicMock(side_effect=RuntimeError("inference crash"))
+    out = tmp_path / "sprite_chibi.png"
+    with pytest.raises(RuntimeError):
+        generate_sprite_img2img(
+            "fire lizard", [], str(init_img), str(out),
+            pipeline=pipe, extra_tags=_CHIBI_TAGS,
+        )
+    assert not out.exists()   # no half-written chibi render left behind
+
+
 # ---------------------------------------------------------------------------
 # generate_sprite_img2img(reference_path=...) — back-sprite palette lock
 # ---------------------------------------------------------------------------

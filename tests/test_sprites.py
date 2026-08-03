@@ -17,6 +17,7 @@ from fakemon_forge.sprites import (
     quantize_to_reference,
     generate_shiny,
     build_prompt,
+    generate_sprite_img2img,
     procedural_squash,
     recenter_to_anchor,
     difference_ratio,
@@ -1026,6 +1027,49 @@ def test_make_img2img_pipeline_skips_offload_and_tiling_off_cuda():
     pipe.enable_model_cpu_offload.assert_not_called()
     pipe.enable_vae_tiling.assert_not_called()
     pipe.to.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Chibi icon enhancement against the SDXL img2img pipeline (issue #68)
+# ---------------------------------------------------------------------------
+
+def test_chibi_tags_reach_the_prompt_of_an_sdxl_built_pipeline(tmp_path):
+    """The chibi enhancement's ``extra_tags`` must survive the SD1.5 -> SDXL
+    swap. Runs the real ``generate_sprite_img2img`` against the pipeline
+    instance built from diffusers' ``StableDiffusionXLImg2ImgPipeline`` (the
+    sys.modules seam the pipeline-swap tests use), so the chibi prompt is
+    confirmed against the XL class rather than an anonymous pipeline mock.
+    """
+    from fakemon_forge.main import _CHIBI_TAGS
+
+    mods, mock_cls = _mock_img2img_class()
+    mock_torch = MagicMock()
+    mock_torch.cuda.is_available.return_value = False
+    mods["torch"] = mock_torch          # _make_generator's function-local import
+    txt2img = MagicMock()
+    txt2img.components = {"vae": "vae", "unet": "unet", "scheduler": "sched"}
+
+    init_img = tmp_path / "sprite.png"
+    _rgb_image(96, 96).save(str(init_img))
+    out = tmp_path / "sprite_chibi.png"
+    with patch.dict("sys.modules", mods):
+        pipeline = make_img2img_pipeline(txt2img)
+        pipeline.return_value.images = [_rgb_image(768, 768)]
+        generate_sprite_img2img(
+            "fire lizard", [], str(init_img), str(out),
+            pipeline=pipeline, extra_tags=_CHIBI_TAGS, seed=7,
+        )
+
+    assert pipeline is mock_cls.return_value        # the XL class's instance
+    assert pipeline.call_count == 1
+    prompt = pipeline.call_args.kwargs["prompt"]
+    for tag in _CHIBI_TAGS:
+        assert tag in prompt
+    # SDXL img2img call shape: an init image plus strength, no width/height.
+    assert "image" in pipeline.call_args.kwargs
+    assert "width" not in pipeline.call_args.kwargs
+    assert "height" not in pipeline.call_args.kwargs
+    assert Image.open(str(out)).mode == "P"
 
 
 # ---------------------------------------------------------------------------
