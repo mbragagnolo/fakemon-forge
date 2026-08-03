@@ -73,6 +73,48 @@ procedural-squash fallback was never needed. The XL img2img call takes plain
 `prompt=` (no compel/`prompt_embeds`), so the SD1.5 `_encode_prompt` path
 does not carry over.
 
+## Spike round 2 (user-raised issues + trainer question)
+
+**2a. Chroma-key background (fix for key-filler eating creature whites): ✗ rejected.**
+The LoRA honors background-color prompts (magenta = flat/keyable, green =
+textured noise), but the hue **bleeds into the creature** — knightcoral's
+armor turned brown/pink and lost its white shield highlights, and bloomling's
+legitimately-pink flower would collide with a magenta key. The whites bug must
+be fixed in post instead: replace `_flatten_background_to_key`'s global
+near-background sweep with **connectivity-based keying** (key only
+border-connected background components + truly enclosed pockets, never
+creature-interior whites). Deterministic engineering, no model risk.
+Related design item: the front/back split must be **content-aware** (cut at
+the widest all-background column band near the midline, reroll if none) —
+murkfin's coil crossing the naive midline caused the round-1 clipping.
+
+**2b. Frame-2 actual pose change: ✓ squash-init wins.**
+`ratio` = production acceptance band; `mask_shift` = fraction of pixels whose
+creature/background classification flips (color jitter ≈ 0, real motion > 0):
+
+| variant | knightcoral | emberfox | murkfin |
+|---|---|---|---|
+| baseline35 (status quo) | .014 | .014 | .019 |
+| ladder50 (strength .50) | .023 | .033 | .025 |
+| posetags (strength .40) | .023 | .018 | .020 |
+| **squashinit (squash → img2img .30)** | **.042** | .012 | **.046** |
+
+Visually (`out/frame2b_strip.png`): squash-init produces a genuine
+planted-feet compression pose that the model organically cleans up; pose tags
+alone do nothing; higher strength just amplifies jitter. All variants stayed
+in-band. **Recipe for the spec: frame 2 = `procedural_squash(frame1)` as the
+img2img init at strength ~0.30, keep the acceptance band + squash fallback.**
+This also answers the user's observation that the old frame-2 was color-jitter:
+the fix is backend-independent.
+
+**2c. Trainer-sprite LoRA on NoobAI base: ✓ compatible.**
+`sWizad/pokemon-trainer-sprite-pixelart` (`pk_trainer_xl_v1.safetensors`,
+SDXL-base, HF-hosted, no trigger word, "…, simple background") loads with the
+same shim and produces clean chibi trainer-card-style sprites on NoobAI at
+768², ~15s each. Quirk: props/thought-bubbles can appear (negative-prompt
+"speech bubble, thought bubble"). Backgrounds come out tinted (lavender/gray)
+— existing keying handles that. Quality: good enough to include in scope.
+
 ## Recommendation
 
 There is no spec for this feature yet — the research doc
@@ -92,3 +134,7 @@ write the real spec:
 4. License note for the public README: NoobAI base carries a
    no-commercialisation clause (fine for the portfolio; SDXL-variant LoRA is
    the documented fallback).
+5. From round 2 — the retooling spec should bundle: connectivity-based keying
+   (whites bug), content-aware front/back split (seam bug), squash-init
+   frame 2 (pose bug), and optionally trainer-sprite generation (compatible,
+   scope decision pending).
