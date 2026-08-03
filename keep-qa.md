@@ -1,6 +1,0 @@
-- [ ] On the GPU host, drop `models/loras/pkspbf_nb_v1.safetensors` (Civitai model 378602, "back&front Noob v1") into place and run a full generation — the LoRA shim loads without the `IndexError` that `load_lora_weights` raises on this kohya format.
-- [ ] Watch `nvidia-smi` during that run: peak VRAM stays inside 8GB and no "you have activated model offloading ... but are now manually moving the pipeline to GPU" warning appears in the log.
-- [ ] Eyeball the generated front sprite, back sprite, and frame 2: still recognisably Gen-3 pixel art on a clean white/keyed background, and the back/frame-2 variants differ from the front (their `backside` / `open mouth` tags still land in the prompt).
-- [ ] Run the full test suite on the host (`pytest`, with torch installed) so the `ml`-marked tests actually execute, not skip.
-- [ ] Confirm a fresh install from `pyproject.toml` no longer pulls `compel`, and generation still works with it uninstalled.
-- [ ] Sanity-check the CPU fallback path (`CUDA_VISIBLE_DEVICES=` ...) still loads in fp32 without attempting offload/tiling.
