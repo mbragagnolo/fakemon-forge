@@ -81,6 +81,17 @@ def test_pipeline_called_with_negative_prompt(tmp_path):
     assert pipe.call_args.kwargs["negative_prompt"] == _NEGATIVE_PROMPT
 
 
+def test_types_are_not_forwarded_into_the_prompt(tmp_path):
+    # ``types`` is still accepted (main.py passes stage["types"]) but the type
+    # vocabulary is gone: type wording now rides in the LLM-authored prompt.
+    pipe = _fake_pipeline(_rgb_image())
+    out = tmp_path / "sprite.png"
+    generate_sprite("fire lizard", ["Fire", "Flying"], str(out), pipeline=pipe)
+    prompt = pipe.call_args.kwargs["prompt"]
+    assert prompt == build_prompt("fire lizard")
+    assert "firetype" not in prompt and "flyingtype" not in prompt
+
+
 def test_extra_tags_included_in_prompt(tmp_path):
     pipe = _fake_pipeline(_rgb_image())
     out = tmp_path / "sprite.png"

@@ -873,14 +873,20 @@ def _load_base_pipeline(pipe_cls):
     pipe = pipe_cls.from_pretrained(_BASE_MODEL_ID, torch_dtype=dtype)
     _apply_lora(pipe)
     pipe.scheduler = EulerAncestralDiscreteScheduler.from_config(pipe.scheduler.config)
-    if device == "cuda":
-        # Mandatory on CUDA (not opt-in) to stay inside the 8GB VRAM budget.
-        pipe.enable_model_cpu_offload()
-        if hasattr(pipe, "enable_vae_tiling"):
-            pipe.enable_vae_tiling()
-        else:
-            pipe.vae.enable_tiling()
-    return pipe.to(device)
+    if device != "cuda":
+        return pipe.to(device)
+    # Mandatory on CUDA (not opt-in) to stay inside the 8GB VRAM budget.
+    # ``enable_model_cpu_offload`` installs hooks that move each component to the
+    # GPU only while it runs, so from here on *it* owns device placement: a
+    # ``pipe.to("cuda")`` afterwards would make every component resident at once
+    # and hand the offload's savings straight back (diffusers warns on exactly
+    # this combination), so the move is deliberately skipped on this path.
+    pipe.enable_model_cpu_offload()
+    if hasattr(pipe, "enable_vae_tiling"):
+        pipe.enable_vae_tiling()
+    else:
+        pipe.vae.enable_tiling()
+    return pipe
 
 
 def load_txt2img_pipeline():
