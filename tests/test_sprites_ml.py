@@ -18,6 +18,7 @@ from fakemon_forge.sprites import (
     generate_frame2,
     postprocess,
     procedural_squash,
+    _content_bbox,
     _NUM_STEPS,
     _CFG_SCALE,
     _NEGATIVE_PROMPT,
@@ -140,8 +141,8 @@ def test_types_are_not_mechanically_tagged_into_the_prompt(tmp_path):
 def test_extra_tags_included_in_prompt(tmp_path):
     pipe = _fake_pipeline(_rgb_image())
     out = tmp_path / "sprite.png"
-    generate_sprite("fire lizard", [], str(out), pipeline=pipe, extra_tags=["backside"])
-    assert "backside" in pipe.call_args.kwargs["prompt"]
+    generate_sprite("fire lizard", [], str(out), pipeline=pipe, extra_tags=["chibi"])
+    assert "chibi" in pipe.call_args.kwargs["prompt"]
 
 
 def test_img2img_pipeline_called_with_prompt_string(tmp_path):
@@ -322,6 +323,48 @@ def test_pair_pipeline_error_propagates(tmp_path):
         generate_sprite_pair("fire lizard", [], str(front), str(back), pipeline=pipe)
 
 
+def test_pair_empty_back_half_is_skipped_and_warns_but_still_saves_the_front(tmp_path, capsys):
+    """A canvas holding only a front sprite splits "successfully" into a good
+    front and an empty back. The back is skipped with a warning rather than
+    saved blank — and that degradation must not cost the caller the front."""
+    pipe = _fake_pair_pipeline(_pair_canvas((30, 94, _PAIR_FRONT_COLOR)))
+    front, back = tmp_path / "sprite.png", tmp_path / "sprite_back.png"
+
+    generate_sprite_pair("fire lizard", [], str(front), str(back), pipeline=pipe)
+
+    assert front.exists()
+    assert not back.exists()
+    assert "empty/background-only" in capsys.readouterr().err
+
+
+def test_pair_offcentre_split_gives_both_views_the_same_scale(tmp_path):
+    """Regression: an off-centre cut must not scale the two views differently.
+
+    Front body at columns 20-59 and back body at 100-139 are both 40x40, and
+    the gap at 80-99 cuts the canvas into 90px and 110px halves. Squaring those
+    by resize would blow the front's body up and shrink the back's; squaring by
+    paste leaves both bodies identical, as drawn.
+    """
+    canvas = Image.new("RGB", (200, 100), _PAIR_BG)
+    d = ImageDraw.Draw(canvas)
+    d.rectangle((20, 30, 59, 69), fill=_PAIR_FRONT_COLOR)
+    d.rectangle((100, 30, 139, 69), fill=_PAIR_BACK_COLOR)
+    pipe = _fake_pair_pipeline(canvas)
+    front, back = tmp_path / "sprite.png", tmp_path / "sprite_back.png"
+
+    generate_sprite_pair("fire lizard", [], str(front), str(back), pipeline=pipe)
+
+    saved_front, saved_back = Image.open(front), Image.open(back)
+    assert saved_front.size == saved_back.size == (768, 768)
+    front_box = _content_bbox(saved_front, background=0)
+    back_box = _content_bbox(saved_back, background=0)
+    assert front_box is not None and back_box is not None
+    # Same drawn body, same split, same framing -> same box, within the
+    # rounding the 200->768 upscale of a 40px body can introduce.
+    for got, want in zip(back_box, front_box):
+        assert abs(got - want) <= 4
+
+
 # ---------------------------------------------------------------------------
 # generate_sprite_img2img()
 # ---------------------------------------------------------------------------
@@ -399,20 +442,23 @@ def test_img2img_pipeline_called_exactly_once(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# generate_sprite_img2img(reference_path=...) — back-sprite palette lock
+# generate_sprite_img2img(reference_path=...) — shared-palette lock
+#
+# The back-sprite chain that used to be this parameter's only caller is gone
+# (issue #66); the parameter stays public API, so its behaviour stays covered.
 # ---------------------------------------------------------------------------
 
 def test_img2img_reference_path_adopts_reference_palette(tmp_path):
-    """With reference_path set, the saved back sprite locks to that palette
+    """With reference_path set, the saved sprite locks to that palette
     (proves it adopts the shared palette instead of an adaptive one)."""
     ref = _frame1_file(tmp_path)
     init_img = tmp_path / "drawing.png"
     _rgb_image(100, 100).save(str(init_img))
     pipe = _fake_img2img_pipeline(_rgb_image(96, 96, color=(90, 160, 210)))
-    out = tmp_path / "sprite_back.png"
+    out = tmp_path / "sprite_locked.png"
     generate_sprite_img2img(
         "fire lizard", [], str(init_img), str(out), pipeline=pipe,
-        extra_tags=["backside"], reference_path=str(ref),
+        extra_tags=["chibi"], reference_path=str(ref),
     )
     saved = Image.open(str(out))
     assert saved.mode == "P"
@@ -444,13 +490,13 @@ def test_img2img_reference_path_pipeline_called_once_with_passthrough(tmp_path):
     out = tmp_path / "sprite_back.png"
     generate_sprite_img2img(
         "fire lizard", [], str(init_img), str(out), pipeline=pipe,
-        extra_tags=["backside"], strength=0.65, reference_path=str(ref),
+        extra_tags=["chibi"], strength=0.65, reference_path=str(ref),
     )
     assert pipe.call_count == 1
     kwargs = pipe.call_args.kwargs
     assert kwargs["strength"] == 0.65
     assert kwargs["image"].size == (768, 768)
-    assert kwargs["prompt"] == build_prompt("fire lizard", ["backside"])
+    assert kwargs["prompt"] == build_prompt("fire lizard", ["chibi"])
 
 
 def test_img2img_without_reference_path_uses_adaptive_palette(tmp_path):

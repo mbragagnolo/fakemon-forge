@@ -32,6 +32,8 @@ from fakemon_forge.sprites import (
     _border_is_uniform,
     _detect_background,
     _split_front_back_with_retry,
+    _fit_half_to_square,
+    _content_columns,
     _KEY_COLOR,
     _KEY_TOLERANCE,
     _MAX_CREATURE_COLORS,
@@ -115,8 +117,8 @@ def test_build_prompt_empty_extra_tags_list_matches_none():
 
 
 def test_build_prompt_single_extra_tag_inserted_before_white_background():
-    result = build_prompt("fire lizard", ["backside"])
-    assert result == "gen3, fire lizard, backside, white background"
+    result = build_prompt("fire lizard", ["chibi"])
+    assert result == "gen3, fire lizard, chibi, white background"
 
 
 def test_build_prompt_multiple_extra_tags_joined_with_comma():
@@ -1360,6 +1362,133 @@ def test_retry_naive_midline_fallback_uses_the_second_canvas_and_warns(capsys):
     assert front_half.getpixel((90, 50)) == _SPLIT_BACK_COLOR
     assert back_half.getpixel((10, 50)) == _SPLIT_BACK_COLOR
     assert capsys.readouterr().err
+
+
+def test_retry_reroll_render_failure_degrades_to_the_first_canvas_and_warns(capsys):
+    """A raising `regenerate` must not cost the caller the first canvas.
+
+    The contract is a best-effort result plus a warning, never a raise — so a
+    transient failure on the second wide render (an OOM, say) falls back to a
+    naive midline split of the canvas already in hand rather than discarding a
+    front sprite that canvas could still have produced.
+    """
+    first = _dirty_canvas(_SPLIT_FRONT_COLOR)
+
+    def _regenerate():
+        raise RuntimeError("CUDA out of memory")
+
+    front_half, back_half = _split_front_back_with_retry(first, _regenerate)
+    assert front_half.size == (100, 100)
+    assert back_half.size == (100, 100)
+    # The band (columns 70-130) straddles the naive cut at column 100, so a
+    # pixel from it on either side must show the FIRST canvas's colour.
+    assert front_half.getpixel((90, 50)) == _SPLIT_FRONT_COLOR
+    assert back_half.getpixel((10, 50)) == _SPLIT_FRONT_COLOR
+    assert "CUDA out of memory" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# _fit_half_to_square()
+# ---------------------------------------------------------------------------
+# The content-aware cut lands wherever the gap is, so the two halves come out
+# unequal widths. Squaring them by *resize* (what postprocess and
+# quantize_to_reference do on their own) would stretch one and squeeze the
+# other; these pin the paste-onto-a-square behaviour that replaced it.
+
+def _squared_content(half):
+    """(width, height) of the non-background content after squaring ``half``."""
+    square = _fit_half_to_square(half)
+    bg = _detect_background(_border_ring(square))
+    columns = _content_columns(square, bg)
+    assert columns is not None
+    rows = _content_columns(square.transpose(Image.TRANSPOSE), bg)
+    return square, (columns[1] - columns[0] + 1, rows[1] - rows[0] + 1)
+
+
+def _offcentre_pair_canvas():
+    """200x100 canvas whose two 40x40 squares sit either side of an off-centre gap.
+
+    Front occupies columns 20-59, back columns 100-139; the only full-height
+    background run inside the [80, 120) search window is columns 80-99, so the
+    cut lands at 90 and the halves come out 90 and 110 wide — neither of them
+    the 100 they will be squared to.
+    """
+    canvas = Image.new("RGB", (200, 100), _SPLIT_BG)
+    d = ImageDraw.Draw(canvas)
+    d.rectangle((20, 30, 59, 69), fill=_SPLIT_FRONT_COLOR)
+    d.rectangle((100, 30, 139, 69), fill=_SPLIT_BACK_COLOR)
+    return canvas
+
+
+def test_fit_half_to_square_keeps_both_halves_of_an_offcentre_split_undistorted():
+    """Regression: an off-centre cut must not change either view's proportions.
+
+    Resizing the 90px and 110px halves to 100x100 would stretch the front's
+    40x40 body to ~44x40 and squeeze the back's to ~36x40, so front and back
+    of one creature would come out visibly differently proportioned — worse
+    geometry than the naive-midline fallback, which distorts nothing.
+    """
+    result = split_front_back_canvas(_offcentre_pair_canvas())
+    assert result is not None
+    front_half, back_half = result
+    assert (front_half.width, back_half.width) == (90, 110)   # unequal, as split
+
+    front_square, front_content = _squared_content(front_half)
+    back_square, back_content = _squared_content(back_half)
+
+    assert front_square.size == back_square.size == (100, 100)
+    # Both bodies keep their drawn 40x40 shape, so both keep the same scale.
+    assert front_content == (40, 40)
+    assert back_content == (40, 40)
+
+
+def test_fit_half_to_square_pads_a_narrow_half_and_centres_its_content():
+    # Front half: 90 wide, body at columns 20-59 (centre 40). Squaring to 100
+    # pads 10 columns, and centring the body on the square shifts it +10.
+    front_half, _back = split_front_back_canvas(_offcentre_pair_canvas())
+    square = _fit_half_to_square(front_half)
+
+    assert square.size == (100, 100)
+    columns = _content_columns(square, _SPLIT_BG)
+    assert columns == (30, 69)                       # body centred on the square
+    assert square.getpixel((0, 50)) == _SPLIT_BG     # padding is background
+    assert square.getpixel((99, 50)) == _SPLIT_BG
+
+
+def test_fit_half_to_square_crops_a_wide_half_without_losing_content():
+    # Back half: 110 wide, body at columns 10-49 within the half. Centring the
+    # body needs a +20 shift, so the square pads 20 columns on the left and the
+    # half's trailing 30 columns (all background) fall outside the window.
+    _front, back_half = split_front_back_canvas(_offcentre_pair_canvas())
+    square = _fit_half_to_square(back_half)
+
+    assert square.size == (100, 100)
+    columns = _content_columns(square, _SPLIT_BG)
+    assert columns == (30, 69)                       # whole body survives, centred
+    assert square.getpixel((50, 50)) == _SPLIT_BACK_COLOR
+    assert square.getpixel((0, 50)) == _SPLIT_BG     # padding, not cropped content
+
+
+def test_fit_half_to_square_centres_an_empty_half_without_raising():
+    """An empty half has no content to centre on — it centres itself instead."""
+    empty = Image.new("RGB", (110, 100), _SPLIT_BG)
+    square = _fit_half_to_square(empty)
+
+    assert square.size == (100, 100)
+    assert set(square.get_flattened_data()) == {_SPLIT_BG}
+
+
+def test_fit_half_to_square_recentres_an_already_square_half_without_resizing():
+    """An already-square half still gets its content centred — a pure
+    translation, so the body keeps its size and only its position changes."""
+    front_half, _back = split_front_back_canvas(_clean_split_canvas())
+    assert front_half.size == (100, 100)   # centred gap -> already square
+    assert _content_columns(front_half, _SPLIT_BG) == (30, 94)   # body off-centre
+
+    square, content = _squared_content(front_half)
+    assert square.size == (100, 100)
+    assert content == (65, 98)                                   # 30-94 wide, unresized
+    assert _content_columns(square, _SPLIT_BG) == (18, 82)       # now centred
 
 
 # ---------------------------------------------------------------------------
