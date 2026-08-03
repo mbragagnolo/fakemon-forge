@@ -17,12 +17,20 @@ _KEY_COLOR = (200, 200, 168)  # Gen-3 transparency key colour (RGB).
 # Tunable eyeball placeholder (see the module spec, cf. procedural_squash's
 # ``amount_px`` / build_frame2's ``low``/``high``): a pixel within this
 # Euclidean RGB distance of the detected border background counts as
-# background — both for the border flood fill and the global sweep.
+# background — both for the border flood fill and the enclosed-pocket scan.
 _KEY_TOLERANCE = 30
 # Tunable eyeball placeholder: the border ring is treated as near-uniform (a
 # flat backdrop, not a gradient/vignette) when at least this fraction of its
 # pixels are within ``_KEY_TOLERANCE`` of the mean border colour.
 _BORDER_UNIFORM_FRACTION = 0.9
+# Tunable eyeball placeholder: colour + connectivity alone can't tell a real
+# enclosed background pocket (a leg gap, a ring hole) from a same-coloured
+# creature detail (a highlight, a belly patch) — both are just an 8-connected
+# island of near-background pixels that never touches the border. Size is the
+# practical disambiguator: real pockets are a non-trivial fraction of the
+# sprite, colour-matched detail flecks are tiny by comparison. A component is
+# only keyed as a pocket once it reaches this fraction of the image area.
+_MIN_ENCLOSED_POCKET_AREA_FRACTION = 0.01
 # Gen-3 palette contract: 3 reserved slots (key, black, white) plus at most this
 # many creature colours, so the whole palette stays <= 16.
 _MAX_CREATURE_COLORS = 13
@@ -180,10 +188,13 @@ def _flatten_background_to_key(image: Image.Image) -> Image.Image:
        and not assuming pure white — SD sometimes paints tints/vignettes). The
        connected outer background is flood-filled from the corners with a
        ``_KEY_TOLERANCE`` threshold (an exact match won't do on noisy pixels).
-    2. **Global near-background sweep.** Any remaining pixel within
-       ``_KEY_TOLERANCE`` of ``bg`` is keyed too, so enclosed pockets (gaps
-       between legs, the hole of a ring-shaped creature) the flood cannot reach
-       are keyed as well — as authentic sprites have their interior gaps keyed.
+    2. **Enclosed-pocket scan.** The remaining pixels within ``_KEY_TOLERANCE``
+       of ``bg`` are grouped into 8-connected components. A component is keyed
+       only if it is enclosed — it never touches the image border (so it's not
+       background the flood fill merely failed to reach) and it's large enough
+       to plausibly be a real pocket (gaps between legs, the hole of a
+       ring-shaped creature) rather than a same-coloured creature detail (a
+       highlight, a belly patch) that just happens to be near ``bg`` in colour.
 
     Robustness fallback: if the border ring is *not* near-uniform (a gradient /
     vignette background), keying a single ``bg`` could eat the creature, so
@@ -222,13 +233,44 @@ def _flatten_background_to_key(image: Image.Image) -> Image.Image:
         if _rgb_distance(px[seed[0], seed[1]], bg) <= _KEY_TOLERANCE:
             ImageDraw.floodfill(out, seed, _KEY_COLOR, thresh=_KEY_TOLERANCE)
 
-    # Stage 2: key any remaining near-background pixels (enclosed pockets).
+    # Stage 2: key enclosed background pockets via connected-component analysis.
     px = out.load()
-    for y in range(h):
-        for x in range(w):
-            p = px[x, y]
-            if p != _KEY_COLOR and _rgb_distance(p, bg) <= _KEY_TOLERANCE:
-                px[x, y] = _KEY_COLOR
+    min_area = w * h * _MIN_ENCLOSED_POCKET_AREA_FRACTION
+    visited = [[False] * w for _ in range(h)]
+    for y0 in range(h):
+        for x0 in range(w):
+            if visited[y0][x0]:
+                continue
+            visited[y0][x0] = True
+            p = px[x0, y0]
+            if p == _KEY_COLOR or _rgb_distance(p, bg) > _KEY_TOLERANCE:
+                continue
+
+            # Flood this near-background component (8-connectivity), tracking
+            # whether it touches the image border.
+            component = [(x0, y0)]
+            touches_border = x0 in (0, w - 1) or y0 in (0, h - 1)
+            stack = [(x0, y0)]
+            while stack:
+                x, y = stack.pop()
+                for nx in (x - 1, x, x + 1):
+                    for ny in (y - 1, y, y + 1):
+                        if (nx, ny) == (x, y) or not (0 <= nx < w and 0 <= ny < h):
+                            continue
+                        if visited[ny][nx]:
+                            continue
+                        visited[ny][nx] = True
+                        q = px[nx, ny]
+                        if q == _KEY_COLOR or _rgb_distance(q, bg) > _KEY_TOLERANCE:
+                            continue
+                        component.append((nx, ny))
+                        if nx in (0, w - 1) or ny in (0, h - 1):
+                            touches_border = True
+                        stack.append((nx, ny))
+
+            if not touches_border and len(component) >= min_area:
+                for (x, y) in component:
+                    px[x, y] = _KEY_COLOR
     return out
 
 

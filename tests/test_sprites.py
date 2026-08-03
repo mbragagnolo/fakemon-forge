@@ -376,14 +376,40 @@ def test_flatten_keys_every_border_pixel_and_leaves_creature():
         assert px[point] == (200, 80, 60)
 
 
-def test_flatten_keys_enclosed_pocket_via_global_sweep():
+def test_flatten_keys_enclosed_pocket_via_connected_component_scan():
     img = _ring_sprite()
     out = _flatten_background_to_key(img)
     px = out.load()
-    # The enclosed hole the outer flood cannot reach is keyed by the sweep.
+    # The enclosed hole the outer flood cannot reach is keyed by the scan.
     for point in ((48, 48), (46, 48), (48, 46)):
         assert px[point] == _KEY_COLOR
     # The creature ring itself is unchanged.
+    assert px[28, 48] == (60, 120, 200)
+
+
+def _highlight_sprite():
+    """96x96 RGB: a creature disc with a small near-bg detail patch inside it.
+
+    Unlike ``_ring_sprite``'s hole, this patch is not an enclosed background
+    pocket — it's a same-coloured detail (e.g. a shield highlight) that just
+    happens to be within ``_KEY_TOLERANCE`` of the background colour.
+    """
+    img = Image.new("RGB", (96, 96), (250, 250, 250))
+    d = ImageDraw.Draw(img)
+    d.ellipse((20, 20, 76, 76), fill=(60, 120, 200))
+    d.ellipse((44, 44, 52, 52), fill=(245, 245, 245))  # near-bg detail, not a pocket
+    return img
+
+
+def test_flatten_leaves_isolated_near_background_detail_patch_untouched():
+    img = _highlight_sprite()
+    out = _flatten_background_to_key(img)
+    px = out.load()
+    # The highlight is colour-close to bg but too small to be a real enclosed
+    # pocket, so it must survive untouched.
+    for point in ((48, 48), (46, 48), (48, 46)):
+        assert px[point] == (245, 245, 245)
+    # The creature disc itself is unchanged.
     assert px[28, 48] == (60, 120, 200)
 
 
