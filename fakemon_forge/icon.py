@@ -2,34 +2,44 @@
 
 Turns an already-generated front sprite (a ``P``-mode Gen-3-contract sprite from
 ``sprites.py``) into ``sprite_small.png``: a **32x64** PNG laid out as two
-vertically stacked 32x32 animation frames, with an **opaque** teal-green
-background and a small (<= 16 colour) palette. There is no Stable Diffusion /
-torch / diffusers involvement — the whole module is deterministic pure Pillow,
-so it (and its tests) run in the slim keep sandbox.
+vertically stacked 32x32 animation frames, with the sprites' transparency key
+``_KEY_COLOR`` as the background and a small (<= 16 colour) palette. There is no
+Stable Diffusion / torch / diffusers involvement — the whole module is
+deterministic pure Pillow, so it (and its tests) run in the slim keep sandbox.
 
 Reference contract (measured from an official Gen 3 icon, kept out of the
-repo): 32x64, all pixels opaque, <= 16 distinct colours, teal-green background
-``(96, 152, 128)`` dominating, and frame 2 == frame 1 shifted down 1px.
+repo): 32x64, <= 16 distinct colours, one background colour dominating, and
+frame 2 == frame 1 shifted down 1px.
+
+Background colour: the reference icon's own background is an opaque teal-green
+``(96, 152, 128)`` and this module used to reproduce it verbatim. It no longer
+does. Downstream keys the background out **by colour value** — no generated
+asset carries a PNG ``tRNS`` chunk, including the sprites that key correctly —
+so an icon backed with teal never matched the key and every party icon drew as
+a solid rectangle. The icon therefore shares the sprites' key colour: one key
+colour across every generated asset. Do NOT restore the teal for reference
+fidelity without first changing what downstream keys on.
 """
 
 from PIL import Image
 
-from fakemon_forge.sprites import _KEY_COLOR, _KEY_TOLERANCE, _rgb_distance, k_centroid
+from fakemon_forge.sprites import (
+    _KEY_COLOR,
+    _KEY_TOLERANCE,
+    _nudge_off_key,
+    _rgb_distance,
+    k_centroid,
+)
 
-# Party-menu icon background — an *opaque* teal-green that dominates the image
-# and is forced onto palette index 0 (unlike the sprites' transparency key,
-# which downstream tools alpha-key against, the icon background is a normal
-# opaque colour). Value measured from the official reference icon.
-_ICON_BG_COLOR = (96, 152, 128)
 # Icon frame size — two of these stack vertically into the 32x64 output.
 _ICON_SIZE = 32
-# Up to this many quantized creature colours plus the teal background = <= 16.
+# Up to this many quantized creature colours plus the background key = <= 16.
 # The sprite quantizer reserves black/white slots too; the icon reserves only
-# teal, so it can spend two extra slots on the creature.
+# the key, so it can spend two extra slots on the creature.
 _MAX_ICON_CREATURE_COLORS = 15
 
 # NOTE: this is a *per-mon* palette (up to 15 colours quantized from this render
-# plus teal at index 0). Authentic Gen-3 instead shares 3 fixed palettes across
+# plus the key at index 0). Authentic Gen-3 instead shares 3 fixed palettes across
 # every species and downstream tools remap on import — so do NOT "fix" this
 # into shared fixed palettes; per-mon adaptive palettes are the intended output.
 
@@ -38,9 +48,9 @@ def generate_icon(source_path: str, output_path: str) -> None:
     """Build the 32x64 party-menu icon from a front sprite and save it as PNG.
 
     Opens ``source_path`` (must be a ``P``-mode sprite whose index 0 is the
-    transparency key ``_KEY_COLOR``), downscales it once to a 32x32 opaque frame
-    with teal at palette index 0, derives frame 2 as a 1px down-shift, stitches
-    the two into a 32x64 image and writes it to ``output_path``.
+    transparency key ``_KEY_COLOR``), downscales it once to a 32x32 frame that
+    keeps that same key at palette index 0, derives frame 2 as a 1px down-shift,
+    stitches the two into a 32x64 image and writes it to ``output_path``.
 
     Raises ``ValueError`` if the source is not ``P``-mode (the caller is expected
     to wrap this in warn-and-continue, per the pipeline's per-view degradation).
@@ -88,8 +98,13 @@ def _creature_palette(rgb32: Image.Image, bg_mask: Image.Image) -> list[tuple[in
 
     Collects the creature pixels (where ``bg_mask`` is 0) and runs PIL adaptive
     (median-cut) quantization with dither off — deterministic, mirroring
-    ``sprites.py``. Returns the up-to-15 creature RGB colours (fewer is fine; an
-    empty creature region returns ``[]``). Inputs are not mutated.
+    ``sprites.py``. Median cut averages its inputs, so a centroid can land on the
+    key colour even though no *pixel* near the key survives the background mask
+    (two creature colours straddling the key merge onto it); each colour is
+    therefore nudged clear of the key exactly as ``_quantize_gen3`` does, so a
+    creature colour is never keyed away downstream. Returns the up-to-15 creature
+    RGB colours (fewer is fine; an empty creature region returns ``[]``). Inputs
+    are not mutated.
     """
     rgb_data = list(rgb32.get_flattened_data())
     mask_data = list(bg_mask.get_flattened_data())
@@ -101,44 +116,45 @@ def _creature_palette(rgb32: Image.Image, bg_mask: Image.Image) -> list[tuple[in
     quantized = scratch.quantize(colors=_MAX_ICON_CREATURE_COLORS, dither=Image.Dither.NONE)
     qpal = quantized.getpalette()
     used = sorted({idx for _, idx in quantized.getcolors(maxcolors=len(creature_pixels))})
-    return [tuple(qpal[i * 3:i * 3 + 3]) for i in used]
+    return [_nudge_off_key(tuple(qpal[i * 3:i * 3 + 3])) for i in used]
 
 
 def _build_frame1(source: Image.Image) -> Image.Image:
-    """Return a 32x32 opaque ``P``-mode frame with teal forced onto index 0.
+    """Return a 32x32 ``P``-mode frame with ``_KEY_COLOR`` forced onto index 0.
 
     Single high-quality downscale (RGB, one k_centroid 768 -> 32 so a 1px
     outline is never chained through multiple resamples, and each output pixel
     keeps a colour that actually occurs in its source tile rather than a
     blended/ringing artifact), then quantize the creature region to up to 15
-    colours against a palette whose index 0 is the teal background. Every
-    background pixel is forced to index 0, so the result is opaque with no
-    alpha holes. Assumes ``source`` is ``P``-mode; does not mutate it.
+    colours against a palette whose index 0 is the background key. Every
+    background pixel is forced to index 0, so the whole background carries the
+    one colour downstream keys against. Assumes ``source`` is ``P``-mode; does
+    not mutate it.
     """
     rgb32 = k_centroid(source.convert("RGB"), _ICON_SIZE, _ICON_SIZE)
     bg_mask = _background_mask(source, rgb32)
     creature_colors = _creature_palette(rgb32, bg_mask)
 
-    # Teal at index 0, then the creature colours. Pad every remaining slot with
-    # teal so a stray nearest-colour mapping can never introduce a new colour
-    # (keeps the distinct-colour count trivially <= 16).
-    palette_colors = [_ICON_BG_COLOR] + creature_colors
-    palette_colors += [_ICON_BG_COLOR] * (256 - len(palette_colors))
+    # The key at index 0, then the creature colours. Pad every remaining slot
+    # with the key so a stray nearest-colour mapping can never introduce a new
+    # colour (keeps the distinct-colour count trivially <= 16).
+    palette_colors = [_KEY_COLOR] + creature_colors
+    palette_colors += [_KEY_COLOR] * (256 - len(palette_colors))
     flat_palette = [channel for color in palette_colors for channel in color]
     reference = Image.new("P", (1, 1))
     reference.putpalette(flat_palette)
 
     frame1 = rgb32.quantize(palette=reference, dither=Image.Dither.NONE)
-    # Force every background pixel onto index 0 (teal) regardless of which
-    # creature colour happened to be nearest — no transparency, no alpha holes.
+    # Force every background pixel onto index 0 (the key) regardless of which
+    # creature colour happened to be nearest, so the background keys out whole.
     frame1.paste(0, mask=bg_mask)
     return frame1
 
 
 def _shift_down_one(frame1: Image.Image) -> Image.Image:
-    """Return frame 2: ``frame1`` shifted down 1px, top row backfilled teal.
+    """Return frame 2: ``frame1`` shifted down 1px, top row backfilled with the key.
 
-    Row 0 becomes the teal background (index 0), rows 1..31 equal frame 1's rows
+    Row 0 becomes the key background (index 0), rows 1..31 equal frame 1's rows
     0..30, and frame 1's bottom row is cropped away. Pure copy/paste in frame 1's
     palette space — introduces no new colours. Reference-verified as faithful
     (real Gen-3 frame 2 differs by only ~64/1024 edge pixels).
@@ -153,8 +169,9 @@ def _shift_down_one(frame1: Image.Image) -> Image.Image:
 def _stitch_and_save(frame1: Image.Image, frame2: Image.Image, output_path: str) -> None:
     """Stack frame 1 (top) over frame 2 (bottom) into a 32x64 PNG and save it.
 
-    The output shares frame 1's palette (teal at index 0) and carries no
-    transparency chunk, so it is fully opaque.
+    The output shares frame 1's palette (``_KEY_COLOR`` at index 0) and carries
+    no ``tRNS`` chunk — matching the sprites, which key by colour value rather
+    than by alpha.
     """
     w, h = frame1.size
     icon = Image.new("P", (w, 2 * h), 0)
