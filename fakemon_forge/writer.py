@@ -84,8 +84,13 @@ def _build_run_json(stages: list[dict], run_info: dict) -> dict:
         "package_version": _package_version(),
         "git_sha": _git_sha(),
         "rerun_command": _rerun_command(run_info),
+        # sprite_prompt is read with a fallback, like the optional stats.json
+        # keys above: the model is not guaranteed to return it, and a stage
+        # dict missing it must not turn a run that would merely have skipped
+        # its sprite into one that writes nothing at all.
         "generated_stages": [
-            {"stage": s["stage"], "name": s["name"], "sprite_prompt": s["sprite_prompt"]}
+            {"stage": s["stage"], "name": s["name"],
+             "sprite_prompt": s.get("sprite_prompt")}
             for s in stages
         ],
     }

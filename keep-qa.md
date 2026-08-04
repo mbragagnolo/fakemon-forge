@@ -1,0 +1,7 @@
+- [ ] Run `fakemon-forge --description "a fire lizard with blue flames" --mode line --stages 3` and confirm `output/<Name>/run.json` sits next to the `stage1_*/` folders (not inside them) and is valid JSON.
+- [ ] Copy the `rerun_command` string straight out of that `run.json`, paste it into a shell, and confirm it starts a fresh run with the same description/mode/tier/stages.
+- [ ] Check `generated_stages` in that file lists one entry per stage, in order, each with the `sprite_prompt` actually used for its sprite — and that `git_sha`/`package_version` match the checkout you ran from.
+- [ ] Run with `--image path/to/drawing.png` and no `--description`, then confirm `description` is `null`, `vision_description` holds the vision model's text, and `rerun_command` carries only `--image`.
+- [ ] Run `--mode single` and confirm `requested_stages` is `null` and `rerun_command` has no `--stages` (pasting it back must not be rejected by `validate_args`).
+- [ ] Start a line run and Ctrl-C it during sprite generation; confirm the half-finished `output/<Name>/` still contains a complete `run.json`.
+- [ ] Run twice with the same description so the folder name collides, and confirm the second `run.json` lands in `<Name>_2/` with that run's own inputs.

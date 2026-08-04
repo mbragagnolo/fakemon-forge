@@ -1,10 +1,12 @@
 import json
 import re
+import shlex
 import pytest
 from pathlib import Path
 from unittest.mock import patch
 
 import fakemon_forge.writer as writer
+from fakemon_forge.cli import parse_args, validate_args
 from fakemon_forge.writer import write_output
 
 # ---------------------------------------------------------------------------
@@ -549,9 +551,40 @@ def test_rerun_command_quotes_special_characters(tmp_path):
     # $(...) and `...` for a POSIX shell even though the raw text still
     # appears as a substring — round-tripping through shlex.split is the
     # actual safety check.
-    import shlex
     tokens = shlex.split(cmd)
     assert raw_description in tokens
+
+
+def test_rerun_command_parses_back_into_the_same_line_request(tmp_path):
+    """"Ready to paste" means the CLI accepts it: split the recorded command
+    and it must parse *and validate* back into the run's own inputs."""
+    run_info = {
+        **_RUN_INFO, "mode": "line", "requested_stages": 2,
+        "description": 'a "fire" lizard $(whoami)', "tier": "standard",
+    }
+    dirs = write_output(_LINE, run_info, base_dir=str(tmp_path))
+    tokens = shlex.split(_read_run_json(dirs)["rerun_command"])
+
+    assert tokens[0] == "fakemon-forge"
+    args = parse_args(tokens[1:])
+    validate_args(args)  # must not sys.exit
+    assert args.description == 'a "fire" lizard $(whoami)'
+    assert (args.mode, args.tier, args.stages) == ("line", "standard", 2)
+
+
+def test_rerun_command_parses_back_into_the_same_single_request(tmp_path):
+    """Single mode is where omitting --stages is load-bearing: cli.validate_args
+    exits on `--stages` with `--mode single`, so a manifest that spelled the
+    ignored default out would hand back an unrunnable command."""
+    run_info = {**_RUN_INFO, "mode": "single", "tier": "legendary",
+                "requested_stages": None}
+    dirs = write_output(_SINGLE, run_info, base_dir=str(tmp_path))
+    tokens = shlex.split(_read_run_json(dirs)["rerun_command"])
+
+    args = parse_args(tokens[1:])
+    validate_args(args)  # must not sys.exit
+    assert (args.mode, args.tier) == ("single", "legendary")
+    assert args.stages_given is False
 
 
 def test_rerun_command_flag_order(tmp_path):
@@ -608,6 +641,17 @@ def test_generated_stages_excludes_outcome_data(tmp_path):
         assert set(stage.keys()) == {"stage", "name", "sprite_prompt"}
 
 
+def test_generated_stages_sprite_prompt_null_when_stage_omits_it(tmp_path):
+    """The model is not required to return sprite_prompt (generator._normalize
+    never fills it in), and main.py's sprite call sites tolerate its absence by
+    warning and moving on. The manifest records the gap as null rather than
+    raising and costing the run every other output."""
+    stage = {k: v for k, v in _STAGE_1.items() if k != "sprite_prompt"}
+    dirs = write_output([stage], _RUN_INFO, base_dir=str(tmp_path))
+    assert _read_run_json(dirs)["generated_stages"][0]["sprite_prompt"] is None
+    assert (dirs[0] / "stats.json").exists()
+
+
 def test_run_json_has_no_outcome_fields_at_top_level(tmp_path):
     dirs = write_output(_SINGLE, _RUN_INFO, base_dir=str(tmp_path))
     data = _read_run_json(dirs)
@@ -618,6 +662,24 @@ def test_run_json_has_no_outcome_fields_at_top_level(tmp_path):
 # ---------------------------------------------------------------------------
 # run.json — written up front, before any stage subfolder
 # ---------------------------------------------------------------------------
+
+def test_run_json_written_before_any_stage_dir_is_created(tmp_path):
+    """Not just "before the stage files" — before the stage *folders*, so the
+    manifest is on disk from the first moment the run folder is non-empty."""
+    seen = []
+    real_mkdir = Path.mkdir
+
+    def spy_mkdir(self, *args, **kwargs):
+        seen.append((self.name, (self.parent / "run.json").exists()))
+        return real_mkdir(self, *args, **kwargs)
+
+    with patch.object(Path, "mkdir", spy_mkdir):
+        write_output(_LINE, _RUN_INFO, base_dir=str(tmp_path))
+
+    stage_mkdirs = [entry for entry in seen if entry[0].startswith("stage")]
+    assert len(stage_mkdirs) == 3
+    assert all(run_json_existed for _, run_json_existed in stage_mkdirs)
+
 
 def test_run_json_exists_even_if_a_later_stage_write_fails(tmp_path):
     with patch("fakemon_forge.writer._write_entry", side_effect=RuntimeError("disk full")):

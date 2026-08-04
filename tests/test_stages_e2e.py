@@ -100,14 +100,15 @@ def forge(tmp_path, monkeypatch):
     monkeypatch.setenv("MISTRAL_API_KEY", "test-key-123")
     monkeypatch.chdir(tmp_path)
 
-    def run(argv, payload):
+    def run(argv, payload, sprite_side_effect=None):
         client = _FakeClient(payload)
         with (
             patch("fakemon_forge.main.Mistral", return_value=client),
             patch("fakemon_forge.main.load_txt2img_pipeline", return_value=MagicMock()),
             patch("fakemon_forge.main.load_img2img_pipeline", return_value=MagicMock()),
             patch("fakemon_forge.main.make_img2img_pipeline", return_value=MagicMock()),
-            patch("fakemon_forge.main.generate_sprite_pair"),
+            patch("fakemon_forge.main.generate_sprite_pair",
+                  side_effect=sprite_side_effect),
             patch("fakemon_forge.main.generate_sprite_img2img"),
             patch("fakemon_forge.main.generate_frame2"),
             patch("fakemon_forge.main.generate_shiny"),
@@ -224,6 +225,24 @@ def test_run_json_written_at_run_root_for_a_real_cli_invocation(forge):
     assert "--stages 2" in data["rerun_command"]
     assert len(data["generated_stages"]) == 2
     assert data["generated_stages"][0]["name"] == "Flamburr"
+
+
+def test_run_json_survives_a_run_killed_during_sprite_generation(forge):
+    """The reason the manifest is written up front (issue #81): a Ctrl-C part
+    way through a long sprite render leaves a run folder with no sprites and
+    no .ini, but run.json is already there explaining what was asked for."""
+    with pytest.raises(KeyboardInterrupt):
+        forge(
+            ["--description", "fire lizard", "--mode", "line", "--stages", "2"],
+            _payload(2),
+            sprite_side_effect=KeyboardInterrupt,
+        )
+
+    run_json_path = Path("output") / "Flamburr" / "run.json"
+    data = json.loads(run_json_path.read_text(encoding="utf-8"))
+    assert data["description"] == "fire lizard"
+    assert [s["stage"] for s in data["generated_stages"]] == [1, 2]
+    assert not list(run_json_path.parent.glob("stage*/*.png"))
 
 
 # ---------------------------------------------------------------------------
