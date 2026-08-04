@@ -105,14 +105,15 @@ def ctx_line(tmp_path, monkeypatch):
         patch("fakemon_forge.main.generate_footprint")        as m_footprint,
         patch("fakemon_forge.main.generate_icon")             as m_icon,
         patch("fakemon_forge.main.generate_cry")              as m_cry,
-        patch("fakemon_forge.main.write_output", return_value=dirs),
-        patch("fakemon_forge.main.export_ini"),
+        patch("fakemon_forge.main.write_output", return_value=dirs) as m_write,
+        patch("fakemon_forge.main.export_ini")                as m_export,
     ):
         m_sprite.side_effect = _write_pair
         yield {"gen": m_gen, "vision": m_vision,
                "sprite": m_sprite, "frame2": m_frame2, "shiny": m_shiny,
                "stitch": m_stitch, "footprint": m_footprint,
-               "icon": m_icon, "cry": m_cry, "dirs": dirs}
+               "icon": m_icon, "cry": m_cry, "dirs": dirs,
+               "write": m_write, "export": m_export}
 
 
 # ---------------------------------------------------------------------------
@@ -466,6 +467,91 @@ def test_write_output_called_with_stages(ctx):
     main(["--description", "fire lizard"])
     ctx["write"].assert_called_once()
     assert ctx["write"].call_args.args[0] == [_STAGE_1]
+
+
+# ---------------------------------------------------------------------------
+# run_info passed to write_output (issue #81: run.json manifest)
+# ---------------------------------------------------------------------------
+
+def _run_info_arg(mock_write):
+    return mock_write.call_args.args[1]
+
+
+def test_write_output_receives_run_info_combined_prompt(ctx):
+    main(["--description", "fire lizard"])
+    assert _run_info_arg(ctx["write"])["combined_prompt"] == "fire lizard"
+
+
+def test_run_info_combined_prompt_merges_vision_and_description(ctx, tmp_path):
+    # This is the field's whole reason to exist: an --image run's description
+    # is not what reached the generator, the joined blob is.
+    img = tmp_path / "scan.png"
+    img.write_bytes(b"x")
+    ctx["vision"].return_value = "a round blue creature"
+    main(["--image", str(img), "--description", "make it electric"])
+    run_info = _run_info_arg(ctx["write"])
+    assert run_info["combined_prompt"] == "a round blue creature\n\nmake it electric"
+    assert run_info["combined_prompt"] != run_info["description"]
+
+
+def test_write_output_receives_run_info_description(ctx):
+    main(["--description", "fire lizard"])
+    assert _run_info_arg(ctx["write"])["description"] == "fire lizard"
+
+
+def test_write_output_receives_run_info_image_none_when_not_given(ctx):
+    main(["--description", "fire lizard"])
+    assert _run_info_arg(ctx["write"])["image"] is None
+
+
+def test_write_output_receives_run_info_vision_description_empty_when_no_image(ctx):
+    main(["--description", "fire lizard"])
+    assert _run_info_arg(ctx["write"])["vision_description"] == ""
+
+
+def test_write_output_receives_run_info_image_path(ctx, tmp_path):
+    img = tmp_path / "drawing.png"
+    img.write_bytes(b"\x89PNG\r\n")
+    main(["--image", str(img), "--description", "fire lizard"])
+    assert _run_info_arg(ctx["write"])["image"] == str(img)
+
+
+def test_write_output_receives_run_info_vision_description_when_image_given(ctx, tmp_path):
+    img = tmp_path / "drawing.png"
+    img.write_bytes(b"\x89PNG\r\n")
+    main(["--image", str(img), "--description", "fire lizard"])
+    assert _run_info_arg(ctx["write"])["vision_description"] == "a fire lizard"
+
+
+def test_write_output_receives_run_info_description_none_when_only_image_given(ctx, tmp_path):
+    img = tmp_path / "drawing.png"
+    img.write_bytes(b"\x89PNG\r\n")
+    main(["--image", str(img)])
+    assert _run_info_arg(ctx["write"])["description"] is None
+
+
+def test_write_output_receives_run_info_mode_and_tier(ctx):
+    main(["--description", "fire lizard", "--tier", "legendary"])
+    run_info = _run_info_arg(ctx["write"])
+    assert run_info["mode"] == "single"
+    assert run_info["tier"] == "legendary"
+
+
+def test_write_output_receives_run_info_requested_stages_null_for_single_mode(ctx):
+    main(["--description", "fire lizard"])
+    assert _run_info_arg(ctx["write"])["requested_stages"] is None
+
+
+def test_write_output_receives_run_info_requested_stages_for_line_mode(ctx_line):
+    main(["--description", "fire lizard", "--mode", "line", "--stages", "3"])
+    assert _run_info_arg(ctx_line["write"])["requested_stages"] == 3
+
+
+def test_write_output_receives_run_info_requested_stages_reflects_implicit_default(ctx_line):
+    """--stages wasn't passed explicitly; requested_stages still records the
+    parser's default of 3 rather than None, since it's in effect for the run."""
+    main(["--description", "fire lizard", "--mode", "line"])
+    assert _run_info_arg(ctx_line["write"])["requested_stages"] == 3
 
 
 def test_sprite_saved_inside_stage_dir(ctx):

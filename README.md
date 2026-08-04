@@ -14,6 +14,7 @@ A CLI tool that turns a child's drawing and/or a text description into a complet
 ```
 output/
   <Name>/
+    run.json                  # what was asked for: description, flags, sprite prompts
     stage1_<Name>/
       sprite.png              # 768×768 front view, 16-colour GBA-style pixel art
       sprite_back.png         # 768×768 back view, same palette as the front
@@ -34,6 +35,41 @@ output/
     stage3_<Name3>/   # only with --mode line --stages 3
       ...
 ```
+
+### run.json shape
+
+Written as soon as the run folder is created — before any sprite work — so an
+interrupted run still records what produced it. Inputs only: no sprite paths,
+no success flags.
+
+```json
+{
+  "description": "a fire lizard with blue flames",
+  "image": null,
+  "vision_description": "",
+  "combined_prompt": "a fire lizard with blue flames",
+  "mode": "line",
+  "tier": "standard",
+  "requested_stages": 3,
+  "timestamp": "2026-08-04T18:22:31+00:00",
+  "package_version": "0.1.0",
+  "git_sha": "481da94",
+  "rerun_command": "fakemon-forge --description 'a fire lizard with blue flames' --mode line --tier standard --stages 3",
+  "generated_stages": [
+    {"stage": 1, "name": "Flamburr", "sprite_prompt": "fire lizard, GBA pixel art"}
+  ]
+}
+```
+
+`requested_stages` is the `--stages` value in effect (`null` in `--mode
+single`, where the flag does not apply); it can differ from
+`len(generated_stages)` when the model returns a different number of stages
+than was asked for.
+
+`combined_prompt` is the exact text handed to the description model. For a
+text-only run it repeats `description`; for an `--image` run it is
+`vision_description` and `description` joined, which is the only record of what
+the model actually received — the drawing itself never reaches it as pixels.
 
 ### stats.json shape
 
