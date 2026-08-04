@@ -625,6 +625,35 @@ def test_system_prompt_says_the_sprite_model_never_sees_the_types_field():
 
 
 # ---------------------------------------------------------------------------
+# sprite_prompt is tags, and short enough to survive CLIP
+# ---------------------------------------------------------------------------
+# The sprite LoRA is trained on comma-separated tags, so prose is off
+# distribution. Worse, prose runs long: build_prompt appends "white background"
+# (and extra_tags like the chibi set) AFTER this string, and CLIP truncates at
+# 77 tokens — so an over-long sprite_prompt does not merely waste tokens, it
+# silently deletes the styling instructions. Observed live: every prompt in a
+# 3-stage run lost "white background", and the resulting vignetted backdrops
+# then defeated split_front_back_canvas's uniform-border check on all 3 stages.
+
+def test_system_prompt_demands_tags_not_sentences():
+    assert "TAGS" in _SYSTEM_PROMPT
+    assert "Tags, never sentences" in _SYSTEM_PROMPT
+    assert "No verbs, no clauses, no full stops" in _SYSTEM_PROMPT
+
+
+def test_system_prompt_caps_sprite_prompt_length():
+    """A cap the model can act on, not a vague "keep it short"."""
+    assert "at most 18 tags and 35 words" in _SYSTEM_PROMPT
+
+
+def test_system_prompt_explains_what_going_long_costs():
+    """States the consequence, so the cap reads as load-bearing rather than
+    stylistic — a future edit relaxing it can see what it would reintroduce."""
+    assert "77 tokens" in _SYSTEM_PROMPT
+    assert "deletes the background and style" in _SYSTEM_PROMPT
+
+
+# ---------------------------------------------------------------------------
 # height_dm / weight_hg defaulting in _normalize
 # ---------------------------------------------------------------------------
 

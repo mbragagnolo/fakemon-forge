@@ -75,7 +75,17 @@ Each element represents one evolutionary stage and must have exactly these field
     use only straight quotes and hyphens (' " -), never curly quotes or dashes.
     The display window fits 4 lines of 40 characters — anything past that is cut
     mid-sentence, so keep it comfortably short.
-  sprite_prompt – visual description for pixel-art sprite generation; max 75 words, lead with the creature's most distinctive shape and colour features (string).
+  sprite_prompt – comma-separated visual TAGS for pixel-art sprite generation (string).
+    Tags, never sentences. Write "small round bird, slate blue feathers, yellow
+    lightning-bolt crest, stubby wings, hooked beak" — not "a small round bird
+    whose feathers are slate blue, and it has a crest that arcs with lightning."
+    No verbs, no clauses, no full stops.
+    Hard limit: at most 18 tags and 35 words. The sprite model's text encoder
+    truncates at 77 tokens and silently discards everything past it — and the
+    styling tags the pipeline appends AFTER this string are what get discarded
+    first. Going long does not add detail, it deletes the background and style
+    instructions.
+    Order: overall body shape first, then main colours, then distinctive features.
     It must also show the creature's types through what it looks like — flames or
     embers for Fire, fins or droplets for Water, wings or feathers for Flying, and
     so on for every type you assigned. The sprite model is given this string and

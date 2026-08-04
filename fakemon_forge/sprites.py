@@ -9,10 +9,19 @@ _BASE_MODEL_ID = "Laxhar/noobai-XL-1.1"
 # Manual download required (never committed; models/ is gitignored): Civitai
 # model 378602, "Pokemon Sprite XL PixelArt back&front" (login required).
 _LORA_PATH = Path(__file__).parent.parent / "models" / "loras" / "pkspbf_nb_v1.safetensors"
-_LORA_SCALE = 0.7
+# Fuse the sprite LoRA at full strength, and keep CFG low. Both match the
+# research spike that produced the output this backend was adopted for
+# (prototype/gen_noobai.py at fb4dd19: fuse_lora(lora_scale=1.0),
+# guidance_scale=5.5). Shipping at 0.7 / 7 instead was a silent quality
+# regression: the LoRA is the only thing making the render read as a Gen-3
+# sprite rather than generic anime art, so weakening it to 70% costs exactly
+# the property it was adopted for, and NoobAI/Illustrious-family bases are
+# tuned for low CFG — 7 oversaturates and hardens edges the quantiser then
+# bakes into the 16-colour palette.
+_LORA_SCALE = 1.0
 _GEN_SIZE = 768
 _NUM_STEPS = 30
-_CFG_SCALE = 7
+_CFG_SCALE = 5.5
 _SPRITE_SIZE = 768  # native SD render size — individual sprites keep full detail
 _PALETTE_COLORS = 16
 _KEY_COLOR = (200, 200, 168)  # Gen-3 transparency key colour (RGB).
