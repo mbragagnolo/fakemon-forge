@@ -9,5 +9,6 @@ build/
 .pytest_cache/
 .claude/settings.local.json
 models/
+notes/
 test_sprite.png
 *.gba
