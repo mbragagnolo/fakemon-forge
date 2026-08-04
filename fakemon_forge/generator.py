@@ -86,6 +86,15 @@ Each element represents one evolutionary stage and must have exactly these field
     first. Going long does not add detail, it deletes the background and style
     instructions.
     Order: overall body shape first, then main colours, then distinctive features.
+    Never use framing or absolute-size words here: no "large", "huge", "giant",
+    "massive", "towering", "imposing", "close-up", "dramatic", "epic". The sprite
+    model reads those as instructions about how much of the picture to fill, not
+    as facts about the creature — "large" makes it render a cropped close-up that
+    runs off the edges instead of a whole creature. A later evolution is conveyed
+    by having MORE and BIGGER FEATURES than the earlier one — extra limbs, longer
+    horns, heavier armour plating, a more complex silhouette — never by calling
+    the creature large. The size difference between stages belongs in height_dm
+    and weight_hg, which is where it is actually recorded.
     It must also show the creature's types through what it looks like — flames or
     embers for Fire, fins or droplets for Water, wings or feathers for Flying, and
     so on for every type you assigned. The sprite model is given this string and

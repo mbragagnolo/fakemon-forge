@@ -646,6 +646,23 @@ def test_system_prompt_caps_sprite_prompt_length():
     assert "at most 18 tags and 35 words" in _SYSTEM_PROMPT
 
 
+def test_system_prompt_bans_framing_words_in_sprite_prompt():
+    """"large"/"imposing" are framing instructions to the image model, not
+    facts about the creature. A live stage-2 prompt carrying both rendered a
+    full-bleed close-up instead of a sprite, while stage 1 of the same line
+    ("tiny", "cute expression") came out clean."""
+    for banned in ("large", "towering", "imposing", "close-up"):
+        assert f'"{banned}"' in _SYSTEM_PROMPT
+
+
+def test_system_prompt_redirects_stage_growth_into_features():
+    """The ban needs somewhere for the growth to go, or the model just picks a
+    synonym — evolution shows as more/bigger features, and the numeric size
+    difference already lives in height_dm / weight_hg."""
+    assert "MORE and BIGGER FEATURES" in _SYSTEM_PROMPT
+    assert "height_dm" in _SYSTEM_PROMPT
+
+
 def test_system_prompt_explains_what_going_long_costs():
     """States the consequence, so the cap reads as load-bearing rather than
     stylistic — a future edit relaxing it can see what it would reintroduce."""

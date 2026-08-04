@@ -37,6 +37,7 @@ from fakemon_forge.sprites import (
     _content_columns,
     _estimate_clip_tokens,
     _CLIP_TOKEN_LIMIT,
+    _FRAMING_TAGS,
     _KEY_COLOR,
     _KEY_TOLERANCE,
     _MAX_CREATURE_COLORS,
@@ -111,22 +112,96 @@ def _anchor(bbox):
 # ---------------------------------------------------------------------------
 
 def test_build_prompt_no_extra_tags_uses_plain_formula():
-    assert build_prompt("spiky wolf") == "gen3, spiky wolf, white background"
+    assert build_prompt("spiky wolf") == (
+        f"gen3, {_FRAMING_TAGS}, spiky wolf, white background"
+    )
 
 
 def test_build_prompt_empty_extra_tags_list_matches_none():
     assert build_prompt("spiky wolf", []) == build_prompt("spiky wolf", None)
-    assert build_prompt("spiky wolf", []) == "gen3, spiky wolf, white background"
+    assert build_prompt("spiky wolf", []) == (
+        f"gen3, {_FRAMING_TAGS}, spiky wolf, white background"
+    )
 
 
 def test_build_prompt_single_extra_tag_inserted_before_white_background():
     result = build_prompt("fire lizard", ["chibi"])
-    assert result == "gen3, fire lizard, chibi, white background"
+    assert result == f"gen3, {_FRAMING_TAGS}, fire lizard, chibi, white background"
 
 
 def test_build_prompt_multiple_extra_tags_joined_with_comma():
     result = build_prompt("chibi crab", ["chibi", "big head", "small body"])
-    assert result == "gen3, chibi crab, chibi, big head, small body, white background"
+    assert result == (
+        f"gen3, {_FRAMING_TAGS}, chibi crab, chibi, big head, small body, white background"
+    )
+
+
+# ---------------------------------------------------------------------------
+# build_prompt() framing anchors
+# ---------------------------------------------------------------------------
+# The sprite_prompt vocabulary is shape/colour/features and never states the
+# framing, which left the model free to read a size word as "fill the canvas".
+# A live stage-2 prompt ("large ceramic mug ... imposing stance") rendered a
+# full-bleed close-up with no background left — and so no uniform border for
+# the pair split to find. generator.py now bans those words; these pin the
+# code-level half, which holds whatever the LLM writes.
+
+def test_build_prompt_states_the_framing_every_time():
+    for prompt in (build_prompt("fire lizard"), build_prompt("fire lizard", ["chibi"])):
+        assert "single creature" in prompt
+        assert "full body" in prompt
+        assert "centered" in prompt
+
+
+def test_build_prompt_framing_anchors_lead_the_prompt():
+    """Directly after the LoRA trigger: earliest tokens carry the most weight,
+    and nothing appended later can push them out of CLIP's window."""
+    assert build_prompt("fire lizard").startswith(f"gen3, {_FRAMING_TAGS}, ")
+
+
+def test_build_prompt_strips_a_framing_word_but_keeps_its_tag():
+    """The generator spec bans these, but the LLM does not reliably comply, so
+    the guarantee lives here. Only the word goes — the creature stays described."""
+    result = build_prompt("large ceramic cauldron, glowing red cracks")
+    assert "ceramic cauldron" in result
+    assert "large" not in result
+
+
+def test_build_prompt_strips_every_banned_framing_word(capsys):
+    result = build_prompt(
+        "towering hulk, imposing stance, dramatic close-up, massive claws, epic aura"
+    )
+    for banned in ("towering", "imposing", "dramatic", "close-up", "massive", "epic"):
+        assert banned not in result.lower()
+    assert "hulk" in result and "claws" in result and "aura" in result
+    assert "stripped framing/scale words" in capsys.readouterr().err
+
+
+def test_build_prompt_framing_strip_is_case_insensitive_and_word_bounded():
+    """"Large" capitalised must still go; "enlarged" must not be mangled."""
+    assert "Large" not in build_prompt("Large horn")
+    assert "enlarged" in build_prompt("enlarged horn")
+
+
+def test_build_prompt_drops_a_tag_that_was_only_a_framing_word():
+    result = build_prompt("round blob, imposing, teal scales")
+    body = result[len(f"gen3, {_FRAMING_TAGS}, "):-len(", white background")]
+    assert body == "round blob, teal scales"
+
+
+def test_build_prompt_leaves_a_clean_prompt_unstripped(capsys):
+    """No warning when there was nothing to strip — the message means a real
+    contract violation happened, so it must not cry wolf."""
+    build_prompt("small round ceramic mug, glossy white porcelain")
+    assert "stripped framing/scale words" not in capsys.readouterr().err
+
+
+def test_build_prompt_framing_anchors_survive_a_trim():
+    """They are in the prefix, so the trim budget subtracts them rather than
+    dropping them — an over-long description cannot cost the framing."""
+    result = build_prompt(_long_sprite_prompt(30))
+    assert result.startswith(f"gen3, {_FRAMING_TAGS}, ")
+    assert result.endswith(", white background")
 
 
 # ---------------------------------------------------------------------------
@@ -146,13 +221,17 @@ def _long_sprite_prompt(n=14):
 def test_build_prompt_leaves_an_in_spec_prompt_completely_untouched():
     """The guard is a safety net, not a rewriter: a prompt that already fits
     must come out byte-identical to the plain formula."""
-    assert build_prompt("fire lizard") == "gen3, fire lizard, white background"
-    assert build_prompt("fire lizard", ["chibi"]) == "gen3, fire lizard, chibi, white background"
+    assert build_prompt("fire lizard") == (
+        f"gen3, {_FRAMING_TAGS}, fire lizard, white background"
+    )
+    assert build_prompt("fire lizard", ["chibi"]) == (
+        f"gen3, {_FRAMING_TAGS}, fire lizard, chibi, white background"
+    )
 
 
 def test_build_prompt_trims_the_description_not_the_style_tags():
     result = build_prompt(_long_sprite_prompt(), ["chibi", "big head", "small body"])
-    assert result.startswith("gen3, distinctive shimmering feature number 0")
+    assert result.startswith(f"gen3, {_FRAMING_TAGS}, distinctive shimmering feature number 0")
     assert result.endswith(", chibi, big head, small body, white background")
 
 
@@ -165,7 +244,7 @@ def test_build_prompt_drops_whole_tags_never_half_of_one():
     """Cutting mid-tag would feed the model a fragment ("neon cyan and") that
     reads as a different feature than the tag it came from."""
     result = build_prompt(_long_sprite_prompt())
-    body = result[len("gen3, "):-len(", white background")]
+    body = result[len(f"gen3, {_FRAMING_TAGS}, "):-len(", white background")]
     for tag in body.split(", "):
         assert tag.startswith("distinctive shimmering feature number ")
 
@@ -182,7 +261,7 @@ def test_build_prompt_keeps_one_tag_even_when_that_alone_overruns():
     tags would render an arbitrary creature rather than a trimmed one."""
     huge = " ".join(["word"] * 200)
     result = build_prompt(huge)
-    assert result == f"gen3, {huge}, white background"
+    assert result == f"gen3, {_FRAMING_TAGS}, {huge}, white background"
 
 
 # ---------------------------------------------------------------------------

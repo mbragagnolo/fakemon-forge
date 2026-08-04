@@ -1,5 +1,6 @@
 import colorsys
 import hashlib
+import re
 import sys
 from collections import Counter
 from pathlib import Path
@@ -32,6 +33,30 @@ _CLIP_TOKEN_LIMIT = 77
 # where the two special tokens weigh most. Rounded up, so the estimate errs
 # toward trimming a tag that would have fitted rather than losing the suffix.
 _TOKENS_PER_WORD = 1.8
+# Composition anchors prepended to every prompt. The sprite_prompt spec asks
+# the LLM for shape/colour/feature tags, and nothing in that vocabulary ever
+# states the *framing* — so the model was free to read a size word as a
+# instruction to fill the canvas. Observed live: a stage-2 prompt leading
+# "large ceramic mug" and ending "imposing stance" rendered a full-bleed
+# photographic close-up with no background left, which then left no uniform
+# border for the pair split to find. Stage 1 of the same line survived only
+# because "tiny" and "cute expression" implied the framing by accident.
+# Stating it outright removes the accident. These sit at the front, right
+# after the LoRA trigger, where they carry weight and cannot be truncated.
+_FRAMING_TAGS = "single creature, full body, centered"
+# The sprite_prompt spec forbids these, but the LLM does not reliably obey: one
+# call after the ban was added it still opened stage 2 with "large ceramic
+# cauldron" (stage 1 of the same call complied). They are stripped here too, so
+# the guarantee does not depend on a model following an instruction. Scale
+# belongs in height_dm/weight_hg; in a prompt it only tells the renderer how
+# much of the frame to fill.
+_FRAMING_WORDS = (
+    "large", "huge", "giant", "gigantic", "enormous", "colossal", "massive",
+    "towering", "imposing", "close-up", "closeup", "dramatic", "epic",
+)
+_FRAMING_WORD_RE = re.compile(
+    r"\b(?:" + "|".join(re.escape(w) for w in _FRAMING_WORDS) + r")\b", re.IGNORECASE
+)
 _SPRITE_SIZE = 768  # native SD render size — individual sprites keep full detail
 _PALETTE_COLORS = 16
 _KEY_COLOR = (200, 200, 168)  # Gen-3 transparency key colour (RGB).
@@ -99,6 +124,33 @@ def _estimate_clip_tokens(text: str) -> int:
     return round(len(text.split()) * _TOKENS_PER_WORD) + 2
 
 
+def _strip_framing_words(sprite_prompt: str) -> str:
+    """Remove ``_FRAMING_WORDS`` from ``sprite_prompt``, tag by tag.
+
+    Only the offending word goes; the tag it sat in survives, so "large
+    ceramic cauldron" becomes "ceramic cauldron" rather than being dropped
+    outright — the creature is still described, it just no longer instructs the
+    renderer to fill the frame. A tag consisting of nothing else is dropped.
+    """
+    cleaned, changed = [], False
+    for tag in (t.strip() for t in sprite_prompt.split(",")):
+        if not tag:
+            continue
+        stripped = re.sub(r"\s{2,}", " ", _FRAMING_WORD_RE.sub("", tag)).strip()
+        if stripped != tag:
+            changed = True
+        if stripped:
+            cleaned.append(stripped)
+    if changed:
+        print(
+            "warning: build_prompt stripped framing/scale words from sprite_prompt "
+            "(they tell the renderer how much of the frame to fill, not how big "
+            "the creature is)",
+            file=sys.stderr,
+        )
+    return ", ".join(cleaned)
+
+
 def _trim_tags_to_fit(sprite_prompt: str, prefix: str, suffix: str) -> str:
     """Drop trailing ``sprite_prompt`` tags until the whole prompt fits CLIP.
 
@@ -141,11 +193,12 @@ def build_prompt(sprite_prompt: str, extra_tags: list[str] | None = None) -> str
     the overflow it guards is silent, and a model that ignores the cap would
     otherwise degrade sprite quality with nothing in the logs to say why.
     """
-    prefix = "gen3, "
+    prefix = f"gen3, {_FRAMING_TAGS}, "
     if extra_tags:
         suffix = f", {', '.join(extra_tags)}, white background"
     else:
         suffix = ", white background"
+    sprite_prompt = _strip_framing_words(sprite_prompt)
     return prefix + _trim_tags_to_fit(sprite_prompt, prefix, suffix) + suffix
 
 
