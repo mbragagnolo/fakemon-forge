@@ -164,16 +164,32 @@ At least one of `--image` or `--description` must be provided.
 
 ### Power tiers
 
-Base-stat-total targets are the medians of the observed Gen 3 distributions for
-lines of that length, so a 2-stage final form is built as a *final* form rather
-than as a middle stage that stopped early.
+Base-stat totals come from the observed Gen 3 distributions for lines of that
+length, so a 2-stage final form is built as a *final* form rather than as a
+middle stage that stopped early.
 
 | Tier | Final BST | Notes |
 |------|------------|-------|
-| `standard` | ~518 (3-stage), ~468 (2-stage), ~430 (single) | Typical fully-evolved Pokémon |
-| `pseudo` | ~600 | Pseudo-legendary feel; only valid with `--mode line` at `--stages 3` |
-| `legendary` | ~580 | Single form only; awe-inspiring, lore-significant |
-| `mythical` | ~600 | Single form only; mysterious, tied to ancient legend |
+| `standard` | 450–600 (3-stage), 410–515 (2-stage), 336–500 (single) | Typical fully-evolved Pokémon |
+| `pseudo` | 600 | Pseudo-legendary feel; only valid with `--mode line` at `--stages 3` |
+| `legendary` | 580 | Single form only; awe-inspiring, lore-significant |
+| `mythical` | 600 | Single form only; mysterious, tied to ancient legend |
+
+The total is **enforced, not requested**. The model decides the *shape* of the
+stat line — a wall is bulky and slow, a sweeper is fast and frail — and the six
+numbers it returns are then rescaled to hit the total exactly, preserving their
+ratios. Left to itself the model anchors well under whatever total it is asked
+for, so the prompt alone never got there.
+
+Where a tier shows a range, each species takes one deterministic total inside
+it, derived from its name: the same name always yields the same stats, and every
+stage of a line sits at the same point in its own range, which is what makes the
+totals rise across an evolutionary line. The tiers showing a single number have
+no observed spread in Gen 3 — every legendary of that class shares one total.
+
+One consequence worth naming: deliberate extremes do not survive. There is no
+Shuckle and no Shedinja here — a stat line the model intended as an outlier gets
+rescaled back onto its band like any other.
 
 ### Examples
 
