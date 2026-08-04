@@ -1,7 +1,8 @@
 import json
 import pytest
 
-from fakemon_forge.export_ini import export_ini
+from fakemon_forge.export_ini import export_ini, _resolve_type, _type_index
+from fakemon_forge.generator import _TYPE_POOL
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -224,6 +225,45 @@ def test_pokedex_type_falls_back_to_type_word(tmp_path, category):
 def test_pokedex_type_uses_primary_type_of_dual_type(tmp_path):
     fields = _export(tmp_path, {**_BASE, "types": ["Water", "Flying"]})
     assert fields["PokedexType"] == "WATER"
+
+
+# ---------------------------------------------------------------------------
+# Type encoding
+# ---------------------------------------------------------------------------
+
+def _types(fields):
+    """(type1, type2) hex bytes at offsets 6/7 of the BaseStats blob."""
+    blob = fields["BaseStats"]
+    return blob[12:14], blob[14:16]
+
+
+def test_every_generator_type_encodes():
+    """The two pools share one resource file, so anything the model may now be
+    given is guaranteed to have a byte."""
+    for type_name in _TYPE_POOL:
+        assert _resolve_type(type_name) == _type_index()[type_name]
+
+
+def test_mono_type_repeats_its_index(tmp_path):
+    t1, t2 = _types(_export(tmp_path, {**_BASE, "types": ["Water"]}))
+    assert t1 == t2
+
+
+def test_unknown_type_degrades_to_normal_instead_of_raising(tmp_path, capsys):
+    """A stats.json written before the generator constrained types — the run
+    that produced it is already fully rendered, so the export warns rather than
+    throwing all of it away."""
+    fields = _export(tmp_path, {**_BASE, "types": ["Grass", "Sound"]})
+    t1, t2 = _types(fields)
+    assert t1 == f"{_type_index()['Grass']:02X}"
+    assert t2 == f"{_type_index()['Normal']:02X}"
+    assert "unknown type 'Sound'" in capsys.readouterr().err
+
+
+def test_fairy_still_encodes_as_normal(tmp_path):
+    """Fairy is outside the generator pool but kept as an export alias."""
+    t1, _ = _types(_export(tmp_path, {**_BASE, "types": ["Fairy"]}))
+    assert t1 == f"{_type_index()['Normal']:02X}"
 
 
 # ---------------------------------------------------------------------------
