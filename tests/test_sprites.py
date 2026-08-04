@@ -1729,6 +1729,35 @@ def test_procedural_squash_differs_within_acceptance_band():
     assert 0.02 <= ratio <= 0.30
 
 
+def test_procedural_squash_visibly_compresses_the_creature():
+    # Regression (#90 follow-up): the old canvas-relative squash (h // 48 on
+    # the whole frame) moved a mid-canvas creature ~2% — "basically the same
+    # sprite" when flipped. The squash must be content-aware: the creature's
+    # own bbox compresses by a visible fraction of ITS height, widens slightly
+    # (squash-and-stretch), and keeps its feet planted.
+    frame1 = _pp96(_sprite_rgb())
+    bg = _background_index(frame1)
+    b1 = _content_bbox(frame1, bg)
+    out = procedural_squash(frame1)
+    b2 = _content_bbox(out, bg)
+    h1 = b1[3] - b1[1]
+    h2 = b2[3] - b2[1]
+    assert h2 == h1 - max(1, h1 // 16)   # creature-proportional, visible squash
+    assert b2[3] == b1[3]                # feet stay planted
+    assert (b2[2] - b2[0]) >= (b1[2] - b1[0])  # stretch: never narrower
+
+
+def test_procedural_squash_all_background_frame_does_not_crash():
+    frame1 = _pp96(_sprite_rgb())
+    bg = _background_index(frame1)
+    blank = Image.new("P", (96, 96), bg)
+    blank.putpalette(frame1.getpalette())
+    out = procedural_squash(blank)
+    assert out.mode == "P"
+    assert out.size == (96, 96)
+    assert set(out.get_flattened_data()) == {bg}
+
+
 def test_procedural_squash_rejects_non_palette_input():
     with pytest.raises(ValueError, match="palette-mode"):
         procedural_squash(_rgb_image(96, 96))
@@ -1899,7 +1928,7 @@ def test_build_frame2_structural_motion_with_low_churn_is_accepted():
     # default squash the way an img2img cleanup would) passes, so the gate is
     # strict against flicker without becoming squash-only.
     frame1 = _pp96(_sprite_rgb())
-    candidate = procedural_squash(frame1, amount_px=3).convert("RGB")
+    candidate = procedural_squash(frame1, amount_px=4).convert("RGB")
     out = build_frame2(frame1, candidate)
     squash = list(procedural_squash(frame1).get_flattened_data())
     assert list(out.get_flattened_data()) != squash

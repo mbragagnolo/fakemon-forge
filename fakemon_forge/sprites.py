@@ -819,32 +819,48 @@ def _fit_half_to_square(half: Image.Image) -> Image.Image:
 
 
 def procedural_squash(frame1: Image.Image, amount_px: int | None = None) -> Image.Image:
-    """Bottom-anchored vertical squash of ``frame1`` — the Gen-3 breathing frame.
+    """Content-aware squash-and-stretch of ``frame1`` — the Gen-3 breathing frame.
 
-    Compresses frame 1's content by ``amount_px`` rows and pastes it at
-    the bottom, so the creature's feet stay planted while the top compresses.
-    This is the fallback frame 2 whenever an img2img candidate is rejected, so
-    it is built to be genuinely good and to land inside the acceptance band.
+    Compresses the creature's *content bbox* by ``amount_px`` rows, widens it
+    by half that (classic squash-and-stretch — volume appears conserved, which
+    is what makes the compression read as breathing rather than shrinking) and
+    pastes it back bottom-anchored and horizontally centred on the original
+    content, so the feet stay planted. This is the default frame 2 whenever an
+    img2img candidate is rejected, so it has to read as visible motion on its
+    own: the old whole-canvas squash (``height // 48``) moved a mid-canvas
+    creature ~2% of its own height — imperceptible in the flip (#90).
 
-    ``amount_px`` defaults to ``height // 48`` (2px on a 96px sprite, 16px at
-    the native 768) so the squash reads the same at any sprite size; it is a
-    tunable eyeball placeholder (see the module spec). Operates entirely in
-    P-space (nearest-neighbour reuses existing indices) so the result shares
-    frame 1's exact palette without a re-quantize. Input is not mutated.
+    ``amount_px`` defaults to a fraction of the *content* height (not the
+    canvas), so the motion is equally visible however much of the frame the
+    creature fills; the ``// 16`` is a tunable eyeball placeholder (see the
+    module spec). Operates entirely in P-space (nearest-neighbour reuses
+    existing indices) so the result shares frame 1's exact palette without a
+    re-quantize. An all-background frame has nothing to squash and comes back
+    as a background canvas. Input is not mutated.
     """
     if frame1.mode != "P":
         raise ValueError(f"Expected palette-mode frame1 image, got {frame1.mode}")
     w, h = frame1.size
-    if amount_px is None:
-        amount_px = max(1, h // 48)
     background = _background_index(frame1)
-    # NEAREST in P-space introduces no new colours (indices are reused verbatim).
-    squashed = frame1.resize((w, h - amount_px), Image.NEAREST)
     canvas = Image.new("P", (w, h), background)
     canvas.putpalette(frame1.getpalette())
-    # Paste at (0, amount_px): bottom row aligns with the canvas bottom and the
-    # top ``amount_px`` rows become background.
-    canvas.paste(squashed, (0, amount_px))
+    bbox = _content_bbox(frame1, background)
+    if bbox is None:
+        return canvas
+    left, top, right, bottom = bbox  # right/bottom exclusive
+    content_w = right - left
+    content_h = bottom - top
+    if amount_px is None:
+        amount_px = max(1, content_h // 16)
+    amount_px = min(amount_px, content_h - 1)  # keep at least one row
+    stretch = amount_px // 2
+    new_w = min(w, content_w + 2 * stretch)
+    new_h = content_h - amount_px
+    # NEAREST in P-space introduces no new colours (indices are reused verbatim).
+    squashed = frame1.crop(bbox).resize((new_w, new_h), Image.NEAREST)
+    paste_left = round((left + right) / 2 - new_w / 2)
+    paste_left = max(0, min(w - new_w, paste_left))  # keep the stretch on-canvas
+    canvas.paste(squashed, (paste_left, bottom - new_h))
     return canvas
 
 
