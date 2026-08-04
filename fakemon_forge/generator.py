@@ -1,3 +1,4 @@
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -32,23 +33,40 @@ _ALLOWED_NAME_CHARS = set(
     ".,'-…!?/()\":;"
 )
 
-# Base-stat-total targets, keyed tier -> stage count -> per-stage targets.
+#: Index of each statistic inside a `_BST_TARGETS` band.
+_P10, _MEDIAN, _P90 = 0, 1, 2
+
+# Base-stat-total bands, keyed tier -> stage count -> per-stage
+# `(p10, median, p90)` triples.
+#
 # A stage count of 1 is a standalone species, not a juvenile: `standard` 1 is
 # deliberately far above `standard` 3's opening stage (issue #48 settled the
 # same reading for height/weight).
 #
-# Every value is the median of its observed Gen 3 band -- one rule, no
-# exceptions, so any number here can be re-derived and checked. The bands live
-# in tests/fixtures/gen3_bst_bands.json and tests/test_bst_targets.py enforces
-# the correspondence; nothing at runtime reads that file.
+# Every triple is its observed Gen 3 band's 10th percentile, median and 90th --
+# one rule, no exceptions, so any number here can be re-derived and checked. The
+# bands live in tests/fixtures/gen3_bst_bands.json and tests/test_bst_targets.py
+# enforces the correspondence; nothing at runtime reads that file.
+#
+# The two numbers do different jobs. The median is what the prompt asks the
+# model for; the p10..p90 span is what `_bst_target` picks the enforced total
+# inside. `legendary` and `mythical` are flat in the observed data -- Gen 3
+# gives every one of them the same total -- so their bands are degenerate and
+# the pick is a no-op. `pseudo` has no observed band of its own: its row is the
+# hand-picked one #59 shipped, written flat for the same reason, so it resolves
+# to exactly the number the prompt names.
 #
 # `pseudo` has no 2-stage row on purpose -- every pseudo-legendary line is three
 # stages, and the CLI rejects the combination.
 _BST_TARGETS = {
-    "standard":  {1: (430,), 2: (305, 468), 3: (295, 405, 518)},
-    "pseudo":    {3: (300, 420, 600)},
-    "legendary": {1: (580,)},
-    "mythical":  {1: (600,)},
+    "standard": {
+        1: ((336, 430, 500),),
+        2: ((240, 305, 360), (410, 468, 515)),
+        3: ((205, 295, 314), (278, 405, 420), (450, 518, 600)),
+    },
+    "pseudo":    {3: ((300, 300, 300), (420, 420, 420), (600, 600, 600))},
+    "legendary": {1: ((580, 580, 580),)},
+    "mythical":  {1: ((600, 600, 600),)},
 }
 
 _SYSTEM_PROMPT = f"""\
@@ -159,8 +177,8 @@ _TIER_NOTES = {
 }
 
 
-def _bst_row(tier: str, stage_count: int) -> tuple[int, ...]:
-    """Per-stage BST targets for one tier and stage count.
+def _bst_row(tier: str, stage_count: int) -> tuple[tuple[int, int, int], ...]:
+    """Per-stage BST bands for one tier and stage count.
 
     A tier without a row for the requested count falls back to the one row it
     does have, trimmed to the count asked for. That keeps
@@ -177,6 +195,15 @@ def _bst_row(tier: str, stage_count: int) -> tuple[int, ...]:
 
 
 def _user_prompt(description: str, mode: str, tier: str, stage_count: int = 3) -> str:
+    """The user turn: description, BST hint, evolution and tier notes.
+
+    The BST hint is deliberately **not** load-bearing. Issue #85 measured the
+    model anchoring ~90 points under whatever number this string names, across
+    every run, so `_normalize_base_stats` imposes the total afterwards and the
+    hint only steers the raw stat line towards roughly the right scale. Removing
+    it would cost nothing measurable; removing the enforcement would restore the
+    bug. Anyone pruning the redundancy should prune this half.
+    """
     # Single mode is one stage by definition; any requested count is ignored
     # rather than allowed to contradict the mode.
     if mode == "single":
@@ -186,11 +213,13 @@ def _user_prompt(description: str, mode: str, tier: str, stage_count: int = 3) -
 
     if stage_count == 1:
         count = "one stage (stage 1 only)"
-        bst_hint = f"BST target: ~{row[0]}."
+        bst_hint = f"BST target: ~{row[0][_MEDIAN]}."
         evo_text = ""
     else:
         count = _STAGE_COUNT_WORDING[stage_count]
-        targets = ", ".join(f"stage {i} ~{v}" for i, v in enumerate(row, start=1))
+        targets = ", ".join(
+            f"stage {i} ~{band[_MEDIAN]}" for i, band in enumerate(row, start=1)
+        )
         bst_hint = f"BST targets: {targets}."
         evo_text = _EVO_PROGRESSION_BY_COUNT[stage_count]
 
@@ -457,11 +486,192 @@ def _clamp_dimension(value, upper: int, fallback: int) -> int:
     return max(1, min(upper, value))
 
 
+_STAT_KEYS = ("hp", "attack", "defense", "sp_atk", "sp_def", "speed")
+
+#: Gen 3 stores each base stat in one unsigned byte, and a stat of 0 makes the
+#: damage formula degenerate, so every value has to land inside this range.
+_STAT_MIN = 1
+_STAT_MAX = 255
+
+#: Resolution of the deterministic position drawn from a name. Only needs to be
+#: far wider than the widest band (164 points, the standalone 336-500) so that
+#: no total inside a band is unreachable; a round number keeps `_bst_target`
+#: easy to reason about.
+_HASH_SPACE = 1_000_000
+
+
+def _name_position(name: str) -> int:
+    """A stable ``0 .. _HASH_SPACE - 1`` position drawn from ``name``.
+
+    md5 is the determinism convention already used by ``export_ini._dex_number``
+    and the shiny palette rotation, so a species keeps the same BST across runs
+    for the same reason it keeps the same dex slot and the same shiny hue.
+    """
+    return int(hashlib.md5(name.encode()).hexdigest(), 16) % _HASH_SPACE
+
+
+def _bst_target(band: tuple[int, int, int], position: int) -> int:
+    """The BST a species at ``position`` takes inside ``band``'s p10..p90.
+
+    Not the flat median: standalone species genuinely spread 336-500 in Gen 3,
+    and pinning every standard single form to 430 would be *less* faithful than
+    the scatter it replaces.
+
+    ``position`` is a quantile shared by every stage of a line, not a per-stage
+    draw. Both p10 and p90 rise from stage to stage, so the same quantile in
+    each rises too — that is what makes the totals ascend across an evolutionary
+    line. Drawing independently per stage would let a stage 2 land near its p10,
+    below a stage 1 near its p90, which is one of the failures this path exists
+    to remove.
+    """
+    low, _, high = band
+    if high <= low:
+        return low
+    return low + (position * (high - low)) // (_HASH_SPACE - 1)
+
+
+def _apportion(weights: list[int], target: int) -> list[int]:
+    """Split ``target`` across ``weights`` in proportion, summing to it exactly.
+
+    Largest-remainder apportionment: floor every share, then hand the leftover
+    out one point at a time to the largest remainders. Rounding each share
+    independently would land on 429 or 431 about as often as on 430.
+
+    Integer arithmetic throughout, so the leftover is exactly
+    ``target - sum(shares)`` with no float error to defend against. Ties go to
+    the earlier stat, keeping the result a function of the inputs alone.
+
+    All-zero weights carry no proportion worth preserving, so they split evenly.
+    """
+    if not weights:
+        return []
+    total = sum(weights)
+    if total <= 0:
+        weights = [1] * len(weights)
+        total = len(weights)
+
+    shares = [w * target // total for w in weights]
+    remainders = [w * target % total for w in weights]
+    order = sorted(range(len(weights)), key=lambda i: (-remainders[i], i))
+    for i in order[: target - sum(shares)]:
+        shares[i] += 1
+    return shares
+
+
+def _apportion_clamped(weights: list[int], target: int) -> list[int]:
+    """``_apportion`` with every share held inside [_STAT_MIN, _STAT_MAX].
+
+    Mostly a safety net: no band target can push a stat near 255 unless the
+    model returns something degenerate, like five 1s and a 250.
+
+    Clamping breaks the total, so whatever the clamp gained or cost is moved
+    back across the stats that still have room, in proportion to how much room
+    each has. Redistributing by *headroom* rather than by weight is what makes
+    this converge: the stats that absorb the leftover are exactly the ones that
+    can, and a stat sitting on a bound is skipped rather than pushed through it.
+
+    One pass always closes the gap. ``target`` is bounded to
+    [_STAT_MIN * n, _STAT_MAX * n] by the caller, which makes the available room
+    strictly larger than the shortfall, so `_apportion` hands out the whole of
+    it. The loop is written as a loop anyway so that a caller which skipped that
+    bound degrades to a best effort instead of returning a wrong total silently.
+    """
+    values = [min(_STAT_MAX, max(_STAT_MIN, s)) for s in _apportion(weights, target)]
+    while True:
+        deficit = target - sum(values)
+        if deficit == 0:
+            return values
+        sign = 1 if deficit > 0 else -1
+        room = [_STAT_MAX - v if sign > 0 else v - _STAT_MIN for v in values]
+        movable = [i for i in range(len(values)) if room[i] > 0]
+        if not movable:
+            return values
+        moved = _apportion(
+            [room[i] for i in movable],
+            min(abs(deficit), sum(room)),
+        )
+        for i, amount in zip(movable, moved):
+            values[i] += sign * amount
+
+
+def _stat_weights(raw) -> list[int] | None:
+    """The six base stats as proportional weights, or None if unusable.
+
+    Unusable means the value carries no design intent to preserve: not a dict, a
+    missing stat, a bool (which ``isinstance(x, int)`` would otherwise wave
+    through), a non-number, or a negative. One bad stat spoils the whole set
+    rather than being read as zero — a zero weight becomes a base stat of 1,
+    which is a worse guess than an even split and hides the malformed field.
+    """
+    if not isinstance(raw, dict):
+        return None
+    weights = []
+    for key in _STAT_KEYS:
+        value = raw.get(key)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        if value < 0:
+            return None
+        weights.append(int(value))
+    return weights
+
+
+def _normalize_base_stats(raw, target: int) -> dict[str, int]:
+    """Rescale the model's six stats so they sum to exactly ``target``.
+
+    The model is reliable about the *shape* of a stat line — a wall is bulky and
+    slow, a sweeper is fast and frail — and unreliable about its magnitude. It
+    anchors low and ignores the total the prompt asks for: eleven ``--tier
+    standard`` single forms all prompted with ~430 averaged 337 (issue #85).
+    That is systematic bias rather than variance, so re-prompting only re-samples
+    it. The six returned stats are read as weights instead, and the total is
+    imposed here.
+
+    Ratios survive up to rounding, so a glass cannon stays a glass cannon.
+    Unusable input falls back to an even split of the target.
+    """
+    weights = _stat_weights(raw)
+    if weights is None:
+        weights = [1] * len(_STAT_KEYS)
+    # Bound the target to what six clamped bytes can actually add up to, so the
+    # redistribution always has a solution. Every value `_BST_TARGETS` can
+    # produce is already far inside this.
+    target = max(
+        _STAT_MIN * len(_STAT_KEYS),
+        min(_STAT_MAX * len(_STAT_KEYS), int(target)),
+    )
+    return dict(zip(_STAT_KEYS, _apportion_clamped(weights, target)))
+
+
+def _stage_band(
+    stage: dict, mode: str, tier: str, stage_count: int, index: int
+) -> tuple[int, int, int]:
+    """The BST band one stage draws its target from.
+
+    Single mode is one standalone form whatever count was requested — the same
+    reading ``_size_defaults`` applies. In line mode the stage's own declared
+    number picks the row; an off-spec number (missing, out of range, a JSON
+    string) falls back to the stage's position in the returned list, and a list
+    longer than the row falls back to the row's last band.
+    """
+    if mode != "line":
+        return _bst_row(tier, 1)[0]
+    row = _bst_row(tier, stage_count)
+    try:
+        position = int(stage.get("stage")) - 1
+    except (TypeError, ValueError):
+        position = index
+    if not 0 <= position < len(row):
+        position = index
+    return row[min(position, len(row) - 1)]
+
+
 def _normalize(
     stages: list[dict], mode: str, tier: str, stage_count: int = 3
 ) -> list[dict]:
-    """Post-parse cleanup pass: enforces the name contract, defaults/clamps
-    height_dm and weight_hg, and filters abilities_gen3 to the Gen 3 pool.
+    """Post-parse cleanup pass: enforces the name contract, rescales base_stats
+    onto their band target, defaults/clamps height_dm and weight_hg, and filters
+    abilities_gen3 to the Gen 3 pool.
 
     Repair is idempotent: a name already inside the Gen 3 contract comes out
     of ``_repair_name`` unchanged, so valid names pass through untouched.
@@ -470,12 +680,24 @@ def _normalize(
     were *requested*. They are deliberately different things — the model may
     return a different number than was asked for, which is accepted.
     """
-    for stage in stages:
+    # One position for the whole line, drawn from stage 1's name — the line's
+    # name, which is what ``main.py`` already treats as the line identity when
+    # seeding cries. Every stage is then placed at that same quantile of its own
+    # band, which is what makes the totals ascend. ``_repair_name`` is
+    # idempotent, so seeding from it here agrees with what the loop assigns.
+    position = _name_position(_repair_name(stages[0]["name"])) if stages else 0
+
+    for index, stage in enumerate(stages):
         stage["name"] = _repair_name(stage["name"])
         if "pokedex_entry" in stage:
             stage["pokedex_entry"] = _repair_entry(stage["pokedex_entry"])
         stage["abilities_gen3"] = _normalize_abilities_gen3(stage.get("abilities_gen3", []))
         stage["category"] = _normalize_category(stage.get("category"), stage.get("types"))
+
+        band = _stage_band(stage, mode, tier, stage_count, index)
+        stage["base_stats"] = _normalize_base_stats(
+            stage.get("base_stats"), _bst_target(band, position)
+        )
 
         height_default, weight_default = _size_defaults(stage, mode, tier, stage_count)
         stage["height_dm"] = _clamp_dimension(stage.get("height_dm"), 999, height_default)

@@ -1,4 +1,5 @@
 import json
+import random
 import pytest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -12,6 +13,17 @@ from fakemon_forge.generator import (
     _ALLOWED_NAME_CHARS,
     _SYSTEM_PROMPT,
     _ABILITY_POOL,
+    _HASH_SPACE,
+    _MEDIAN,
+    _STAT_KEYS,
+    _STAT_MAX,
+    _STAT_MIN,
+    _apportion,
+    _bst_target,
+    _name_position,
+    _normalize_base_stats,
+    _stage_band,
+    _stat_weights,
 )
 
 # ---------------------------------------------------------------------------
@@ -1710,3 +1722,359 @@ def test_normalize_repairs_the_pokedex_entry():
     }]
     out = _normalize(stages, "line", "standard", 1)
     assert out[0]["pokedex_entry"] == "It's a bug."
+
+
+# ---------------------------------------------------------------------------
+# Deterministic BST grounding (issue #85)
+#
+# The model owns the stat *shape*; these establish that the code owns the
+# magnitude. #59 put "BST target: ~430." in the prompt and nothing enforced it:
+# eleven standard single forms all prompted with ~430 averaged 337, with ten of
+# the eleven undershooting.
+# ---------------------------------------------------------------------------
+
+# The under-scaled shape from a real run: sums to 330 against a 430 target.
+_UNDERSCALED = {
+    "hp": 60, "attack": 45, "defense": 70,
+    "sp_atk": 50, "sp_def": 65, "speed": 40,
+}
+
+
+def _bst(stats: dict) -> int:
+    return sum(stats[key] for key in _STAT_KEYS)
+
+
+# --- the total is imposed, not requested ------------------------------------
+
+@pytest.mark.parametrize("target", [205, 295, 336, 430, 500, 518, 580, 600])
+def test_rescaled_stats_sum_to_exactly_the_target(target):
+    """Exactly, not approximately. Largest-remainder apportionment is the whole
+    reason this lands on 430 rather than 429 or 431."""
+    assert _bst(_normalize_base_stats(_UNDERSCALED, target)) == target
+
+
+def test_an_undershooting_line_is_raised_to_its_target():
+    """The measured failure, directly: 330 in, 430 out."""
+    assert sum(_UNDERSCALED.values()) == 330
+    assert _bst(_normalize_base_stats(_UNDERSCALED, 430)) == 430
+
+
+def test_an_overshooting_line_is_lowered_to_its_target():
+    """The bias runs one way in practice, but the mechanism is not one-way."""
+    inflated = {key: 150 for key in _STAT_KEYS}
+    assert _bst(_normalize_base_stats(inflated, 430)) == 430
+
+
+def test_a_line_already_on_target_is_left_alone():
+    """Rescaling is idempotent on a conforming stat line \u2014 it must not jitter
+    stats that already sum correctly."""
+    on_target = {"hp": 80, "attack": 70, "defense": 60,
+                 "sp_atk": 90, "sp_def": 70, "speed": 60}
+    assert sum(on_target.values()) == 430
+    assert _normalize_base_stats(on_target, 430) == on_target
+
+
+# --- the shape is preserved --------------------------------------------------
+
+def test_rescaling_preserves_the_ranking_of_the_stats():
+    """A glass cannon stays a glass cannon. This is the model's actual
+    contribution and the reason the fix is a rescale rather than a lookup."""
+    out = _normalize_base_stats(_UNDERSCALED, 500)
+    ranked = sorted(_STAT_KEYS, key=lambda k: _UNDERSCALED[k], reverse=True)
+    assert sorted(_STAT_KEYS, key=lambda k: out[k], reverse=True) == ranked
+
+
+def test_rescaling_preserves_proportions_within_rounding():
+    """Each stat lands within a point of its exact proportional share."""
+    target = 430
+    out = _normalize_base_stats(_UNDERSCALED, target)
+    total = sum(_UNDERSCALED.values())
+    for key in _STAT_KEYS:
+        assert abs(out[key] - _UNDERSCALED[key] * target / total) < 1
+
+
+def test_a_flat_stat_line_stays_flat():
+    flat = {key: 50 for key in _STAT_KEYS}
+    out = _normalize_base_stats(flat, 432)
+    assert set(out.values()) == {72}
+
+
+def test_float_stats_are_accepted_as_weights():
+    """The prompt asks for integers, but a model that returns 60.5 has still
+    expressed a usable shape \u2014 that is not a reason to discard it."""
+    out = _normalize_base_stats({key: 60.5 for key in _STAT_KEYS}, 300)
+    assert _bst(out) == 300
+
+
+# --- the byte range ----------------------------------------------------------
+
+def test_a_degenerate_spike_clamps_at_255_and_still_sums_to_target():
+    """Five 1s and a 250 against a 600 target would scale the spike past the
+    Gen 3 byte. The clamp redistributes rather than truncating the total."""
+    spiky = {"hp": 1, "attack": 1, "defense": 1,
+             "sp_atk": 1, "sp_def": 1, "speed": 250}
+    out = _normalize_base_stats(spiky, 600)
+    assert max(out.values()) == _STAT_MAX
+    assert _bst(out) == 600
+
+
+def test_a_zero_stat_is_raised_to_the_minimum():
+    """A base stat of 0 makes the Gen 3 damage formula degenerate."""
+    out = _normalize_base_stats({**_UNDERSCALED, "speed": 0}, 430)
+    assert out["speed"] == _STAT_MIN
+    assert _bst(out) == 430
+
+
+@pytest.mark.parametrize("target", [6, 205, 430, 600, 1530])
+def test_every_stat_lands_inside_the_byte_range(target):
+    spiky = {"hp": 1, "attack": 0, "defense": 3,
+             "sp_atk": 0, "sp_def": 900, "speed": 2}
+    out = _normalize_base_stats(spiky, target)
+    assert all(_STAT_MIN <= v <= _STAT_MAX for v in out.values())
+    assert _bst(out) == target
+
+
+@pytest.mark.parametrize("target", [-50, 0, 5, 99999])
+def test_an_out_of_range_target_is_bounded_to_what_six_bytes_can_hold(target):
+    """No `_BST_TARGETS` value can reach here, but the function stays total \u2014
+    the redistribution loop needs a target it can actually satisfy."""
+    out = _normalize_base_stats(_UNDERSCALED, target)
+    assert all(_STAT_MIN <= v <= _STAT_MAX for v in out.values())
+    assert _STAT_MIN * 6 <= _bst(out) <= _STAT_MAX * 6
+
+
+# --- the degenerate guard ----------------------------------------------------
+
+@pytest.mark.parametrize("raw", [
+    None,
+    {},
+    "60/45/70/50/65/40",
+    [60, 45, 70, 50, 65, 40],
+    {"hp": 60, "attack": 45},                              # missing keys
+    {**_UNDERSCALED, "speed": "fast"},                     # non-numeric
+    {**_UNDERSCALED, "speed": None},
+    {**_UNDERSCALED, "speed": True},                       # bool, not an int
+    {**_UNDERSCALED, "speed": -40},                        # negative weight
+    {key: 0 for key in _STAT_KEYS},                        # sum <= 0
+])
+def test_unusable_stats_fall_back_to_an_even_split(raw):
+    """Malformed input carries no shape worth preserving. The target is still
+    met, so a downstream export never sees a missing or half-filled stat line."""
+    out = _normalize_base_stats(raw, 432)
+    assert out == {key: 72 for key in _STAT_KEYS}
+
+
+def test_the_even_split_still_sums_exactly_when_the_target_is_indivisible():
+    out = _normalize_base_stats(None, 430)
+    assert _bst(out) == 430
+    assert sorted(out.values()) == [71, 71, 72, 72, 72, 72]
+
+
+def test_the_result_always_has_exactly_the_six_gen3_stats():
+    out = _normalize_base_stats({**_UNDERSCALED, "luck": 99}, 430)
+    assert set(out) == set(_STAT_KEYS)
+
+
+@pytest.mark.parametrize("raw, expected", [
+    ({key: 10 for key in _STAT_KEYS}, [10] * 6),
+    ({**{key: 10 for key in _STAT_KEYS}, "hp": 10.9}, [10] * 6),
+    (None, None),
+    ({"hp": 1}, None),
+    ({**{key: 10 for key in _STAT_KEYS}, "hp": True}, None),
+    ({**{key: 10 for key in _STAT_KEYS}, "hp": -1}, None),
+])
+def test_stat_weights_reads_or_rejects(raw, expected):
+    assert _stat_weights(raw) == expected
+
+
+# --- apportionment -----------------------------------------------------------
+
+def test_apportion_hands_the_leftover_to_the_largest_remainders():
+    """Three equal weights over 100: two get 33, one gets 34. Which one is
+    settled by remainder then by index, never by dict order."""
+    assert _apportion([1, 1, 1], 100) == [34, 33, 33]
+
+
+def test_apportion_is_exact_for_any_split():
+    for target in range(6, 200):
+        assert sum(_apportion([3, 1, 4, 1, 5, 9], target)) == target
+
+
+def test_apportion_of_nothing_is_nothing():
+    """The terminating case of the clamp loop, once every stat is pinned."""
+    assert _apportion([], 430) == []
+
+
+# --- deterministic target selection ------------------------------------------
+
+def test_the_same_name_always_picks_the_same_total():
+    """The reproducibility property run.json (#81) was added to record."""
+    band = (336, 430, 500)
+    first = _bst_target(band, _name_position("Skyship"))
+    for _ in range(5):
+        assert _bst_target(band, _name_position("Skyship")) == first
+
+
+def test_different_names_scatter_across_the_band():
+    """Not a flat median: the point of band-picking is that standalone species
+    genuinely spread 336-500, and every standard single form being 430 would be
+    less faithful to Gen 3 than the scatter it replaces."""
+    band = (336, 430, 500)
+    names = ["Cheezit", "Libuff", "Alphadile", "Gourdle", "Dozlet", "Brixpuz",
+             "Grinweb", "Calljet", "Skyship", "Ballast", "Flamburr", "Bugbit"]
+    picked = {_bst_target(band, _name_position(name)) for name in names}
+    assert len(picked) > 6
+
+
+def test_a_flat_band_picks_its_single_value():
+    for position in (0, 1, _HASH_SPACE // 2, _HASH_SPACE - 1):
+        assert _bst_target((580, 580, 580), position) == 580
+
+
+def test_name_position_stays_inside_the_hash_space():
+    for name in ("", "A", "Skyship", "Zzzzzzzzzz", "Fl\u00e9ur\u2640"):
+        assert 0 <= _name_position(name) < _HASH_SPACE
+
+
+# --- band selection per stage ------------------------------------------------
+
+def test_single_mode_takes_the_standalone_band_whatever_count_is_passed():
+    """A single form is a standalone species, not a juvenile (issue #48)."""
+    band = _stage_band({"stage": 1}, "single", "standard", 3, 0)
+    assert band[_MEDIAN] == 430
+
+
+@pytest.mark.parametrize("stage_number, expected_median", [(1, 295), (2, 405), (3, 518)])
+def test_line_mode_reads_the_stages_own_number(stage_number, expected_median):
+    band = _stage_band({"stage": stage_number}, "line", "standard", 3, 0)
+    assert band[_MEDIAN] == expected_median
+
+
+@pytest.mark.parametrize("stage_value", [None, "two", 0, 9, {}])
+def test_an_off_spec_stage_number_falls_back_to_list_position(stage_value):
+    """`_size_defaults` degrades the same way rather than raising KeyError on a
+    stage number the model got wrong."""
+    band = _stage_band({"stage": stage_value}, "line", "standard", 3, 1)
+    assert band[_MEDIAN] == 405
+
+
+def test_more_stages_than_the_row_has_falls_back_to_the_last_band():
+    """The model may return more stages than were asked for, which `_normalize`
+    accepts. Indexing off the end of the row must not raise."""
+    band = _stage_band({"stage": 7}, "line", "standard", 2, 5)
+    assert band[_MEDIAN] == 468
+
+
+# --- end to end through _normalize -------------------------------------------
+
+def _stage(name, number, stats=None):
+    return {
+        "name": name, "stage": number, "types": ["Fire"],
+        "base_stats": dict(stats or _UNDERSCALED), "abilities_gen3": [],
+    }
+
+
+def test_normalize_grounds_a_single_form_inside_the_standalone_band():
+    out = _normalize([_stage("Cheezit", 1)], "single", "standard", 1)
+    assert 336 <= _bst(out[0]["base_stats"]) <= 500
+
+
+def test_normalize_makes_a_line_ascend_even_when_the_model_did_not():
+    """The guarantee #85 called out as absent: nothing stopped the model
+    returning a stage 2 weaker than its stage 1. Here it does exactly that."""
+    backwards = [
+        _stage("Flamburr", 1, {key: 90 for key in _STAT_KEYS}),    # 540
+        _stage("Flamburro", 2, {key: 30 for key in _STAT_KEYS}),   # 180
+        _stage("Flamburron", 3, {key: 50 for key in _STAT_KEYS}),  # 300
+    ]
+    totals = [_bst(s["base_stats"]) for s in _normalize(backwards, "line", "standard", 3)]
+    assert totals == sorted(totals)
+    assert len(set(totals)) == 3
+
+
+def test_a_line_is_seeded_from_its_first_stage_name():
+    """One quantile for the whole line, taken from the line's name \u2014 the same
+    reading main.py uses when it seeds cries off `forms[0]["name"]`. Renaming a
+    later stage must not move any stage's total."""
+    original = _normalize(
+        [_stage("Flamburr", 1), _stage("Flamburro", 2), _stage("Flamburron", 3)],
+        "line", "standard", 3,
+    )
+    renamed = _normalize(
+        [_stage("Flamburr", 1), _stage("Zzz", 2), _stage("Qqq", 3)],
+        "line", "standard", 3,
+    )
+    assert [_bst(s["base_stats"]) for s in original] == \
+           [_bst(s["base_stats"]) for s in renamed]
+
+
+def test_normalize_adds_base_stats_when_the_model_omitted_them():
+    """export_ini requires the field; an even split beats a KeyError there."""
+    stage = {"name": "Bugbit", "stage": 1, "types": ["Bug"], "abilities_gen3": []}
+    out = _normalize([stage], "single", "standard", 1)
+    assert set(out[0]["base_stats"]) == set(_STAT_KEYS)
+    assert 336 <= _bst(out[0]["base_stats"]) <= 500
+
+
+def test_normalize_uses_the_repaired_name_as_the_seed():
+    """An over-long or illegal name is repaired before it seeds the position,
+    so the BST matches the name actually written out."""
+    long_name = _normalize([_stage("Flamburrific!!", 1)], "single", "standard", 1)
+    repaired = _normalize([_stage("Flamburrif", 1)], "single", "standard", 1)
+    assert long_name[0]["name"] == "Flamburrif"
+    assert _bst(long_name[0]["base_stats"]) == _bst(repaired[0]["base_stats"])
+
+
+def test_normalize_of_no_stages_does_not_raise():
+    assert _normalize([], "line", "standard", 3) == []
+
+
+def test_generate_fakemon_returns_stats_on_the_band():
+    """Through the real entry point, with the model returning its measured
+    under-scaled shape."""
+    client = _make_client(json.dumps([{**_STAGE_1, "base_stats": dict(_UNDERSCALED)}]))
+    result = generate_fakemon("fire lizard", "single", client=client)
+    assert 336 <= _bst(result[0]["base_stats"]) <= 500
+
+
+@pytest.mark.parametrize("tier, expected", [("legendary", 580), ("mythical", 600)])
+def test_generate_fakemon_pins_the_flat_tiers_exactly(tier, expected):
+    """legendary and mythical have no observed spread, so the enforced total is
+    the number the prompt names \u2014 for every name."""
+    client = _make_client(json.dumps([{**_STAGE_1, "base_stats": dict(_UNDERSCALED)}]))
+    result = generate_fakemon("a storm", "single", tier=tier, client=client)
+    assert _bst(result[0]["base_stats"]) == expected
+
+
+# --- the two invariants, swept ------------------------------------------------
+
+def _fuzz_stat_lines(count: int):
+    """Deterministically seeded stat lines, weighted towards the shapes that
+    actually stress the clamp: zeros, lone spikes, and near-flat lines."""
+    rng = random.Random(20260804)
+    for trial in range(count):
+        shape = trial % 4
+        if shape == 0:
+            values = [rng.randint(0, 200) for _ in _STAT_KEYS]
+        elif shape == 1:
+            values = [rng.choice([0, 0, 1, 255, 999]) for _ in _STAT_KEYS]
+        elif shape == 2:
+            values = [rng.randint(1, 5) for _ in _STAT_KEYS]
+            values[rng.randrange(len(_STAT_KEYS))] = rng.randint(500, 5000)
+        else:
+            values = [rng.randint(0, 3) for _ in _STAT_KEYS]
+        yield dict(zip(_STAT_KEYS, values)), rng.randint(6, _STAT_MAX * 6)
+
+
+def test_the_total_and_the_byte_range_hold_across_a_fuzz_sweep():
+    """The two invariants everything downstream depends on, over stat lines no
+    hand-written case would think to try.
+
+    This is not decoration: a sweep like it is what caught the clamp handing
+    back 1022 against a 1530 target, because a zero-weight stat pinned at the
+    minimum had consumed the headroom needed to reach it.
+    """
+    for raw, target in _fuzz_stat_lines(3000):
+        out = _normalize_base_stats(raw, target)
+        assert _bst(out) == target, (raw, target, out)
+        assert all(_STAT_MIN <= v <= _STAT_MAX for v in out.values()), (raw, target, out)
