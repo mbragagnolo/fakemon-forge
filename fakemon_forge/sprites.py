@@ -250,7 +250,9 @@ def postprocess(image: Image.Image, size: int | None = None) -> Image.Image:
     return _quantize_gen3(image, size)
 
 
-def quantize_to_reference(image: Image.Image, reference: Image.Image) -> Image.Image:
+def quantize_to_reference(
+    image: Image.Image, reference: Image.Image, *, enhance: bool = True
+) -> Image.Image:
     """Quantize ``image`` against a fixed ``reference`` palette instead of an adaptive one.
 
     Unlike ``postprocess``, which builds a fresh 16-colour palette every call,
@@ -260,10 +262,19 @@ def quantize_to_reference(image: Image.Image, reference: Image.Image) -> Image.I
     ``_quantize_gen3`` so either path yields the same input to quantization.
     Inputs are not mutated.
 
-    Flattening the background to ``_KEY_COLOR`` before quantizing is what keeps a
-    noisy near-white candidate background on **index 0** (the key) instead of
-    nearest-mapping into the reserved white slot: after the flatten every
-    background pixel is byte-exactly the reference's index-0 key entry.
+    ``enhance=False`` skips the colour/contrast enhance for candidates whose
+    colours already derive from the enhanced reference — the frame-2 img2img
+    candidate's init is built *from* frame 1's palette, so enhancing again
+    shifts whole regions onto neighbouring slots and manufactures colour churn
+    (#90). A raw render with no such lineage (the back sprite) keeps the
+    default, for parity with the single enhance its front view got.
+
+    Flattening the background to ``_KEY_COLOR`` before quantizing is what puts a
+    noisy near-white candidate background on **index 0** (the key): the flatten
+    makes every background pixel byte-exactly the key, and ``_map_flat_to_palette``
+    assigns index 0 from exactly those pixels — the key never competes in the
+    nearest-colour mapping, so a creature midtone near the key cannot be
+    swallowed as transparency (see the mapping helper for why that matters).
     """
     if reference.mode != "P":
         raise ValueError(f"Expected palette-mode reference image, got {reference.mode}")
@@ -271,12 +282,13 @@ def quantize_to_reference(image: Image.Image, reference: Image.Image) -> Image.I
     # can't shift the key off its byte-exact value. The reference defines the
     # target size, so locked views always match the view they lock to.
     image = image.resize(reference.size, Image.NEAREST)
-    image = ImageEnhance.Color(image).enhance(1.1)
-    image = ImageEnhance.Contrast(image).enhance(1.1)
+    if enhance:
+        image = ImageEnhance.Color(image).enhance(1.1)
+        image = ImageEnhance.Contrast(image).enhance(1.1)
     if image.mode != "RGB":
         image = image.convert("RGB")  # _flatten_background_to_key assumes RGB
     image = _flatten_background_to_key(image)
-    return image.quantize(palette=reference)
+    return _map_flat_to_palette(image, reference.getpalette())
 
 
 def _rgb_distance(a, b) -> float:
@@ -538,6 +550,38 @@ def _nudge_off_key(color: tuple[int, int, int]) -> tuple[int, int, int]:
     )
 
 
+def _map_flat_to_palette(flat: Image.Image, flat_palette: list[int]) -> Image.Image:
+    """Map a background-flattened RGB image onto a Gen-3 palette, keyed by mask.
+
+    ``flat_palette`` is a flat ``[R, G, B, ...]`` palette with the key at entry
+    0. The key must NOT compete in the nearest-colour search: it sits mid-range
+    in the light-warm-gray/beige region of RGB space, so a creature midtone (or
+    an anti-aliased seam between the 768-res faux pixels) closer to it than to
+    any creature centroid would nearest-map onto transparency — the enclosed
+    key speckle every sprite of the 2026-08-04 round carried (#90).
+    ``_nudge_off_key`` cannot prevent that: it moves *centroids* off the key,
+    but the per-pixel mapping was still free to pick the key entry.
+
+    So index 0 is assigned purely from the flatten: pixels the flatten keyed
+    are byte-exactly ``_KEY_COLOR`` and become index 0; every other pixel is
+    nearest-mapped against the palette *minus* its key entry (dither off, so a
+    diffused error can't smear creature pixels toward the key either) and
+    shifted back by one to land on the full palette's indices. The clamp
+    covers the pathological case of the mapping picking a zero-padded trailing
+    entry — colour-identical to reserved black, so it is sent to slot 1.
+    """
+    nokey = Image.new("P", (1, 1))
+    nokey.putpalette(flat_palette[3:])
+    mapped = flat.quantize(palette=nokey, dither=Image.Dither.NONE)
+    out = Image.new("P", flat.size)
+    out.putpalette(flat_palette)
+    out.putdata([
+        0 if p == _KEY_COLOR else (i + 1 if i < 255 else 1)
+        for p, i in zip(flat.get_flattened_data(), mapped.get_flattened_data())
+    ])
+    return out
+
+
 def _quantize_gen3(image: Image.Image, size: int | None = None) -> Image.Image:
     """Return a ``size`` x ``size`` ``P``-mode image obeying the Gen-3 palette contract.
 
@@ -571,17 +615,17 @@ def _quantize_gen3(image: Image.Image, size: int | None = None) -> Image.Image:
         used = sorted({idx for _, idx in quantized.getcolors(maxcolors=len(creature_pixels))})
         creature_colors = [_nudge_off_key(tuple(qpal[i * 3:i * 3 + 3])) for i in used]
 
-    # Assemble the deterministic palette and map every pixel against it (dither
-    # off). The key is index 0 with no duplicate, so background pixels resolve to
-    # index 0; creature pixels near pure black/white legitimately snap to the
-    # reserved slots without spending creature budget.
+    # Assemble the deterministic palette and map every pixel against it via
+    # ``_map_flat_to_palette``: index 0 comes from the flatten's byte-exact key
+    # pixels, creature pixels are mapped against the palette minus the key (so
+    # a midtone near the key can never fall onto transparency), and creature
+    # pixels near pure black/white legitimately snap to the reserved slots
+    # without spending creature budget.
     reserved = [_KEY_COLOR, (0, 0, 0), (255, 255, 255)]
     creature_colors = _dedupe_by_display_depth(creature_colors, reserved)
     palette_colors = reserved + creature_colors
     flat_palette = [channel for color in palette_colors for channel in color]
-    reference = Image.new("P", (1, 1))
-    reference.putpalette(flat_palette)
-    return flat.quantize(palette=reference, dither=Image.Dither.NONE)
+    return _map_flat_to_palette(flat, flat_palette)
 
 
 def _is_achromatic(r: int, g: int, b: int) -> bool:
@@ -775,32 +819,48 @@ def _fit_half_to_square(half: Image.Image) -> Image.Image:
 
 
 def procedural_squash(frame1: Image.Image, amount_px: int | None = None) -> Image.Image:
-    """Bottom-anchored vertical squash of ``frame1`` — the Gen-3 breathing frame.
+    """Content-aware squash-and-stretch of ``frame1`` — the Gen-3 breathing frame.
 
-    Compresses frame 1's content by ``amount_px`` rows and pastes it at
-    the bottom, so the creature's feet stay planted while the top compresses.
-    This is the fallback frame 2 whenever an img2img candidate is rejected, so
-    it is built to be genuinely good and to land inside the acceptance band.
+    Compresses the creature's *content bbox* by ``amount_px`` rows, widens it
+    by half that (classic squash-and-stretch — volume appears conserved, which
+    is what makes the compression read as breathing rather than shrinking) and
+    pastes it back bottom-anchored and horizontally centred on the original
+    content, so the feet stay planted. This is the default frame 2 whenever an
+    img2img candidate is rejected, so it has to read as visible motion on its
+    own: the old whole-canvas squash (``height // 48``) moved a mid-canvas
+    creature ~2% of its own height — imperceptible in the flip (#90).
 
-    ``amount_px`` defaults to ``height // 48`` (2px on a 96px sprite, 16px at
-    the native 768) so the squash reads the same at any sprite size; it is a
-    tunable eyeball placeholder (see the module spec). Operates entirely in
-    P-space (nearest-neighbour reuses existing indices) so the result shares
-    frame 1's exact palette without a re-quantize. Input is not mutated.
+    ``amount_px`` defaults to a fraction of the *content* height (not the
+    canvas), so the motion is equally visible however much of the frame the
+    creature fills; the ``// 16`` is a tunable eyeball placeholder (see the
+    module spec). Operates entirely in P-space (nearest-neighbour reuses
+    existing indices) so the result shares frame 1's exact palette without a
+    re-quantize. An all-background frame has nothing to squash and comes back
+    as a background canvas. Input is not mutated.
     """
     if frame1.mode != "P":
         raise ValueError(f"Expected palette-mode frame1 image, got {frame1.mode}")
     w, h = frame1.size
-    if amount_px is None:
-        amount_px = max(1, h // 48)
     background = _background_index(frame1)
-    # NEAREST in P-space introduces no new colours (indices are reused verbatim).
-    squashed = frame1.resize((w, h - amount_px), Image.NEAREST)
     canvas = Image.new("P", (w, h), background)
     canvas.putpalette(frame1.getpalette())
-    # Paste at (0, amount_px): bottom row aligns with the canvas bottom and the
-    # top ``amount_px`` rows become background.
-    canvas.paste(squashed, (0, amount_px))
+    bbox = _content_bbox(frame1, background)
+    if bbox is None:
+        return canvas
+    left, top, right, bottom = bbox  # right/bottom exclusive
+    content_w = right - left
+    content_h = bottom - top
+    if amount_px is None:
+        amount_px = max(1, content_h // 16)
+    amount_px = min(amount_px, content_h - 1)  # keep at least one row
+    stretch = amount_px // 2
+    new_w = min(w, content_w + 2 * stretch)
+    new_h = content_h - amount_px
+    # NEAREST in P-space introduces no new colours (indices are reused verbatim).
+    squashed = frame1.crop(bbox).resize((new_w, new_h), Image.NEAREST)
+    paste_left = round((left + right) / 2 - new_w / 2)
+    paste_left = max(0, min(w - new_w, paste_left))  # keep the stretch on-canvas
+    canvas.paste(squashed, (paste_left, bottom - new_h))
     return canvas
 
 
@@ -855,33 +915,100 @@ def difference_ratio(a: Image.Image, b: Image.Image) -> float:
     return differing / len(data_a)
 
 
+def silhouette_difference_ratio(a: Image.Image, b: Image.Image) -> float:
+    """Fraction (0.0-1.0) of pixels whose background/creature status differs.
+
+    A pixel counts only when it is the key (index 0) in exactly one of the two
+    same-palette P-mode images — the outline moved there. This is the part of
+    ``difference_ratio`` that measures *motion*: it is blind to a body pixel
+    changing colour in place, so palette churn cannot inflate it.
+    """
+    if a.size != b.size:
+        raise ValueError(f"Cannot compare different-size images: {a.size} vs {b.size}")
+    data_a = a.get_flattened_data()
+    data_b = b.get_flattened_data()
+    differing = sum(1 for x, y in zip(data_a, data_b) if (x == 0) != (y == 0))
+    return differing / len(data_a)
+
+
+def color_churn_ratio(a: Image.Image, b: Image.Image) -> float:
+    """Fraction (0.0-1.0) of pixels that are creature in both images but differ.
+
+    The complement of ``silhouette_difference_ratio`` within the diff: index
+    changes where both images agree the creature is — reshaded fur,
+    re-quantized boundaries — which read as colour flicker, not motion, when
+    the frames alternate.
+    """
+    if a.size != b.size:
+        raise ValueError(f"Cannot compare different-size images: {a.size} vs {b.size}")
+    data_a = a.get_flattened_data()
+    data_b = b.get_flattened_data()
+    churn = sum(1 for x, y in zip(data_a, data_b) if x != y and x != 0 and y != 0)
+    return churn / len(data_a)
+
+
+# Tunable eyeball placeholders for ``build_frame2``'s structural gate,
+# calibrated against the 2026-08-04 round (#90). The silhouette floor is under
+# one procedural squash's worth of outline motion (a 96px squash measures
+# ~0.013, the round's 768px squash frames 0.032-0.083); the ceiling marks
+# identity drift / teleporting. The churn cap is measured against the *squash*
+# (whose interior carries the intended motion), so genuine interior movement is
+# free and only unfaithful reshading pays: the round's 25 flicker false
+# positives all carried well over 0.05 of it.
+_FRAME2_MIN_SILHOUETTE = 0.01
+_FRAME2_MAX_SILHOUETTE = 0.10
+_FRAME2_MAX_COLOR_CHURN = 0.05
+
+
 def build_frame2(
     frame1: Image.Image,
     candidate: Image.Image | None = None,
-    low: float = 0.02,
-    high: float = 0.30,
+    min_silhouette: float = _FRAME2_MIN_SILHOUETTE,
+    max_silhouette: float = _FRAME2_MAX_SILHOUETTE,
+    max_churn: float = _FRAME2_MAX_COLOR_CHURN,
 ) -> Image.Image:
     """Turn frame 1 plus an optional candidate into a guaranteed-valid frame 2.
 
-    Accepts the candidate only when its palette-locked, recentred difference
-    from frame 1 lands inside ``[low, high]`` — below ``low`` is texture
-    shimmer (not motion), above ``high`` is identity drift / teleporting.
-    Otherwise (or with no candidate) falls back to ``procedural_squash``.
-    Always returns a valid P-mode frame of frame 1's size sharing its palette.
+    The procedural squash is the default frame 2; a palette-locked, recentred
+    candidate replaces it only when it passes the structural gate, whose three
+    conditions each kill one observed failure mode (#90):
 
-    ``low`` / ``high`` are tunable eyeball placeholders (see the module spec);
-    a later ML slice or a human is expected to tune them.
+    * silhouette motion vs frame 1 inside ``[min_silhouette, max_silhouette]``
+      — below is a static pose, above is identity drift / teleporting;
+    * silhouette *closer to the squash* than to frame 1 — the motion is the
+      intended pose change, not outline noise (the round's img2img candidates
+      mostly denoised the squash init back to frame 1's pose);
+    * colour churn vs the squash at most ``max_churn`` — the squash's interior
+      carries the intended movement, so honest interior motion costs nothing
+      here and only reshading (flicker) trips the cap.
+
+    Gating on raw ``difference_ratio`` vs frame 1 was the #90 false positive:
+    img2img + re-quantization churn alone flipped 5-25% of indices with no
+    pose change, so flicker always read as motion. Always returns a valid
+    P-mode frame of frame 1's size sharing its palette.
+
+    The thresholds are tunable eyeball placeholders (see the module spec); a
+    later ML slice or a human is expected to tune them.
     """
     if frame1.mode != "P":
         raise ValueError(f"Expected palette-mode frame1 image, got {frame1.mode}")
+    squash = procedural_squash(frame1)
     if candidate is None:
-        return procedural_squash(frame1)
-    locked = quantize_to_reference(candidate, frame1)  # also resizes to frame1's size
+        return squash
+    # enhance=False: the candidate's colours derive from frame 1's already-
+    # enhanced palette (via the squash init), so the lock must not enhance
+    # them a second time — see quantize_to_reference. Also resizes to frame1's
+    # size.
+    locked = quantize_to_reference(candidate, frame1, enhance=False)
     recentred = recenter_to_anchor(locked, frame1)
-    ratio = difference_ratio(recentred, frame1)
-    if low <= ratio <= high:
+    silhouette = silhouette_difference_ratio(recentred, frame1)
+    if (
+        min_silhouette <= silhouette <= max_silhouette
+        and silhouette_difference_ratio(recentred, squash) < silhouette
+        and color_churn_ratio(recentred, squash) <= max_churn
+    ):
         return recentred
-    return procedural_squash(frame1)
+    return squash
 
 
 def _make_generator(seed: int | None):
@@ -1079,9 +1206,10 @@ def generate_frame2(
     squash guarantees a real structural pose change to clean up, rather than
     the near-identical recolour img2img produces from an unmodified init
     image. The raw RGB candidate is then handed to ``build_frame2`` — which
-    palette-locks + recenters it, accepts it iff its difference from frame 1
-    is in-band, and otherwise falls back to the procedural squash itself. The
-    result always shares frame 1's exact 16-colour palette.
+    palette-locks + recenters it, accepts it iff it passes the structural gate
+    (real silhouette motion, low colour churn), and otherwise falls back to
+    the procedural squash itself. The result always shares frame 1's exact
+    16-colour palette.
     """
     frame1 = Image.open(front_sprite_path)
     squash_init = procedural_squash(frame1).convert("RGB").resize(
