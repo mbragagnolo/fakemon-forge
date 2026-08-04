@@ -20,8 +20,18 @@ _LORA_PATH = Path(__file__).parent.parent / "models" / "loras" / "pkspbf_nb_v1.s
 # bakes into the 16-colour palette.
 _LORA_SCALE = 1.0
 _GEN_SIZE = 768
-_NUM_STEPS = 30
+_NUM_STEPS = 28
 _CFG_SCALE = 5.5
+# CLIP's context window. Anything past it is silently dropped by the text
+# encoder — no error, no truncation marker in the output, just a prompt that
+# quietly stopped saying "white background".
+_CLIP_TOKEN_LIMIT = 77
+# Conservative CLIP tokens-per-word for this prompt vocabulary. Measured with
+# CLIPTokenizer("openai/clip-vit-large-patch14") over the spike prompts and
+# observed live prompts: 1.48-1.71, the high end being short tag-heavy strings
+# where the two special tokens weigh most. Rounded up, so the estimate errs
+# toward trimming a tag that would have fitted rather than losing the suffix.
+_TOKENS_PER_WORD = 1.8
 _SPRITE_SIZE = 768  # native SD render size — individual sprites keep full detail
 _PALETTE_COLORS = 16
 _KEY_COLOR = (200, 200, 168)  # Gen-3 transparency key colour (RGB).
@@ -79,11 +89,64 @@ _NEGATIVE_PROMPT = "worst quality, low quality, blurry, watermark, signature, te
 # there) — it is the sole reason the ``types`` argument threaded through the
 # generate_* functions below is accepted but never read. Anything mechanical
 # here would just fight the prompt the LLM already wrote.
+def _estimate_clip_tokens(text: str) -> int:
+    """Conservative CLIP token count for ``text``, without a real tokenizer.
+
+    ``build_prompt`` is torch-free and unit-tested with no ML stack installed,
+    so it cannot call ``CLIPTokenizer``. Words times ``_TOKENS_PER_WORD``, plus
+    the two special tokens CLIP wraps every sequence in.
+    """
+    return round(len(text.split()) * _TOKENS_PER_WORD) + 2
+
+
+def _trim_tags_to_fit(sprite_prompt: str, prefix: str, suffix: str) -> str:
+    """Drop trailing ``sprite_prompt`` tags until the whole prompt fits CLIP.
+
+    The style anchors live in ``suffix`` (``white background``, plus any
+    ``extra_tags``), so they are what an overflow would silently delete —
+    the creature description would survive intact and the *instructions* would
+    vanish. Trimming the description instead inverts that: the prompt loses its
+    least-important trailing detail and keeps every styling tag.
+
+    Ordering is deliberately left alone. Moving the anchors to the front would
+    also solve the overflow, but ``gen3, <description>, white background`` is
+    the exact shape the research spike validated, and this is a safety net for
+    a contract the LLM is already asked to satisfy — not a licence to redesign
+    a prompt that works. At least one tag is always kept.
+    """
+    tags = [t.strip() for t in sprite_prompt.split(",") if t.strip()]
+    kept: list[str] = []
+    for tag in tags:
+        candidate = ", ".join(kept + [tag])
+        if kept and _estimate_clip_tokens(prefix + candidate + suffix) > _CLIP_TOKEN_LIMIT:
+            break
+        kept.append(tag)
+    if len(kept) < len(tags):
+        print(
+            f"warning: build_prompt dropped {len(tags) - len(kept)} of {len(tags)} "
+            f"sprite_prompt tags to keep the style tags inside CLIP's "
+            f"{_CLIP_TOKEN_LIMIT}-token window",
+            file=sys.stderr,
+        )
+    return ", ".join(kept)
+
+
 def build_prompt(sprite_prompt: str, extra_tags: list[str] | None = None) -> str:
-    """Plain SDXL prompt string: type wording is baked into ``sprite_prompt`` upstream."""
+    """Plain SDXL prompt string: type wording is baked into ``sprite_prompt`` upstream.
+
+    Trims ``sprite_prompt`` if the assembled prompt would overrun CLIP's
+    context window, so the trailing style tags always survive — see
+    ``_trim_tags_to_fit``. The ``sprite_prompt`` spec in ``generator.py``
+    already caps length, so this should not normally fire; it exists because
+    the overflow it guards is silent, and a model that ignores the cap would
+    otherwise degrade sprite quality with nothing in the logs to say why.
+    """
+    prefix = "gen3, "
     if extra_tags:
-        return f"gen3, {sprite_prompt}, {', '.join(extra_tags)}, white background"
-    return f"gen3, {sprite_prompt}, white background"
+        suffix = f", {', '.join(extra_tags)}, white background"
+    else:
+        suffix = ", white background"
+    return prefix + _trim_tags_to_fit(sprite_prompt, prefix, suffix) + suffix
 
 
 def k_centroid(image: Image.Image, width: int, height: int, centroids: int = 2) -> Image.Image:

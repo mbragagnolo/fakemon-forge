@@ -35,6 +35,8 @@ from fakemon_forge.sprites import (
     _split_front_back_with_retry,
     _fit_half_to_square,
     _content_columns,
+    _estimate_clip_tokens,
+    _CLIP_TOKEN_LIMIT,
     _KEY_COLOR,
     _KEY_TOLERANCE,
     _MAX_CREATURE_COLORS,
@@ -125,6 +127,62 @@ def test_build_prompt_single_extra_tag_inserted_before_white_background():
 def test_build_prompt_multiple_extra_tags_joined_with_comma():
     result = build_prompt("chibi crab", ["chibi", "big head", "small body"])
     assert result == "gen3, chibi crab, chibi, big head, small body, white background"
+
+
+# ---------------------------------------------------------------------------
+# build_prompt() CLIP token guard
+# ---------------------------------------------------------------------------
+# CLIP drops everything past 77 tokens silently, and the style anchors sit at
+# the END of the assembled prompt — so an over-long sprite_prompt deletes
+# "white background" and the extra_tags, not itself. Observed live before the
+# generator.py contract was tightened: every prompt in a 3-stage run lost its
+# background instruction, and the vignetted backdrops that followed defeated
+# split_front_back_canvas on all 3 stages.
+
+def _long_sprite_prompt(n=14):
+    return ", ".join(f"distinctive shimmering feature number {i}" for i in range(n))
+
+
+def test_build_prompt_leaves_an_in_spec_prompt_completely_untouched():
+    """The guard is a safety net, not a rewriter: a prompt that already fits
+    must come out byte-identical to the plain formula."""
+    assert build_prompt("fire lizard") == "gen3, fire lizard, white background"
+    assert build_prompt("fire lizard", ["chibi"]) == "gen3, fire lizard, chibi, white background"
+
+
+def test_build_prompt_trims_the_description_not_the_style_tags():
+    result = build_prompt(_long_sprite_prompt(), ["chibi", "big head", "small body"])
+    assert result.startswith("gen3, distinctive shimmering feature number 0")
+    assert result.endswith(", chibi, big head, small body, white background")
+
+
+def test_build_prompt_trimmed_result_fits_the_token_limit():
+    result = build_prompt(_long_sprite_prompt(30))
+    assert _estimate_clip_tokens(result) <= _CLIP_TOKEN_LIMIT
+
+
+def test_build_prompt_drops_whole_tags_never_half_of_one():
+    """Cutting mid-tag would feed the model a fragment ("neon cyan and") that
+    reads as a different feature than the tag it came from."""
+    result = build_prompt(_long_sprite_prompt())
+    body = result[len("gen3, "):-len(", white background")]
+    for tag in body.split(", "):
+        assert tag.startswith("distinctive shimmering feature number ")
+
+
+def test_build_prompt_warns_when_it_trims(capsys):
+    build_prompt(_long_sprite_prompt())
+    err = capsys.readouterr().err
+    assert "build_prompt dropped" in err
+    assert "77-token window" in err
+
+
+def test_build_prompt_keeps_one_tag_even_when_that_alone_overruns():
+    """Degrade, never return an empty description — a prompt of pure style
+    tags would render an arbitrary creature rather than a trimmed one."""
+    huge = " ".join(["word"] * 200)
+    result = build_prompt(huge)
+    assert result == f"gen3, {huge}, white background"
 
 
 # ---------------------------------------------------------------------------
