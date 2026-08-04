@@ -1,5 +1,7 @@
 {
-  "_comment": "Observed Gen 3 base-stat-total bands. Aggregate statistics only - no species names, IDs or game-data references. Outer keys under stage-count buckets are 0-based stage indexes. Derived offline; regenerating requires excluding the unused placeholder slots, which the high-band count of 21 (legendary + mythical + box_legendary) verifies. box_legendary is recorded for completeness only - no tier targets it, since a fifth tier was declined during the #59 interview.",
+  "_comment": "Observed Gen 3 base-stat-total bands. Aggregate statistics only - no species names, IDs or game-data references. Outer keys under stage-count buckets are 0-based stage indexes. Derived offline; regenerating requires excluding the dummy record and the unused placeholder slots, which the high-band count of 21 (legendary + mythical + box_legendary) verifies. box_legendary is recorded for completeness only - no tier targets it, since a fifth tier was declined during the #59 interview.",
+  "_method": "median is the plain median; p10/p90 are nearest-rank percentiles (numpy method='nearest'). All nine non-pseudo buckets below were reproduced exactly from the source data under that rule, which is what pins the method - an interpolating percentile reproduces only 4 of the 9.",
+  "_pseudo_comment": "The pseudo bucket is a hand-picked subset of the 3-stage bucket, not a disjoint population: every one of its 4 lines is also counted in \"3\" above. n=4 is the entire observed population, so p10/p90 describe a floor and a ceiling rather than a distribution - the only spread anywhere in it is one middle stage that sits 10 below the other three.",
   "2": {
     "0": {"median": 305, "p10": 240, "p90": 360, "n": 84},
     "1": {"median": 468, "p10": 410, "p90": 515, "n": 84}
@@ -8,6 +10,11 @@
     "0": {"median": 295, "p10": 205, "p90": 314, "n": 37},
     "1": {"median": 405, "p10": 278, "p90": 420, "n": 37},
     "2": {"median": 518, "p10": 450, "p90": 600, "n": 37}
+  },
+  "pseudo": {
+    "0": {"median": 300, "p10": 300, "p90": 300, "n": 4},
+    "1": {"median": 420, "p10": 410, "p90": 420, "n": 4},
+    "2": {"median": 600, "p10": 600, "p90": 600, "n": 4}
   },
   "standalone": {"median": 430, "p10": 336, "p90": 500, "n": 54},
   "legendary": {"median": 580, "p10": 580, "p90": 580, "n": 9},

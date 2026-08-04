@@ -50,11 +50,16 @@ _P10, _MEDIAN, _P90 = 0, 1, 2
 #
 # The two numbers do different jobs. The median is what the prompt asks the
 # model for; the p10..p90 span is what `_bst_target` picks the enforced total
-# inside. `legendary` and `mythical` are flat in the observed data -- Gen 3
-# gives every one of them the same total -- so their bands are degenerate and
-# the pick is a no-op. `pseudo` has no observed band of its own: its row is the
-# hand-picked one #59 shipped, written flat for the same reason, so it resolves
-# to exactly the number the prompt names.
+# inside. Several bands are flat because the observed data is: Gen 3 gives every
+# legendary 580 and every mythical 600, and the four pseudo-legendary lines
+# agree on 300 and 600 for their outer stages. A flat band makes the pick a
+# no-op and the enforced total exactly the number the prompt names.
+#
+# `pseudo` is the one bucket that is not a whole observed population but a named
+# subset of the 3-stage one, and its n is 4. Its row is the #59 hand-picked one
+# re-derived from the source data: the medians came back identical, and the only
+# correction was a middle-stage floor of 410, since one of the four lines sits
+# 10 under the other three.
 #
 # `pseudo` has no 2-stage row on purpose -- every pseudo-legendary line is three
 # stages, and the CLI rejects the combination.
@@ -64,7 +69,7 @@ _BST_TARGETS = {
         2: ((240, 305, 360), (410, 468, 515)),
         3: ((205, 295, 314), (278, 405, 420), (450, 518, 600)),
     },
-    "pseudo":    {3: ((300, 300, 300), (420, 420, 420), (600, 600, 600))},
+    "pseudo":    {3: ((300, 300, 300), (410, 420, 420), (600, 600, 600))},
     "legendary": {1: ((580, 580, 580),)},
     "mythical":  {1: ((600, 600, 600),)},
 }

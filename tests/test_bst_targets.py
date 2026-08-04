@@ -71,7 +71,7 @@ def test_supported_lookups(tier, stage_count, expected):
     ("standard", 1, ((336, 430, 500),)),
     ("standard", 2, ((240, 305, 360), (410, 468, 515))),
     ("standard", 3, ((205, 295, 314), (278, 405, 420), (450, 518, 600))),
-    ("pseudo", 3, ((300, 300, 300), (420, 420, 420), (600, 600, 600))),
+    ("pseudo", 3, ((300, 300, 300), (410, 420, 420), (600, 600, 600))),
     ("legendary", 1, ((580, 580, 580),)),
     ("mythical", 1, ((600, 600, 600),)),
 ])
@@ -105,16 +105,27 @@ def test_every_band_is_a_p10_median_p90_triple():
 # ---------------------------------------------------------------------------
 
 # (tier, stage count) -> the fixture bucket each stage index maps to.
-# `pseudo` is absent on purpose: the fixture has no pseudo-legendary bucket, so
-# its row is hand-picked and cannot be checked against anything here. What holds
-# it honest instead is test_pseudo_row_is_flat below.
+# Every tier is covered: `pseudo` was hand-picked in #59 and re-derived from the
+# source data in #85, so there is no longer a row that answers to nothing.
 _BAND_OF = {
     ("standard", 1): ["standalone"],
     ("standard", 2): [("2", "0"), ("2", "1")],
     ("standard", 3): [("3", "0"), ("3", "1"), ("3", "2")],
+    ("pseudo", 3): [("pseudo", "0"), ("pseudo", "1"), ("pseudo", "2")],
     ("legendary", 1): ["legendary"],
     ("mythical", 1): ["mythical"],
 }
+
+
+def test_every_tier_row_is_checked_against_the_fixture():
+    """No unverifiable rows. A tier or stage count added to `_BST_TARGETS`
+    without a matching bucket would otherwise be hand-picked forever, which is
+    exactly the state `pseudo` was in before #85."""
+    covered = {(tier, count) for tier, count in _BAND_OF}
+    declared = {
+        (tier, count) for tier, rows in _BST_TARGETS.items() for count in rows
+    }
+    assert declared == covered
 
 
 def _band(bands: dict, key):
@@ -145,16 +156,40 @@ def test_every_band_is_ordered(tier):
             assert band[_P10] <= band[_MEDIAN] <= band[_P90]
 
 
-def test_pseudo_row_is_flat():
-    """No observed pseudo-legendary band exists, so the row carries no spread.
+def test_pseudo_outer_stages_are_flat_and_the_middle_is_not():
+    """The shape of the observed pseudo-legendary population, pinned exactly.
 
-    Every Gen 3 pseudo-legendary line runs 300/410-420/600, which is flat enough
-    that inventing a span would be fabricating data the fixture doesn't have.
-    Flat triples make `_bst_target` a no-op and the enforced total identical to
-    the number the prompt names.
+    All four lines open at 300 and finish at 600 — there is genuinely no spread
+    to pick inside, so those stages resolve to one number for every name. The
+    middle stage is the sole exception: one of the four sits 10 under the other
+    three, which is where the 410 floor comes from. Asserting the asymmetry
+    rather than just "flat" is what would catch the middle row being widened to
+    match a band it doesn't have.
     """
-    for band in _rows("pseudo", 3):
-        assert band[_P10] == band[_MEDIAN] == band[_P90]
+    opening, middle, final = _rows("pseudo", 3)
+    assert opening[_P10] == opening[_MEDIAN] == opening[_P90] == 300
+    assert final[_P10] == final[_MEDIAN] == final[_P90] == 600
+    assert middle == (410, 420, 420)
+
+
+def test_pseudo_is_a_subset_of_the_three_stage_bucket():
+    """`pseudo` is the one bucket that is not its own population — its lines are
+    also counted in "3". Recorded because the n values otherwise look like they
+    should sum with the others, and they don't."""
+    bands = _bands()
+    assert bands["pseudo"]["0"]["n"] == 4
+    assert bands["pseudo"]["0"]["n"] < bands["3"]["0"]["n"]
+
+
+@pytest.mark.parametrize("stage_index", ["0", "1", "2"])
+def test_every_pseudo_stage_sits_inside_the_three_stage_band(stage_index):
+    """The containment that makes the subset claim checkable: a pseudo stage
+    cannot fall outside the wider bucket it is drawn from."""
+    bands = _bands()
+    pseudo = bands["pseudo"][stage_index]
+    wider = bands["3"][stage_index]
+    assert wider["p10"] <= pseudo["p10"] <= wider["p90"]
+    assert wider["p10"] <= pseudo["p90"] <= wider["p90"]
 
 
 @pytest.mark.parametrize("tier", ["legendary", "mythical"])
@@ -329,14 +364,15 @@ def test_fixture_holds_only_numbers():
     """
     bands = _bands()
     allowed_stats = {"median", "p10", "p90", "n"}
+    nested = {"2", "3", "pseudo"}
     for key, value in bands.items():
         if key.startswith("_"):
             assert isinstance(value, str)
             continue
-        assert key in {
-            "2", "3", "standalone", "legendary", "mythical", "box_legendary",
+        assert key in nested | {
+            "standalone", "legendary", "mythical", "box_legendary",
         }
-        buckets = value.values() if key in {"2", "3"} else [value]
+        buckets = value.values() if key in nested else [value]
         for bucket in buckets:
             assert set(bucket) == allowed_stats
             assert all(isinstance(v, int) for v in bucket.values())
