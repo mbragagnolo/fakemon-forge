@@ -388,6 +388,18 @@ def test_quantize_to_reference_preserves_reserved_slots_through_lock():
     assert pal[6:9] == [255, 255, 255]  # reserved white
 
 
+def test_quantize_to_reference_never_keys_creature_midtones():
+    # Regression (#90): the reference palette holds no beige, so a midtone body
+    # sat closer to the key than to any reference entry and the lock mapped it
+    # to index 0 — transparency holes through the creature. Index 0 must come
+    # only from the flatten's background, never from colour proximity.
+    reference = _pp96(_sprite_rgb())
+    out = quantize_to_reference(_midtone_creature(), reference)
+    data = out.get_flattened_data()
+    body = [data[y * 96 + x] for y in range(28, 68) for x in range(28, 68)]
+    assert 0 not in body
+
+
 # ---------------------------------------------------------------------------
 # Back-sprite palette lock (pure core of the reference-locked back sprite)
 # ---------------------------------------------------------------------------
@@ -1858,8 +1870,8 @@ def _key_background_sprite(body):
     quantize_to_reference now flattens a candidate's background to the key, so a
     dark backdrop would key to index 0 too; pre-keying the backdrop keeps this
     helper explicit about matching frame 1's key background. Either way the sole
-    difference from frame 1 is the recoloured creature region, yielding an
-    in-band diff ratio.
+    difference from frame 1 is the recoloured creature region — palette churn on
+    a static silhouette.
     """
     img = _sprite_rgb(body=body)
     px = img.load()
@@ -1870,17 +1882,28 @@ def _key_background_sprite(body):
     return img
 
 
-def test_build_frame2_in_band_candidate_is_accepted():
+def test_build_frame2_recoloured_static_candidate_falls_back():
+    # Regression (#90): a candidate that is frame 1's silhouette with the body
+    # recoloured is pure colour flicker, not motion — 25/31 of the 2026-08-04
+    # round's candidates were exactly this shape and were accepted. The gate
+    # must reject it and fall back to the squash.
     frame1 = _pp96(_sprite_rgb())
-    # A moderately different creature with a key background (so its backdrop
-    # locks to index 0 like frame 1's) -> only the recoloured body differs ->
-    # in-band difference.
     candidate = _key_background_sprite(body=(90, 160, 210))
+    out = build_frame2(frame1, candidate)
+    assert list(out.get_flattened_data()) == list(procedural_squash(frame1).get_flattened_data())
+
+
+def test_build_frame2_structural_motion_with_low_churn_is_accepted():
+    # The positive control for the structural gate: a candidate that genuinely
+    # moved (a squash-like pose in frame 1's own colours, deviating from the
+    # default squash the way an img2img cleanup would) passes, so the gate is
+    # strict against flicker without becoming squash-only.
+    frame1 = _pp96(_sprite_rgb())
+    candidate = procedural_squash(frame1, amount_px=3).convert("RGB")
     out = build_frame2(frame1, candidate)
     squash = list(procedural_squash(frame1).get_flattened_data())
     assert list(out.get_flattened_data()) != squash
     assert out.getpalette() == frame1.getpalette()
-    assert 0.02 <= difference_ratio(out, frame1) <= 0.30
 
 
 def test_build_frame2_rejects_non_palette_frame1():
@@ -1962,6 +1985,40 @@ def test_quantize_gen3_enclosed_pocket_maps_to_index_0():
     px = out.load()
     for point in ((48, 48), (46, 48), (48, 46)):
         assert px[point] == 0
+
+
+def _midtone_creature():
+    """96x96 RGB: white background, outlined body of beige tones near the key.
+
+    Reproduces the 2026-08-04 key bleed: light beige/gray midtones (like the
+    anti-aliased seams between 768-res faux pixels) sit closer to the key
+    ``(200, 200, 168)`` than to some of the surviving creature centroids, so a
+    key that competes in the nearest-colour mapping swallows them as
+    transparency speckle inside the body.
+    """
+    img = Image.new("RGB", (96, 96), (255, 255, 255))
+    rng = random.Random(7)
+    px = img.load()
+    for y in range(24, 72):
+        for x in range(24, 72):
+            px[x, y] = (
+                210 + rng.randint(-15, 15),
+                200 + rng.randint(-15, 15),
+                160 + rng.randint(-15, 15),
+            )
+    ImageDraw.Draw(img).rectangle((22, 22, 73, 73), outline=(30, 30, 30), width=2)
+    return img
+
+
+def test_quantize_gen3_never_keys_creature_midtones():
+    # Regression (#90): every mon of the 2026-08-04 round carried enclosed key
+    # speckle inside the body (up to ~5,800 px at 768) because creature pixels
+    # nearer the key than any centroid nearest-mapped onto index 0. The key may
+    # only be assigned where the flatten keyed background, never by proximity.
+    out = _qg96(_midtone_creature())
+    data = out.get_flattened_data()
+    body = [data[y * 96 + x] for y in range(28, 68) for x in range(28, 68)]
+    assert 0 not in body
 
 
 def test_quantize_gen3_reserves_black_white_even_when_creature_uses_neither():
