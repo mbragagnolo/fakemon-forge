@@ -655,6 +655,22 @@ def test_system_prompt_bans_framing_words_in_sprite_prompt():
         assert f'"{banned}"' in _SYSTEM_PROMPT
 
 
+def test_system_prompt_bans_enclosing_and_scenery_words_in_sprite_prompt():
+    """An enclosing shape becomes the picture's frame, and a setting becomes
+    painted scenery. Both defeat the flat-backdrop precondition that
+    split_front_back_canvas and _flatten_background_to_key share (issue #83):
+    a live "porthole" tag rendered the whole creature inside a circular frame,
+    and a live battleship prompt painted a full cloudy sky."""
+    for banned in ("porthole", "frame", "vignette", "clouds", "background"):
+        assert f'"{banned}"' in _SYSTEM_PROMPT
+
+
+def test_system_prompt_redirects_enclosing_features_onto_the_body():
+    """The ban needs somewhere for a legitimately ship-like feature to go, or
+    the model just drops the detail — attach it to the body instead."""
+    assert "portholes set into its flank" in _SYSTEM_PROMPT
+
+
 def test_system_prompt_redirects_stage_growth_into_features():
     """The ban needs somewhere for the growth to go, or the model just picks a
     synonym — evolution shows as more/bigger features, and the numeric size

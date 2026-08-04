@@ -95,6 +95,16 @@ Each element represents one evolutionary stage and must have exactly these field
     horns, heavier armour plating, a more complex silhouette — never by calling
     the creature large. The size difference between stages belongs in height_dm
     and weight_hg, which is where it is actually recorded.
+    Every tag must describe the creature's own body. Never name anything that
+    encloses or sits behind it: no "porthole", "frame", "border", "ring",
+    "roundel", "emblem", "badge", "medallion", "vignette", "scene", "sky",
+    "clouds", "sea", "background". The sprite model draws whatever it is given,
+    so an enclosing shape becomes a frame around the picture and a setting
+    becomes painted scenery — and both destroy the flat backdrop the sprite
+    splitter and the background keyer need in order to work at all.
+    A feature that is normally part of a vehicle or a building must be attached
+    to the body to read as anatomy: write "portholes set into its flank", not
+    "porthole".
     It must also show the creature's types through what it looks like — flames or
     embers for Fire, fins or droplets for Water, wings or feathers for Flying, and
     so on for every type you assigned. The sprite model is given this string and
