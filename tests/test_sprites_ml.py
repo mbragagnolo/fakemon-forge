@@ -672,3 +672,86 @@ def test_frame2_falls_back_to_squash_on_garbage_candidate(tmp_path):
     frame1 = Image.open(str(front))
     expected = procedural_squash(frame1)
     assert list(Image.open(out).get_flattened_data()) == list(expected.get_flattened_data())
+
+
+# ---------------------------------------------------------------------------
+# _apply_lora -- text encoder LoRA loading
+# ---------------------------------------------------------------------------
+
+def _tiny_clip_config():
+    from transformers import CLIPTextConfig
+    return CLIPTextConfig(
+        vocab_size=99, hidden_size=32, intermediate_size=37,
+        num_hidden_layers=2, num_attention_heads=4,
+        bos_token_id=0, eos_token_id=2,
+    )
+
+
+class _TeLoraPipe:
+    """The minimal pipe surface `_apply_lora` touches, with real text encoders.
+
+    `load_lora_into_text_encoder` is the real diffusers classmethod, so the
+    state dict travels the same diffusers -> transformers/PEFT path as in
+    production. The unet leg is stubbed (the fixture file carries no unet
+    keys), and `fuse_lora` is stubbed so the adapter weights stay inspectable.
+    """
+
+    def __init__(self):
+        from types import SimpleNamespace
+        from transformers import CLIPTextModel, CLIPTextModelWithProjection
+        from diffusers.loaders.lora_pipeline import StableDiffusionXLLoraLoaderMixin
+
+        cfg = _tiny_clip_config()
+        self.text_encoder = CLIPTextModel(cfg)
+        self.text_encoder_2 = CLIPTextModelWithProjection(cfg)
+        self.unet = SimpleNamespace(config=None)
+        self.lora_scale = 1.0
+        self.hf_device_map = None
+        self.components = {}
+        self.load_lora_into_unet = MagicMock()
+        self.fuse_lora = MagicMock()
+        self.load_lora_into_text_encoder = (
+            StableDiffusionXLLoraLoaderMixin.load_lora_into_text_encoder
+        )
+
+
+def test_apply_lora_loads_te2_weights(tmp_path):
+    """Regression: transformers 5 registers a "strip the `text_model.` prefix"
+    checkpoint rename for model_type clip_text_model (CLIPTextModel was
+    flattened), but CLIPTextModelWithProjection shares that model_type while
+    keeping the `text_model.` wrapper -- so every te2 LoRA key was renamed away
+    during load_adapter, lora_B stayed at its zero init, and fuse_lora baked a
+    no-op into te2.
+    """
+    import torch
+    from safetensors.torch import save_file
+    from fakemon_forge.sprites import _apply_lora
+
+    down = torch.full((4, 32), 0.5)   # lora_A: (rank, in_features)
+    up = torch.full((32, 4), 0.25)    # lora_B: (out_features, rank)
+    lora_file = tmp_path / "tiny_lora.safetensors"
+    save_file(
+        {
+            # Both encoders' keys carry the `text_model.` level, exactly like
+            # the converted kohya file; _apply_lora strips it for te1 only
+            # (flattened CLIPTextModel) and keeps it for te2.
+            "text_encoder.text_model.encoder.layers.0.self_attn.q_proj.lora_A.weight": down,
+            "text_encoder.text_model.encoder.layers.0.self_attn.q_proj.lora_B.weight": up,
+            "text_encoder_2.text_model.encoder.layers.0.self_attn.q_proj.lora_A.weight": down.clone(),
+            "text_encoder_2.text_model.encoder.layers.0.self_attn.q_proj.lora_B.weight": up.clone(),
+        },
+        str(lora_file),
+    )
+
+    pipe = _TeLoraPipe()
+    with patch("fakemon_forge.sprites._LORA_PATH", lora_file):
+        _apply_lora(pipe)
+
+    te1_params = dict(pipe.text_encoder.named_parameters())
+    te2_params = dict(pipe.text_encoder_2.named_parameters())
+    assert torch.equal(
+        te1_params["encoder.layers.0.self_attn.q_proj.lora_B.default_0.weight"], up
+    )
+    assert torch.equal(
+        te2_params["text_model.encoder.layers.0.self_attn.q_proj.lora_B.default_0.weight"], up
+    )

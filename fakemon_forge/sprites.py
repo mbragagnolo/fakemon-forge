@@ -1294,6 +1294,27 @@ def _device_and_dtype():
 def _apply_lora(pipe) -> None:
     from diffusers.loaders.lora_pipeline import StableDiffusionXLLoraLoaderMixin
 
+    # transformers 5 flattened CLIPTextModel and registered a "strip the
+    # text_model. prefix" checkpoint rename keyed by model_type
+    # clip_text_model. CLIPTextModelWithProjection (te2) shares that
+    # model_type but kept the text_model wrapper, so the rename deletes every
+    # te2 LoRA key during load_adapter and the adapter silently stays at its
+    # zero init. A class-name entry takes lookup priority over model_type, so
+    # an empty one turns the rename off for te2 alone; the inner guard keeps
+    # this a no-op once transformers ships its own class-specific mapping.
+    # transformers < 5 has no conversion_mapping module and none of the bug,
+    # so there is nothing to patch there.
+    try:
+        from transformers.conversion_mapping import (
+            get_checkpoint_conversion_mapping,
+            register_checkpoint_conversion_mapping,
+        )
+    except ImportError:
+        pass
+    else:
+        if get_checkpoint_conversion_mapping("CLIPTextModelWithProjection") is None:
+            register_checkpoint_conversion_mapping("CLIPTextModelWithProjection", [])
+
     state_dict, network_alphas, metadata = StableDiffusionXLLoraLoaderMixin.lora_state_dict(
         str(_LORA_PATH), return_lora_metadata=True, unet_config=pipe.unet.config
     )

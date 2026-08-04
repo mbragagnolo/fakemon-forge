@@ -773,6 +773,11 @@ def _mock_modules(pipe_side_effect=None, cuda=False, lora_mod=None):
         "torch": mock_torch,
         "diffusers.loaders": MagicMock(),
         "diffusers.loaders.lora_pipeline": lora_mod or _make_lora_pipeline_mock(),
+        # _apply_lora imports these too; every module it touches must be faked
+        # here, or the import leaks past the sandbox and half-initializes the
+        # real transformers/numpy stack, breaking later ml-marked tests.
+        "transformers": MagicMock(),
+        "transformers.conversion_mapping": MagicMock(),
     }, mock_pipe_cls
 
 
@@ -1053,6 +1058,9 @@ def _mock_img2img_modules(pipe_side_effect=None, cuda=False):
         "torch": mock_torch,
         "diffusers.loaders": MagicMock(),
         "diffusers.loaders.lora_pipeline": _make_lora_pipeline_mock(),
+        # See _mock_modules: seal the sandbox around _apply_lora's imports.
+        "transformers": MagicMock(),
+        "transformers.conversion_mapping": MagicMock(),
     }, mock_pipe_cls
 
 
