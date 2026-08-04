@@ -201,6 +201,31 @@ def test_single_mode_writes_one_stage(forge):
     _assert_stage_is_complete(dirs[0], 1, "Flamburr")
 
 
+def test_run_json_written_at_run_root_for_a_real_cli_invocation(forge):
+    """End-to-end (issue #81): a real ``main()`` call, with only the client
+    and ML entry points faked, leaves a complete run.json manifest sitting
+    next to the stage folders it produced."""
+    client, output_root = forge(
+        ["--description", "fire lizard", "--mode", "line", "--stages", "2"],
+        _payload(2),
+    )
+
+    run_json_path = output_root / "Flamburr" / "run.json"
+    assert run_json_path.exists()
+    data = json.loads(run_json_path.read_text(encoding="utf-8"))
+
+    assert data["description"] == "fire lizard"
+    assert data["image"] is None
+    assert data["vision_description"] == ""
+    assert data["mode"] == "line"
+    assert data["tier"] == "standard"
+    assert data["requested_stages"] == 2
+    assert "fakemon-forge" in data["rerun_command"]
+    assert "--stages 2" in data["rerun_command"]
+    assert len(data["generated_stages"]) == 2
+    assert data["generated_stages"][0]["name"] == "Flamburr"
+
+
 # ---------------------------------------------------------------------------
 # The structure-identical guarantee, at full-prompt level
 # ---------------------------------------------------------------------------

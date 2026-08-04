@@ -79,7 +79,15 @@ def main(argv=None):
     pipeline = load_txt2img_pipeline()
     img2img_pipeline = make_img2img_pipeline(pipeline)
 
-    stage_dirs = write_output(forms)
+    run_info = {
+        "description": args.description,
+        "image": args.image,
+        "vision_description": vision_desc,
+        "mode": args.mode,
+        "tier": args.tier,
+        "requested_stages": args.stages if args.mode == "line" else None,
+    }
+    stage_dirs = write_output(forms, run_info)
 
     for stage, stage_dir in zip(forms, stage_dirs):
         seed = random.randint(0, 2**32 - 1)
