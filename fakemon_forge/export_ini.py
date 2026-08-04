@@ -15,13 +15,10 @@ _MAX_CATEGORY_LEN = 11
 
 # ── lookup tables ──────────────────────────────────────────────────────────────
 
-_TYPE_INDEX = {
-    "Normal": 0x00, "Fighting": 0x01, "Flying": 0x02, "Poison": 0x03,
-    "Ground": 0x04, "Rock": 0x05, "Bug": 0x06, "Ghost": 0x07,
-    "Steel": 0x08, "Fire": 0x0A, "Water": 0x0B, "Grass": 0x0C,
-    "Electric": 0x0D, "Psychic": 0x0E, "Ice": 0x0F, "Dragon": 0x10,
-    "Dark": 0x11, "Fairy": 0x00,  # Fairy → Normal
-}
+# Post-Gen-3 types the generator will not emit (it is constrained to the pool in
+# ``gen3_types.json``), kept so a hand-edited or pre-existing stats.json still
+# encodes rather than raising. Fairy has no Gen 3 byte, so it folds to Normal.
+_TYPE_ALIASES = {"Fairy": "Normal"}
 
 _TYPE_BODY_COLOR = {
     0x00: 8,  # Normal → White
@@ -79,6 +76,41 @@ _ABILITY_FALLBACK: dict[str, int] = {
 }
 
 # ── helpers ────────────────────────────────────────────────────────────────────
+
+@lru_cache(maxsize=1)
+def _type_index() -> dict[str, int]:
+    """Gen 3 type name -> byte index, read once.
+
+    Shares ``gen3_types.json`` with ``generator``, which offers the same pool to
+    the model — one list, so the types the model may pick and the types that can
+    be encoded cannot drift apart. Lazily, not at import, for the same reason as
+    ``_ability_table``.
+    """
+    table = json.loads((_RESOURCES / "gen3_types.json").read_text(encoding="utf-8"))
+    index = {name: int(idx) for idx, name in table.items()}
+    index.update({alias: index[target] for alias, target in _TYPE_ALIASES.items()})
+    return index
+
+
+def _resolve_type(name) -> int:
+    """Byte index for one type name, degrading to Normal on anything unknown.
+
+    ``generator`` constrains the model to the Gen 3 pool, so this should only
+    ever see valid names. It warns and continues rather than raising for the
+    sake of a stats.json written before that constraint existed (or edited by
+    hand): by the time the export runs, the sprites, cries and footprints of the
+    whole line are already on disk, and losing all of it over one bad type field
+    is the worse failure.
+    """
+    index = _type_index()
+    if isinstance(name, str) and name in index:
+        return index[name]
+    print(
+        f"warning: _resolve_type got unknown type {name!r}; falling back to Normal",
+        file=sys.stderr,
+    )
+    return index["Normal"]
+
 
 @lru_cache(maxsize=1)
 def _ability_table() -> dict[str, str]:
@@ -167,9 +199,9 @@ def _ev_yield(stats: dict) -> int:
 
 def _encode_base_stats(data: dict, ability1_idx: int, ability2_idx: int) -> str:
     s = data["base_stats"]
-    types = [t if t != "Fairy" else "Normal" for t in data["types"]]
-    t1 = _TYPE_INDEX[types[0]]
-    t2 = _TYPE_INDEX[types[1]] if len(types) > 1 else t1
+    types = [_resolve_type(t) for t in data["types"]]
+    t1 = types[0] if types else _type_index()["Normal"]
+    t2 = types[1] if len(types) > 1 else t1
     ev = _ev_yield(s)
 
     raw = bytes([

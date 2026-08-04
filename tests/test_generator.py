@@ -13,6 +13,8 @@ from fakemon_forge.generator import (
     _ALLOWED_NAME_CHARS,
     _SYSTEM_PROMPT,
     _ABILITY_POOL,
+    _TYPE_POOL,
+    _normalize_types,
     _HASH_SPACE,
     _MEDIAN,
     _STAT_KEYS,
@@ -1107,6 +1109,88 @@ def test_generate_fakemon_emits_abilities_gen3_on_every_stage():
     client = _make_client(json.dumps(_LINE))
     result = generate_fakemon("fire lizard", "line", client=client)
     assert [s["abilities_gen3"] for s in result] == [[], [], []]
+
+
+# ---------------------------------------------------------------------------
+# types field: pool constraint + repair
+# ---------------------------------------------------------------------------
+
+def test_type_pool_is_the_17_gen3_types():
+    assert len(_TYPE_POOL) == 17
+    assert "Fairy" not in _TYPE_POOL  # Gen 6; has no Gen 3 byte
+    assert set(_TYPE_POOL) == {
+        "Normal", "Fighting", "Flying", "Poison", "Ground", "Rock", "Bug",
+        "Ghost", "Steel", "Fire", "Water", "Grass", "Electric", "Psychic",
+        "Ice", "Dragon", "Dark",
+    }
+
+
+def test_system_prompt_lists_every_type():
+    for type_name in _TYPE_POOL:
+        assert type_name in _SYSTEM_PROMPT
+
+
+def test_system_prompt_forbids_inventing_a_type():
+    assert "Do not invent one" in _SYSTEM_PROMPT
+    assert "Sound" in _SYSTEM_PROMPT  # named as the example non-type
+
+
+def test_normalize_types_drops_an_invented_type():
+    """Regression: a generated line came back Grass/Sound and killed export_ini
+    with KeyError: 'Sound' after every sprite and cry had been rendered."""
+    assert _normalize_types(["Grass", "Sound"]) == ["Grass"]
+
+
+def test_normalize_types_canonicalizes_spelling():
+    assert _normalize_types(["grass", "FLYING"]) == ["Grass", "Flying"]
+    assert _normalize_types(["  water  "]) == ["Water"]
+
+
+def test_normalize_types_collapses_duplicates():
+    assert _normalize_types(["Fire", "fire"]) == ["Fire"]
+
+
+def test_normalize_types_caps_at_two():
+    assert _normalize_types(["Fire", "Water", "Grass"]) == ["Fire", "Water"]
+
+
+def test_normalize_types_drops_fairy():
+    """Fairy is outside the pool, so it is dropped rather than encoded; a
+    Water/Fairy concept lands as mono-Water."""
+    assert _normalize_types(["Water", "Fairy"]) == ["Water"]
+
+
+@pytest.mark.parametrize("raw", [[], ["Sound"], ["Fairy"], None, "Fire", [42], [None]])
+def test_normalize_types_never_returns_empty(raw):
+    """Every stage must carry a primary type for export_ini to encode."""
+    assert _normalize_types(raw) == ["Normal"]
+
+
+def test_normalize_repairs_types_on_every_stage():
+    stages = [
+        {**_STAGE_1, "types": ["Grass", "Sound"]},
+        {**_STAGE_2, "types": ["Sound"]},
+        {**_STAGE_3, "types": ["grass", "Poison"]},
+    ]
+    result = _normalize(stages, "line", "standard")
+    assert [s["types"] for s in result] == [
+        ["Grass"], ["Normal"], ["Grass", "Poison"],
+    ]
+
+
+def test_normalize_category_falls_back_to_a_repaired_type():
+    """The category fallback uses the primary type word, so it must never
+    inherit an invented type."""
+    stage = {**_STAGE_1, "types": ["Sound"], "category": ""}
+    result = _normalize([stage], "single", "standard")
+    assert result[0]["category"] == "NORMAL"
+
+
+def test_generate_fakemon_normalizes_types():
+    stage = {**_STAGE_1, "types": ["grass", "Sound"]}
+    client = _make_client(json.dumps([stage]))
+    result = generate_fakemon("singing onion", "single", client=client)
+    assert result[0]["types"] == ["Grass"]
 
 
 # ---------------------------------------------------------------------------

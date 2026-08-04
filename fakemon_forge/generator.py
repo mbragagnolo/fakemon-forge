@@ -10,7 +10,12 @@ _MODEL = "mistral-large-latest"
 _RESOURCES = Path(__file__).parent.parent / "resources"
 
 
-def _normalize_ability_name(name: str) -> str:
+def _lookup_key(name: str) -> str:
+    """Fold a name to its case- and space-insensitive lookup key.
+
+    Shared by the ability and type pools: both canonicalize whatever spelling
+    the model returned back onto the one form the ROM tables expect.
+    """
     return "".join(name.split()).lower()
 
 
@@ -20,7 +25,18 @@ _ABILITIES_BY_INDEX: dict[str, str] = json.loads(
 _ABILITY_POOL = [
     name for idx, name in _ABILITIES_BY_INDEX.items() if idx not in ("0", "76")
 ]
-_ABILITY_LOOKUP = {_normalize_ability_name(name): name for name in _ABILITY_POOL}
+_ABILITY_LOOKUP = {_lookup_key(name): name for name in _ABILITY_POOL}
+
+# The 17 Gen 3 types, shared with ``export_ini`` through one resource file so the
+# pool the model may pick from and the pool that can be encoded cannot drift
+# apart. Fairy is deliberately absent: it has no Gen 3 byte and export folds it
+# to Normal, so offering it would only invite a typing that cannot survive.
+_TYPES_BY_INDEX: dict[str, str] = json.loads(
+    (_RESOURCES / "gen3_types.json").read_text(encoding="utf-8")
+)
+_TYPE_POOL = list(_TYPES_BY_INDEX.values())
+_TYPE_LOOKUP = {_lookup_key(name): name for name in _TYPE_POOL}
+_DEFAULT_TYPE = "Normal"
 
 _MAX_NAME_LEN = 10
 _MAX_CATEGORY_LEN = 11
@@ -80,7 +96,13 @@ Each element represents one evolutionary stage and must have exactly these field
   name          – portmanteau-style name (string); max 10 characters, using only
     letters, digits, spaces, é, ♂, ♀ and the punctuation . , ' - … ! ? / ( ) " : ;
   stage         – stage number as an integer (1, 2, or 3)
-  types         – list of 1 or 2 type strings, e.g. ["Fire"] or ["Water", "Flying"]
+  types         – list of 1 or 2 distinct type strings, e.g. ["Fire"] or ["Water", "Flying"],
+    chosen only from this list:
+    {", ".join(_TYPE_POOL)}
+    These 17 are the only types that exist. Do not invent one (there is no Sound,
+    Light, Cosmic or Crystal type) and do not use Fairy — express the concept
+    through the closest listed type instead, and through the sprite and the
+    Pokédex entry.
   category      – Pokédex category noun in caps, max 11 characters, e.g. "SEED",
     "MOUSE", "TINY TURTLE". Describes what the creature *is*, not its type —
     never "FIRE" or "WATER". No trailing "POKEMON".
@@ -388,13 +410,41 @@ def _normalize_abilities_gen3(raw) -> list[str]:
     for entry in raw:
         if not isinstance(entry, str):
             continue
-        key = _normalize_ability_name(entry)
+        key = _lookup_key(entry)
         canonical = _ABILITY_LOOKUP.get(key)
         if canonical is None or key in seen:
             continue
         seen.add(key)
         result.append(canonical)
     return result[:2]
+
+
+def _normalize_types(raw) -> list[str]:
+    """Drop entries outside the 17 Gen 3 types, canonicalize spelling, collapse
+    duplicates, then cap at 2 — the same order, and for the same reason, as
+    ``_normalize_abilities_gen3``.
+
+    Never returns empty: anything that cleans away to nothing degrades to
+    ``_DEFAULT_TYPE`` rather than raising, because every stage must carry a
+    primary type for ``export_ini`` to encode. The prompt already constrains the
+    model to the pool; this is what makes an invented type ("Sound") a repaired
+    field instead of a ``KeyError`` at the very end of the run, after every
+    sprite and cry in the line has already been generated.
+    """
+    if not isinstance(raw, list):
+        return [_DEFAULT_TYPE]
+    result = []
+    seen = set()
+    for entry in raw:
+        if not isinstance(entry, str):
+            continue
+        key = _lookup_key(entry)
+        canonical = _TYPE_LOOKUP.get(key)
+        if canonical is None or key in seen:
+            continue
+        seen.add(key)
+        result.append(canonical)
+    return result[:2] or [_DEFAULT_TYPE]
 
 
 _POKEMON_SUFFIX = " POKEMON"
@@ -426,8 +476,9 @@ def _type_word(types) -> str:
 
     An absent or empty ``types`` degrades to NORMAL rather than raising:
     category is cosmetic, and _normalize's contract is that it repairs in
-    process. A genuinely typeless stage still fails later in export_ini,
-    where the type bytes actually matter.
+    process. Within ``_normalize`` this fallback is now unreachable — types are
+    repaired first, and ``_normalize_types`` never returns empty — but it is kept
+    for callers that reach here with a raw, unrepaired stage dict.
     """
     if isinstance(types, list) and types and isinstance(types[0], str):
         return types[0].upper()
@@ -676,7 +727,7 @@ def _normalize(
 ) -> list[dict]:
     """Post-parse cleanup pass: enforces the name contract, rescales base_stats
     onto their band target, defaults/clamps height_dm and weight_hg, and filters
-    abilities_gen3 to the Gen 3 pool.
+    both types and abilities_gen3 to their Gen 3 pools.
 
     Repair is idempotent: a name already inside the Gen 3 contract comes out
     of ``_repair_name`` unchanged, so valid names pass through untouched.
@@ -697,6 +748,9 @@ def _normalize(
         if "pokedex_entry" in stage:
             stage["pokedex_entry"] = _repair_entry(stage["pokedex_entry"])
         stage["abilities_gen3"] = _normalize_abilities_gen3(stage.get("abilities_gen3", []))
+        # Before category: it falls back to the primary type word, which must be
+        # a real type rather than whatever the model invented.
+        stage["types"] = _normalize_types(stage.get("types"))
         stage["category"] = _normalize_category(stage.get("category"), stage.get("types"))
 
         band = _stage_band(stage, mode, tier, stage_count, index)
