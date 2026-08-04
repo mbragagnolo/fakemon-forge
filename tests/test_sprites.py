@@ -46,8 +46,15 @@ from fakemon_forge.sprites import (
     load_img2img_pipeline,
     make_img2img_pipeline,
     _BASE_MODEL_ID,
+    _LORA_DIR,
     _LORA_PATH,
     _LORA_SCALE,
+    _SPRITE_ADAPTER,
+    _ACCEL_LORAS,
+    _NUM_STEPS,
+    _CFG_SCALE,
+    _CLIP_SKIP,
+    _NEGATIVE_PROMPT,
 )
 
 
@@ -729,6 +736,35 @@ def test_backend_constants_point_at_the_sdxl_stack():
     assert _LORA_PATH.parent.name == "loras"
 
 
+def test_accel_lora_filenames_and_weights_match_the_authors_stack():
+    # Same contract as _LORA_PATH, for the three step-distillation LoRAs: the
+    # filenames are what a manual download must produce, and the weights are
+    # the ones the sprite LoRA's author publishes alongside it.
+    assert dict((f, w) for _, f, w in _ACCEL_LORAS) == {
+        "Hyper-SDXL-8steps-lora.safetensors": 0.4,
+        "sdxl_lightning_2step_lora.safetensors": 0.3,
+        "sd_xl_turbo_lora_v1-64dim.safetensors": 0.3,
+    }
+    assert all((_LORA_DIR / f).parent.name == "loras" for _, f, _ in _ACCEL_LORAS)
+
+
+def test_adapter_names_are_unique():
+    # set_adapters() keys on these; a collision would silently drop a LoRA.
+    names = [_SPRITE_ADAPTER, *(n for n, _, _ in _ACCEL_LORAS)]
+    assert len(set(names)) == len(names)
+
+
+def test_distilled_sampling_constants():
+    # The distillation LoRAs, the step count and the guidance scale are one
+    # package (see the _ACCEL_LORAS comment) — pinned together so a later tweak
+    # to one has to confront the others.
+    assert _NUM_STEPS == 10
+    assert _CFG_SCALE == 2.5
+    # diffusers counts layers skipped; Civitai/A1111 display this as "2".
+    assert _CLIP_SKIP == 1
+    assert _NEGATIVE_PROMPT is None
+
+
 def _make_lora_pipeline_mock(state_dict=None, network_alphas=None):
     mock_mixin = MagicMock()
     mock_mixin.lora_state_dict.return_value = (
@@ -780,6 +816,8 @@ class _NoTilingPipe:
         self.lora_scale = 1.0
         self.load_lora_into_unet = MagicMock()
         self.load_lora_into_text_encoder = MagicMock()
+        self.load_lora_weights = MagicMock()
+        self.set_adapters = MagicMock()
         self.fuse_lora = MagicMock()
 
 
@@ -814,7 +852,52 @@ def test_load_applies_lora_weights():
     pipe = mock_pipe_cls.from_pretrained.return_value
     pipe.load_lora_into_unet.assert_called_once()
     assert pipe.load_lora_into_text_encoder.call_count == 2
-    pipe.fuse_lora.assert_called_once_with(lora_scale=_LORA_SCALE)
+    # Weights ride on the adapters, so the fuse must not carry a scale of its
+    # own — fuse_lora's lora_scale multiplies every adapter alike and would
+    # rescale the whole stack.
+    pipe.fuse_lora.assert_called_once_with()
+
+
+def test_load_names_the_sprite_adapter_on_every_component():
+    # set_adapters() addresses adapters by name; an unnamed load lands under a
+    # generated default the weight list below could not then refer to.
+    mods, mock_pipe_cls = _mock_modules()
+    with patch.dict("sys.modules", mods):
+        load_txt2img_pipeline()
+    pipe = mock_pipe_cls.from_pretrained.return_value
+    assert pipe.load_lora_into_unet.call_args.kwargs["adapter_name"] == _SPRITE_ADAPTER
+    for call in pipe.load_lora_into_text_encoder.call_args_list:
+        assert call.kwargs["adapter_name"] == _SPRITE_ADAPTER
+
+
+def test_load_loads_every_accel_lora_under_its_own_adapter():
+    mods, mock_pipe_cls = _mock_modules()
+    with patch.dict("sys.modules", mods):
+        load_txt2img_pipeline()
+    pipe = mock_pipe_cls.from_pretrained.return_value
+    loaded = [
+        (call.args[0], call.kwargs["adapter_name"])
+        for call in pipe.load_lora_weights.call_args_list
+    ]
+    assert loaded == [(str(_LORA_DIR / f), n) for n, f, _ in _ACCEL_LORAS]
+
+
+def test_load_sets_adapter_weights_before_fusing():
+    mods, mock_pipe_cls = _mock_modules()
+    with patch.dict("sys.modules", mods):
+        load_txt2img_pipeline()
+    pipe = mock_pipe_cls.from_pretrained.return_value
+    pipe.set_adapters.assert_called_once_with(
+        [_SPRITE_ADAPTER, *(n for n, _, _ in _ACCEL_LORAS)],
+        [_LORA_SCALE, *(w for _, _, w in _ACCEL_LORAS)],
+    )
+    # fuse_lora bakes in whatever scaling the adapters carry at the time, so
+    # ordering here is the difference between the stack and a flat fuse.
+    assert pipe.method_calls.index(
+        next(c for c in pipe.method_calls if c[0] == "set_adapters")
+    ) < pipe.method_calls.index(
+        next(c for c in pipe.method_calls if c[0] == "fuse_lora")
+    )
 
 
 def test_load_lora_state_dict_passes_unet_config():
@@ -924,14 +1007,21 @@ def test_load_tolerates_empty_network_alphas():
     assert calls["text_encoder"].kwargs["network_alphas"] == {}
 
 
-def test_load_sets_euler_ancestral_scheduler():
+def test_load_sets_euler_scheduler():
+    # Plain Euler, not Ancestral: ancestral noise injection has nowhere to go
+    # in a 10-step distilled schedule.
     mods, mock_pipe_cls = _mock_modules()
     with patch.dict("sys.modules", mods):
         load_txt2img_pipeline()
     pipe = mock_pipe_cls.from_pretrained.return_value
-    scheduler_cls = mods["diffusers"].EulerAncestralDiscreteScheduler
+    scheduler_cls = mods["diffusers"].EulerDiscreteScheduler
     scheduler_cls.from_config.assert_called_once()
     assert pipe.scheduler is scheduler_cls.from_config.return_value
+    mods["diffusers"].EulerAncestralDiscreteScheduler.from_config.assert_not_called()
+    # Load-bearing, and silent when wrong: the base config says "leading",
+    # which puts a 10-step schedule ~100 timesteps off what the distillation
+    # LoRAs were trained on. Nothing errors — the render just under-denoises.
+    assert scheduler_cls.from_config.call_args.kwargs["timestep_spacing"] == "trailing"
 
 
 def test_load_enables_model_cpu_offload_on_cuda():
@@ -1065,15 +1155,34 @@ def test_load_img2img_applies_lora_weights():
     pipe = mock_pipe_cls.from_pretrained.return_value
     pipe.load_lora_into_unet.assert_called_once()
     assert pipe.load_lora_into_text_encoder.call_count == 2
-    pipe.fuse_lora.assert_called_once_with(lora_scale=_LORA_SCALE)
+    pipe.fuse_lora.assert_called_once_with()
 
 
-def test_load_img2img_sets_euler_ancestral_scheduler():
+def test_load_img2img_stacks_the_accel_loras_too():
+    # The img2img pipeline is loaded independently of the txt2img one, so the
+    # stack has to be applied on both paths or frame 2 / chibi silently render
+    # against a different model than the front sprite.
     mods, mock_pipe_cls = _mock_img2img_modules()
     with patch.dict("sys.modules", mods):
         load_img2img_pipeline()
     pipe = mock_pipe_cls.from_pretrained.return_value
-    scheduler_cls = mods["diffusers"].EulerAncestralDiscreteScheduler
+    loaded = [
+        (call.args[0], call.kwargs["adapter_name"])
+        for call in pipe.load_lora_weights.call_args_list
+    ]
+    assert loaded == [(str(_LORA_DIR / f), n) for n, f, _ in _ACCEL_LORAS]
+    pipe.set_adapters.assert_called_once_with(
+        [_SPRITE_ADAPTER, *(n for n, _, _ in _ACCEL_LORAS)],
+        [_LORA_SCALE, *(w for _, _, w in _ACCEL_LORAS)],
+    )
+
+
+def test_load_img2img_sets_euler_scheduler():
+    mods, mock_pipe_cls = _mock_img2img_modules()
+    with patch.dict("sys.modules", mods):
+        load_img2img_pipeline()
+    pipe = mock_pipe_cls.from_pretrained.return_value
+    scheduler_cls = mods["diffusers"].EulerDiscreteScheduler
     assert pipe.scheduler is scheduler_cls.from_config.return_value
 
 

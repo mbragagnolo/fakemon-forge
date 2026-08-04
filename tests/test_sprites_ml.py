@@ -21,6 +21,7 @@ from fakemon_forge.sprites import (
     _content_bbox,
     _NUM_STEPS,
     _CFG_SCALE,
+    _CLIP_SKIP,
     _NEGATIVE_PROMPT,
 )
 
@@ -219,6 +220,25 @@ def test_pipeline_called_with_guidance_scale(tmp_path):
     assert pipe.call_args.kwargs["guidance_scale"] == _CFG_SCALE
 
 
+def test_pipeline_called_with_clip_skip(tmp_path):
+    # Omitting clip_skip entirely is the silent failure mode here: diffusers
+    # defaults to the final text-encoder layer, which is not where the
+    # NoobAI-family base (or the reference renders) sample from.
+    pipe = _fake_pipeline(_rgb_image())
+    out = tmp_path / "sprite.png"
+    generate_sprite("fire lizard", [], str(out), pipeline=pipe)
+    assert pipe.call_args.kwargs["clip_skip"] == _CLIP_SKIP
+
+
+def test_img2img_pipeline_called_with_clip_skip(tmp_path):
+    init_img = tmp_path / "drawing.png"
+    _rgb_image(100, 100).save(str(init_img))
+    pipe = _fake_img2img_pipeline(_rgb_image())
+    out = tmp_path / "sprite.png"
+    generate_sprite_img2img("fire lizard", [], str(init_img), str(out), pipeline=pipe)
+    assert pipe.call_args.kwargs["clip_skip"] == _CLIP_SKIP
+
+
 def test_pipeline_called_exactly_once(tmp_path):
     pipe = _fake_pipeline(_rgb_image())
     out = tmp_path / "sprite.png"
@@ -248,6 +268,7 @@ def test_pair_pipeline_called_with_prompt_and_negative_prompt(tmp_path):
     assert kwargs["negative_prompt"] == _NEGATIVE_PROMPT
     assert kwargs["num_inference_steps"] == _NUM_STEPS
     assert kwargs["guidance_scale"] == _CFG_SCALE
+    assert kwargs["clip_skip"] == _CLIP_SKIP
 
 
 def test_pair_happy_path_calls_pipeline_exactly_once(tmp_path):

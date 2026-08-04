@@ -7,22 +7,45 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageEnhance
 
 _BASE_MODEL_ID = "Laxhar/noobai-XL-1.1"
-# Manual download required (never committed; models/ is gitignored): Civitai
-# model 378602, "Pokemon Sprite XL PixelArt back&front" (login required).
-_LORA_PATH = Path(__file__).parent.parent / "models" / "loras" / "pkspbf_nb_v1.safetensors"
-# Fuse the sprite LoRA at full strength, and keep CFG low. Both match the
-# research spike that produced the output this backend was adopted for
-# (prototype/gen_noobai.py at fb4dd19: fuse_lora(lora_scale=1.0),
-# guidance_scale=5.5). Shipping at 0.7 / 7 instead was a silent quality
-# regression: the LoRA is the only thing making the render read as a Gen-3
-# sprite rather than generic anime art, so weakening it to 70% costs exactly
-# the property it was adopted for, and NoobAI/Illustrious-family bases are
-# tuned for low CFG — 7 oversaturates and hardens edges the quantiser then
-# bakes into the 16-colour palette.
+# Manual downloads, never committed (models/ is gitignored). The filenames are
+# the contract with whoever fetches them.
+_LORA_DIR = Path(__file__).parent.parent / "models" / "loras"
+# Civitai model 378602, "Pokemon Sprite XL PixelArt back&front" (login required).
+_LORA_PATH = _LORA_DIR / "pkspbf_nb_v1.safetensors"
+_SPRITE_ADAPTER = "sprite"
+# Fuse the sprite LoRA at full strength: it is the only thing making the render
+# read as a Gen-3 sprite rather than generic anime art, so weakening it costs
+# exactly the property it was adopted for.
 _LORA_SCALE = 1.0
+# The sprite LoRA's author ships it stacked with three step-distillation LoRAs,
+# and the sample prompt on its Civitai page gives the weights used here:
+# <lora:pkspbf_nb_v1:1> <lora:Hyper-SDXL-8steps-lora:.4>
+# <lora:sdxl_lightning_2step_lora:.3> <lora:sd_xl_turbo_lora_v1:.3>. They are
+# not a stylistic garnish — a reference render on that stack reports CFG 2.5 /
+# 10 steps / Euler, i.e. the distillation is load-bearing and _NUM_STEPS and
+# _CFG_SCALE below are part of the same package. Fusing pkspbf alone (what this
+# module did before) left the LoRA sampled at a schedule it was never posed
+# against: soft edges, no consistent 1px outline, glow smearing into the
+# background — the exact failure the quantiser then bakes into 16 colours.
+# All three are UNet-only kohya files, so they skip the text-encoder key
+# surgery `_apply_lora` needs for pkspbf.
+# Civitai model versions 477793 / 391994 / 243508.
+_ACCEL_LORAS = (
+    ("hyper", "Hyper-SDXL-8steps-lora.safetensors", 0.4),
+    ("lightning", "sdxl_lightning_2step_lora.safetensors", 0.3),
+    ("turbo", "sd_xl_turbo_lora_v1-64dim.safetensors", 0.3),
+)
 _GEN_SIZE = 768
-_NUM_STEPS = 28
-_CFG_SCALE = 5.5
+# Step count and CFG belong to the distilled stack above; they are not
+# independently tunable. Distillation collapses the sampler toward confident,
+# high-contrast output in few steps, and the guidance range comes down with it
+# — at 28 steps / CFG 5.5 the stack over-bakes.
+_NUM_STEPS = 10
+_CFG_SCALE = 2.5
+# Penultimate text-encoder layer, the convention NoobAI-family bases are used
+# at. NOTE the off-by-one: diffusers counts layers *skipped*, A1111/Civitai
+# count the last layer as 1, so this is what their UIs display as "CLIP skip 2".
+_CLIP_SKIP = 1
 # CLIP's context window. Anything past it is silently dropped by the text
 # encoder — no error, no truncation marker in the output, just a prompt that
 # quietly stopped saying "white background".
@@ -102,7 +125,13 @@ _SPLIT_SEARCH_HIGH = 0.6
 # width. Height stays ``_GEN_SIZE``.
 _PAIR_WIDTH = 1536
 
-_NEGATIVE_PROMPT = "worst quality, low quality, blurry, watermark, signature, text, jpeg artifacts"
+# No negative prompt. Negative guidance is only as strong as the gap between
+# the conditional and unconditional branches, so at _CFG_SCALE 2.5 a negative
+# barely bites — and the booru quality tags this used to carry ("blurry",
+# "low quality") pull a NoobAI-family base toward smooth painterly rendering,
+# which is the opposite of what a pixel sprite wants. The reference renders on
+# this stack use an empty negative.
+_NEGATIVE_PROMPT = None
 
 
 # The SD1.5 LoRA this backend replaced had a trained "firetype"/"watertype"
@@ -904,6 +933,7 @@ def generate_sprite(
         height=_GEN_SIZE,
         num_inference_steps=_NUM_STEPS,
         guidance_scale=_CFG_SCALE,
+        clip_skip=_CLIP_SKIP,
         generator=_make_generator(seed),
     )
     sprite = postprocess(result.images[0])
@@ -981,6 +1011,7 @@ def generate_sprite_pair(
             height=_GEN_SIZE,
             num_inference_steps=_NUM_STEPS,
             guidance_scale=_CFG_SCALE,
+            clip_skip=_CLIP_SKIP,
             generator=_make_generator(render_seed),
         )
         return result.images[0]
@@ -1019,6 +1050,7 @@ def _run_img2img_on_image(
         image=init,
         num_inference_steps=_NUM_STEPS,
         guidance_scale=_CFG_SCALE,
+        clip_skip=_CLIP_SKIP,
         generator=_make_generator(seed),
         strength=strength,
     )
@@ -1171,7 +1203,7 @@ def _apply_lora(pipe) -> None:
     )
     pipe.load_lora_into_unet(
         state_dict, network_alphas=network_alphas, unet=pipe.unet,
-        metadata=metadata, _pipeline=pipe,
+        adapter_name=_SPRITE_ADAPTER, metadata=metadata, _pipeline=pipe,
     )
 
     def _drop_text_model(d, prefix):
@@ -1190,9 +1222,23 @@ def _apply_lora(pipe) -> None:
         al = _drop_text_model(network_alphas, prefix) if fix else network_alphas
         pipe.load_lora_into_text_encoder(
             sd, network_alphas=al, text_encoder=encoder, prefix=prefix,
-            lora_scale=pipe.lora_scale, metadata=metadata, _pipeline=pipe,
+            lora_scale=pipe.lora_scale, adapter_name=_SPRITE_ADAPTER,
+            metadata=metadata, _pipeline=pipe,
         )
-    pipe.fuse_lora(lora_scale=_LORA_SCALE)
+
+    # The accel LoRAs are UNet-only and in stock kohya layout, so the ordinary
+    # loader handles them — no key surgery, one adapter each.
+    for name, filename, _ in _ACCEL_LORAS:
+        pipe.load_lora_weights(str(_LORA_DIR / filename), adapter_name=name)
+
+    # Per-adapter weights have to be set before fusing: ``fuse_lora`` bakes in
+    # whatever scaling the adapters currently carry, and its own ``lora_scale``
+    # is a multiplier over all of them, so it cannot express a stack.
+    pipe.set_adapters(
+        [_SPRITE_ADAPTER, *(name for name, _, _ in _ACCEL_LORAS)],
+        [_LORA_SCALE, *(weight for _, _, weight in _ACCEL_LORAS)],
+    )
+    pipe.fuse_lora()
 
 
 def _enable_vram_measures(pipe):
@@ -1221,12 +1267,28 @@ def _enable_vram_measures(pipe):
 
 
 def _load_base_pipeline(pipe_cls):
-    from diffusers import EulerAncestralDiscreteScheduler
+    # Plain Euler, not the Ancestral variant: ancestral sampling injects fresh
+    # noise at every step, which a 10-step distilled schedule has no room left
+    # to resolve. The reference renders on this stack report "Euler".
+    #
+    # ``timestep_spacing="trailing"`` is not optional and not a taste call — it
+    # is what ByteDance's own diffusers instructions specify for both the
+    # Lightning and Hyper-SD LoRAs. The base ships "leading" (plus
+    # steps_offset=1), which at _NUM_STEPS=10 yields timesteps
+    # [901, 801, ... 1] against the [999, 899, ... 99] the distillation was
+    # trained on: every step lands ~100 timesteps off, a full step of
+    # misalignment, and the model under-denoises into pale ghosts. At the
+    # pre-distillation 28 steps the same bug is invisible (leading starts at
+    # 946, in much finer increments), so it only bites in the few-step regime
+    # the accel LoRAs exist to enable.
+    from diffusers import EulerDiscreteScheduler
 
     device, dtype = _device_and_dtype()
     pipe = pipe_cls.from_pretrained(_BASE_MODEL_ID, torch_dtype=dtype)
     _apply_lora(pipe)
-    pipe.scheduler = EulerAncestralDiscreteScheduler.from_config(pipe.scheduler.config)
+    pipe.scheduler = EulerDiscreteScheduler.from_config(
+        pipe.scheduler.config, timestep_spacing="trailing",
+    )
     if device != "cuda":
         return pipe.to(device)
     return _enable_vram_measures(pipe)
