@@ -477,6 +477,23 @@ def _run_info_arg(mock_write):
     return mock_write.call_args.args[1]
 
 
+def test_write_output_receives_run_info_combined_prompt(ctx):
+    main(["--description", "fire lizard"])
+    assert _run_info_arg(ctx["write"])["combined_prompt"] == "fire lizard"
+
+
+def test_run_info_combined_prompt_merges_vision_and_description(ctx, tmp_path):
+    # This is the field's whole reason to exist: an --image run's description
+    # is not what reached the generator, the joined blob is.
+    img = tmp_path / "scan.png"
+    img.write_bytes(b"x")
+    ctx["vision"].return_value = "a round blue creature"
+    main(["--image", str(img), "--description", "make it electric"])
+    run_info = _run_info_arg(ctx["write"])
+    assert run_info["combined_prompt"] == "a round blue creature\n\nmake it electric"
+    assert run_info["combined_prompt"] != run_info["description"]
+
+
 def test_write_output_receives_run_info_description(ctx):
     main(["--description", "fire lizard"])
     assert _run_info_arg(ctx["write"])["description"] == "fire lizard"

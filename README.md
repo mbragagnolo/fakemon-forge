@@ -47,6 +47,7 @@ no success flags.
   "description": "a fire lizard with blue flames",
   "image": null,
   "vision_description": "",
+  "combined_prompt": "a fire lizard with blue flames",
   "mode": "line",
   "tier": "standard",
   "requested_stages": 3,
@@ -64,6 +65,11 @@ no success flags.
 single`, where the flag does not apply); it can differ from
 `len(generated_stages)` when the model returns a different number of stages
 than was asked for.
+
+`combined_prompt` is the exact text handed to the description model. For a
+text-only run it repeats `description`; for an `--image` run it is
+`vision_description` and `description` joined, which is the only record of what
+the model actually received — the drawing itself never reaches it as pixels.
 
 ### stats.json shape
 

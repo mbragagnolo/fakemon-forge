@@ -54,6 +54,7 @@ _RUN_INFO = {
     "description": "a fire lizard with blue flames",
     "image": None,
     "vision_description": "",
+    "combined_prompt": "a fire lizard with blue flames",
     "mode": "single",
     "tier": "standard",
     "requested_stages": None,
@@ -330,6 +331,31 @@ def test_run_json_is_valid_json(tmp_path):
     _read_run_json(dirs)  # must not raise
 
 
+def test_no_run_json_when_run_info_omitted(tmp_path):
+    dirs = write_output(_SINGLE, base_dir=str(tmp_path))
+    assert not (dirs[0].parent / "run.json").exists()
+
+
+def test_omitting_run_info_still_writes_the_rest_of_the_tree(tmp_path):
+    # A manifest describes a CLI invocation; write_output is also called with
+    # hand-built stage dicts that never came from one. Those callers must keep
+    # working exactly as they did before run.json existed.
+    dirs = write_output(_LINE, base_dir=str(tmp_path))
+    assert len(dirs) == 3
+    for stage_dir in dirs:
+        assert (stage_dir / "stats.json").exists()
+        assert (stage_dir / "entry.md").exists()
+
+
+def test_omitting_run_info_matches_passing_it_except_for_the_manifest(tmp_path):
+    with_info = write_output(_SINGLE, _RUN_INFO, base_dir=str(tmp_path))
+    without = write_output(_SINGLE, base_dir=str(tmp_path))
+    assert (with_info[0] / "stats.json").read_text(encoding="utf-8") == \
+           (without[0] / "stats.json").read_text(encoding="utf-8")
+    assert (with_info[0] / "entry.md").read_text(encoding="utf-8") == \
+           (without[0] / "entry.md").read_text(encoding="utf-8")
+
+
 def test_run_json_written_into_collision_resolved_dir(tmp_path):
     write_output(_SINGLE, _RUN_INFO, base_dir=str(tmp_path))          # Flamburr/
     dirs = write_output(_SINGLE, _RUN_INFO, base_dir=str(tmp_path))   # Flamburr_2/
@@ -373,6 +399,37 @@ def test_run_json_records_vision_description_when_image_given(tmp_path):
 def test_run_json_vision_description_empty_when_no_image(tmp_path):
     dirs = write_output(_SINGLE, _RUN_INFO, base_dir=str(tmp_path))
     assert _read_run_json(dirs)["vision_description"] == ""
+
+
+def test_run_json_records_combined_prompt(tmp_path):
+    run_info = {**_RUN_INFO, "combined_prompt": "a fire lizard with blue flames"}
+    dirs = write_output(_SINGLE, run_info, base_dir=str(tmp_path))
+    assert _read_run_json(dirs)["combined_prompt"] == "a fire lizard with blue flames"
+
+
+def test_run_json_combined_prompt_carries_the_merged_image_blob(tmp_path):
+    # The point of the field: on an --image run the description alone is not
+    # what the LLM saw. vision text and description are joined, and only the
+    # joined form shows the actual input.
+    run_info = {
+        **_RUN_INFO,
+        "image": "scan.png",
+        "vision_description": "a round blue creature with a yellow crest",
+        "description": "make it electric",
+        "combined_prompt": "a round blue creature with a yellow crest\n\nmake it electric",
+    }
+    dirs = write_output(_SINGLE, run_info, base_dir=str(tmp_path))
+    data = _read_run_json(dirs)
+    assert data["combined_prompt"] == (
+        "a round blue creature with a yellow crest\n\nmake it electric"
+    )
+    assert data["combined_prompt"] != data["description"]
+
+
+def test_run_json_combined_prompt_null_when_absent_from_run_info(tmp_path):
+    run_info = {k: v for k, v in _RUN_INFO.items() if k != "combined_prompt"}
+    dirs = write_output(_SINGLE, run_info, base_dir=str(tmp_path))
+    assert _read_run_json(dirs)["combined_prompt"] is None
 
 
 def test_run_json_both_description_and_image_recorded_independently(tmp_path):

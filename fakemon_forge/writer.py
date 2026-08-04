@@ -77,6 +77,12 @@ def _build_run_json(stages: list[dict], run_info: dict) -> dict:
         "description": run_info.get("description"),
         "image": run_info.get("image"),
         "vision_description": run_info.get("vision_description", ""),
+        # The exact blob handed to generate_fakemon. On a text-only run this
+        # duplicates `description`; on an --image run it is the only field
+        # showing what the LLM actually received, since the drawing reaches it
+        # solely as vision text. Recorded either way so both run shapes share
+        # one schema.
+        "combined_prompt": run_info.get("combined_prompt"),
         "mode": run_info["mode"],
         "tier": run_info["tier"],
         "requested_stages": run_info.get("requested_stages"),
@@ -118,8 +124,17 @@ def _write_entry(stage: dict, stage_dir: Path) -> None:
     )
 
 
-def write_output(stages: list[dict], run_info: dict, base_dir: str = "output") -> list[Path]:
-    """Create folder tree, write run.json, stats.json and entry.md. Returns stage dirs."""
+def write_output(
+    stages: list[dict], run_info: dict = None, base_dir: str = "output"
+) -> list[Path]:
+    """Create folder tree, write run.json, stats.json and entry.md. Returns stage dirs.
+
+    `run_info` is optional: omitting it writes no run.json and leaves the rest
+    of the tree byte-identical to what this function produced before manifests
+    existed. A manifest describes a *CLI invocation*, and this function is also
+    called with hand-built stage dicts that never came from one -- the same
+    reason `_STATS_DEFAULTS` exists. `main` always passes it.
+    """
     base = Path(base_dir)
     base.mkdir(parents=True, exist_ok=True)
 
@@ -129,7 +144,8 @@ def write_output(stages: list[dict], run_info: dict, base_dir: str = "output") -
     # Written before any stage subfolder so a run that dies mid-way through
     # sprite generation still leaves behind a manifest of what it was asked
     # to do.
-    _write_run_json(stages, run_info, fakemon_dir)
+    if run_info is not None:
+        _write_run_json(stages, run_info, fakemon_dir)
 
     stage_dirs = []
     for stage in stages:

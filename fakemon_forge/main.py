@@ -83,6 +83,7 @@ def main(argv=None):
         "description": args.description,
         "image": args.image,
         "vision_description": vision_desc,
+        "combined_prompt": combined,
         "mode": args.mode,
         "tier": args.tier,
         "requested_stages": args.stages if args.mode == "line" else None,
