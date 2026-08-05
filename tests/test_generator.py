@@ -671,6 +671,14 @@ def test_system_prompt_tells_model_to_invent_secondary_for_monochrome_input():
     assert "invent a fitting secondary" in _SYSTEM_PROMPT
 
 
+def test_system_prompt_requires_contrast_even_when_description_pins_shades():
+    """Observed live: a description saying "orange-red ... amber belly" made
+    the model echo both shades and stop — its fidelity to the user's explicit
+    colours beat the scheme rule. The rule must survive that: explicit colours
+    stay, and the contrast moves to a region the description leaves open."""
+    assert "no creature ships monochrome" in _SYSTEM_PROMPT
+
+
 # ---------------------------------------------------------------------------
 # sprite_prompt is tags, and short enough to survive CLIP
 # ---------------------------------------------------------------------------

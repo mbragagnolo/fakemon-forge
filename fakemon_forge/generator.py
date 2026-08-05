@@ -139,7 +139,11 @@ Each element represents one evolutionary stage and must have exactly these field
     off-white) or a genuinely different hue: think Charizard — orange body,
     cream belly, teal wing membranes. When the user's description names only
     one colour family, keep it dominant and invent a fitting secondary rather
-    than repeating shades of the same family.
+    than repeating shades of the same family. Colours the description gives
+    explicitly are kept — but when every colour it names falls in one family,
+    you must still add one contrasting neutral or accent on a region the
+    description leaves open (belly, claws, horns, wing membranes, eyes), so
+    that no creature ships monochrome.
     Never use framing or absolute-size words here, in either direction: no
     "large", "huge", "giant", "massive", "towering", "imposing", "close-up",
     "dramatic", "epic" — and no "tiny", "small", "little", "miniature". The sprite
