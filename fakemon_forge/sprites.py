@@ -1,6 +1,7 @@
 import colorsys
 import hashlib
 import re
+import statistics
 import sys
 from collections import Counter
 from pathlib import Path
@@ -50,9 +51,20 @@ _FRAMING_TAGS = "single creature, full body, centered"
 # the guarantee does not depend on a model following an instruction. Scale
 # belongs in height_dm/weight_hg; in a prompt it only tells the renderer how
 # much of the frame to fill.
+#
+# The small-side words cost the opposite failure, measured on the first full
+# ROM-injection round (185 sprites): 94 of 99 stage-1 prompts carried "tiny"/
+# "small" (the evo-progression wording steers juveniles there), and prompts
+# with a small-size word filled a median 48% of the canvas against 78%
+# without — unreadably tiny once a GBA cell scales that by 1/12. Proportion
+# words ("stubby", "short") are deliberately NOT stripped: they describe the
+# creature's shape, which is exactly where juvenile-ness is supposed to live
+# once the size words are gone.
 _FRAMING_WORDS = (
     "large", "huge", "giant", "gigantic", "enormous", "colossal", "massive",
     "towering", "imposing", "close-up", "closeup", "dramatic", "epic",
+    "tiny", "small", "little", "miniature", "mini", "minuscule", "diminutive",
+    "petite",
 )
 _FRAMING_WORD_RE = re.compile(
     r"\b(?:" + "|".join(re.escape(w) for w in _FRAMING_WORDS) + r")\b", re.IGNORECASE
@@ -1011,6 +1023,112 @@ def build_frame2(
     return squash
 
 
+# Lighting gate, calibrated against real Gen-3 sprites (22 Ruby/Sapphire
+# species measured 2026-08-05): official sprites are lit from the north-west —
+# 21/22 pair near-black SE-facing silhouette edges (median luma 0-16) with lit
+# NW-facing edges (60-140), and the interior highlight mass sits NW of the
+# shadow mass. SD renders follow the convention only sometimes (5/13 on the
+# verification round), and while the sheet-cell cleanup can restate the
+# *outline* lighting, no post-pass can honestly relocate a wrongly-placed
+# interior highlight — so a render lit from the wrong side is caught here and
+# rerolled once, the same way the splitter rerolls on a bad gap.
+#
+# Two signals, each vetoing only on CLEAR inversion (a flat, direction-less
+# render passes — the cleanup imposes the convention at cell level, and
+# rerolling costs a full render):
+#
+#   * edge signal: median luma of SE-facing silhouette edges exceeding the
+#     NW-facing median by more than ``_LIGHT_EDGE_MARGIN`` — the model drew
+#     the shadowed side facing the light;
+#   * interior signal: the shadow-mass centroid sitting NW of the
+#     highlight-mass centroid by more than ``_LIGHT_VECTOR_LIMIT`` of the
+#     content span.
+#
+# Thresholds are tunable eyeball placeholders anchored to the real-sprite
+# measurements: at these values all 22 real sprites pass (worst cases: Ralts
+# vector -0.18, Pichu edges 16 vs 16). Validated against the verification
+# round's 13 raw front halves — the actual input this gate sees, whose lumas
+# sit slightly off the final quantized sprites' — where it rerolls 3
+# (Pyrothos and Stormis, the round's clearest inversions, plus a borderline
+# Wispit): a ~23% reroll rate on the pair step.
+_LIGHT_EDGE_MARGIN = 20
+_LIGHT_VECTOR_LIMIT = 0.20
+# Measured on a thumbnail: direction is a bulk property, and 96px keeps the
+# pixel loop ~60x cheaper than the native render.
+_LIGHT_MEASURE_SIZE = 96
+# Below this many interior pixels the quartile centroids are noise, not a
+# lighting judgement.
+_LIGHT_MIN_BODY_PIXELS = 40
+
+
+def _is_nw_lit(image: Image.Image) -> bool:
+    """Whether a raw RGB render reads as lit from the north-west.
+
+    ``image`` is a raw render (or split half) on a near-uniform light
+    backdrop, per ``_detect_background``'s convention. Returns ``True`` when
+    neither signal shows a clear inversion — including when there is nothing
+    to judge (no creature, too little of one, or no directional edges), so an
+    empty or degenerate render never triggers a lighting reroll on top of
+    whatever went wrong first.
+    """
+    small = image.copy()
+    small.thumbnail((_LIGHT_MEASURE_SIZE, _LIGHT_MEASURE_SIZE), Image.NEAREST)
+    w, h = small.size
+    px = small.load()
+    bg = _detect_background(_border_ring(small))
+
+    def is_bg(x, y):
+        return _rgb_distance(px[x, y], bg) <= _KEY_TOLERANCE
+
+    body = []          # (x, y, luma) of interior creature pixels
+    nw_edges, se_edges = [], []
+    for y in range(h):
+        for x in range(w):
+            if is_bg(x, y):
+                continue
+            ox = oy = 0
+            n_bg = 0
+            for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                nx, ny = x + dx, y + dy
+                if 0 <= nx < w and 0 <= ny < h and is_bg(nx, ny):
+                    n_bg += 1
+                    ox += dx
+                    oy += dy
+            luma = _relative_luma(px[x, y])
+            if n_bg:
+                if ox + oy < 0:
+                    nw_edges.append(luma)
+                elif ox + oy > 0:
+                    se_edges.append(luma)
+            else:
+                body.append((x, y, luma))
+
+    if nw_edges and se_edges:
+        if statistics.median(se_edges) - statistics.median(nw_edges) > _LIGHT_EDGE_MARGIN:
+            return False
+
+    if len(body) >= _LIGHT_MIN_BODY_PIXELS:
+        lumas = sorted(l for _, _, l in body)
+        lo = lumas[len(lumas) // 4]
+        hi = lumas[3 * len(lumas) // 4]
+        bright = [(x, y) for x, y, l in body if l >= hi]
+        dark = [(x, y) for x, y, l in body if l <= lo]
+        if bright and dark:
+            xs = [x for x, _, _ in body]
+            ys = [y for _, y, _ in body]
+            span = max(max(xs) - min(xs), max(ys) - min(ys)) or 1
+            vx = (sum(x for x, _ in dark) / len(dark)
+                  - sum(x for x, _ in bright) / len(bright)) / span
+            vy = (sum(y for _, y in dark) / len(dark)
+                  - sum(y for _, y in bright) / len(bright)) / span
+            # NW-lit means the shadow mass sits SE of the highlight mass:
+            # vx + vy comfortably non-negative.
+            if vx + vy < -_LIGHT_VECTOR_LIMIT:
+                return False
+
+    return True
+
+
 def _make_generator(seed: int | None):
     import torch
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -1084,6 +1202,8 @@ def _split_front_back_with_retry(canvas: Image.Image, regenerate):
 def generate_sprite_pair(
     prompt: str, types: list[str], front_output_path: str, back_output_path: str,
     *, pipeline, seed: int | None = None,
+    front_raw_output_path: str | None = None,
+    back_raw_output_path: str | None = None,
 ) -> None:
     """Generate a front+back sprite pair from one side-by-side SDXL canvas.
 
@@ -1099,6 +1219,22 @@ def generate_sprite_pair(
     pixel at the Gen-3 contract's key index 0), it is skipped with a ``stderr``
     warning instead of being saved — this function never raises for a split or
     empty-back degradation, only for a genuine ``pipeline`` failure.
+
+    ``front_raw_output_path`` / ``back_raw_output_path``, when given, save the
+    squared RGB halves exactly as handed to quantization — no palette, no
+    background keying — as recovery artifacts for when the chroma-key flatten
+    misjudges a background (a keyed pocket that was creature detail, a key
+    colour bleeding into the body). The raw back is saved even when the keyed
+    back is skipped as empty: that skip is precisely a case the raw exists to
+    let a human second-guess.
+
+    After the split, the front half passes the ``_is_nw_lit`` lighting gate:
+    a render clearly lit from the wrong side (real Gen-3 sprites are NW-lit —
+    see the gate's calibration comment) is rerolled ONCE with ``seed + 2``
+    (``seed + 1`` belongs to the split reroll). The reroll is adopted only if
+    it splits content-aware AND passes the gate itself; otherwise the first
+    render is kept with a ``stderr`` warning — same degrade-never-raise shape
+    as the split retry, including when the reroll render itself raises.
     """
     def _render(render_seed):
         result = pipeline(
@@ -1116,10 +1252,40 @@ def generate_sprite_pair(
     reroll_seed = seed + 1 if seed is not None else None
     front_raw, back_raw = _split_front_back_with_retry(canvas, lambda: _render(reroll_seed))
 
-    front = postprocess(_fit_half_to_square(front_raw))
+    if not _is_nw_lit(front_raw):
+        relight_seed = seed + 2 if seed is not None else None
+        try:
+            relit = split_front_back_canvas(_render(relight_seed))
+        except Exception as exc:
+            relit = None
+            print(
+                f"warning: generate_sprite_pair lighting reroll render failed ({exc}); "
+                "keeping the first render's lighting",
+                file=sys.stderr,
+            )
+        else:
+            if relit is None or not _is_nw_lit(relit[0]):
+                relit = None
+                print(
+                    "warning: generate_sprite_pair lighting reroll was no better "
+                    "(bad split or still lit from the wrong side); keeping the "
+                    "first render's lighting",
+                    file=sys.stderr,
+                )
+        if relit is not None:
+            front_raw, back_raw = relit
+
+    front_square = _fit_half_to_square(front_raw)
+    back_square = _fit_half_to_square(back_raw)
+    if front_raw_output_path is not None:
+        front_square.save(front_raw_output_path)
+    if back_raw_output_path is not None:
+        back_square.save(back_raw_output_path)
+
+    front = postprocess(front_square)
     front.save(front_output_path)
 
-    back = quantize_to_reference(_fit_half_to_square(back_raw), front)
+    back = quantize_to_reference(back_square, front)
     if _content_bbox(back, background=0) is None:
         print(
             f"warning: generate_sprite_pair back half for {back_output_path} is "

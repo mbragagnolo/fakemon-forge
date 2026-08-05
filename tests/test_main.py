@@ -163,6 +163,15 @@ def test_txt2img_path_calls_generate_sprite_pair(ctx):
     assert len(chibi) == 1
 
 
+def test_sprite_pair_called_with_raw_recovery_paths(ctx):
+    """main asks for the no-chroma-key raw saves, so a mis-keyed background
+    can be recovered by hand from the stage dir instead of rerolled."""
+    main(["--description", "fire lizard"])
+    kwargs = ctx["sprite"].call_args.kwargs
+    assert kwargs["front_raw_output_path"] == str(ctx["stage_dir"] / "sprite_raw.png")
+    assert kwargs["back_raw_output_path"] == str(ctx["stage_dir"] / "sprite_back_raw.png")
+
+
 def test_txt2img_sprite_called_with_stage_prompt(ctx):
     main(["--description", "fire lizard"])
     kwargs = ctx["sprite"].call_args.kwargs

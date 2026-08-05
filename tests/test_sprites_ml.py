@@ -366,6 +366,166 @@ def test_pair_offcentre_split_gives_both_views_the_same_scale(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# generate_sprite_pair() lighting reroll gate
+# ---------------------------------------------------------------------------
+# Real Gen-3 sprites are NW-lit; a render clearly lit from the wrong side is
+# rerolled once with seed + 2, and the reroll is adopted only if it splits
+# content-aware and passes the gate itself. Solid-colour canvases (all the
+# other pair fixtures) carry no lighting direction, so they pass the gate and
+# never trigger the reroll — which keeps those tests' call counts honest.
+
+_LIT_BRIGHT = (230, 180, 120)
+_LIT_DARK = (60, 40, 30)
+
+
+def _lit_pair_canvas(nw_lit):
+    """A clean-split pair canvas whose creatures are lit from the NW (bright
+    top half, dark bottom) or, inverted, from the SE."""
+    top, bottom = (_LIT_BRIGHT, _LIT_DARK) if nw_lit else (_LIT_DARK, _LIT_BRIGHT)
+    canvas = Image.new("RGB", (200, 100), _PAIR_BG)
+    d = ImageDraw.Draw(canvas)
+    for x0, x1 in ((30, 94), (105, 170)):
+        d.rectangle((x0, 20, x1, 49), fill=top)
+        d.rectangle((x0, 50, x1, 80), fill=bottom)
+    return canvas
+
+
+def _front_top_bottom_luma(front_path):
+    """Mean luma of the saved front sprite's top vs bottom creature rows."""
+    img = Image.open(front_path).convert("RGB")
+    w, h = img.size
+    px = img.load()
+    def band(rows):
+        vals = [
+            0.299 * px[x, y][0] + 0.587 * px[x, y][1] + 0.114 * px[x, y][2]
+            for y in rows for x in range(w)
+            if px[x, y] != (200, 200, 168)
+        ]
+        return sum(vals) / len(vals)
+    return band(range(0, h // 2)), band(range(h // 2, h))
+
+
+def test_pair_nw_lit_render_is_not_rerolled(tmp_path, capsys):
+    pipe = _fake_pair_pipeline(_lit_pair_canvas(nw_lit=True))
+    front, back = tmp_path / "sprite.png", tmp_path / "sprite_back.png"
+    generate_sprite_pair("fire lizard", [], str(front), str(back), pipeline=pipe)
+    assert pipe.call_count == 1
+    assert capsys.readouterr().err == ""
+
+
+def test_pair_wrong_lit_render_rerolls_once_and_adopts_a_good_one(tmp_path, capsys):
+    pipe = _fake_pair_pipeline(_lit_pair_canvas(nw_lit=False), _lit_pair_canvas(nw_lit=True))
+    front, back = tmp_path / "sprite.png", tmp_path / "sprite_back.png"
+    generate_sprite_pair("fire lizard", [], str(front), str(back), pipeline=pipe)
+    assert pipe.call_count == 2
+    # A reroll that fixes the lighting is the documented happy path — no warning.
+    assert capsys.readouterr().err == ""
+    top, bottom = _front_top_bottom_luma(front)
+    assert top > bottom  # the adopted render is the NW-lit one
+
+
+def test_pair_wrong_lit_twice_keeps_the_first_render_and_warns(tmp_path, capsys):
+    pipe = _fake_pair_pipeline(_lit_pair_canvas(nw_lit=False), _lit_pair_canvas(nw_lit=False))
+    front, back = tmp_path / "sprite.png", tmp_path / "sprite_back.png"
+    generate_sprite_pair("fire lizard", [], str(front), str(back), pipeline=pipe)
+    assert pipe.call_count == 2
+    assert "lighting reroll was no better" in capsys.readouterr().err
+    assert front.exists()
+
+
+def test_pair_lighting_reroll_uses_seed_plus_two(tmp_path):
+    """seed + 1 belongs to the split reroll; the lighting reroll must not
+    collide with it."""
+    pipe = _fake_pair_pipeline(_lit_pair_canvas(nw_lit=False), _lit_pair_canvas(nw_lit=True))
+    front, back = tmp_path / "sprite.png", tmp_path / "sprite_back.png"
+    with patch("fakemon_forge.sprites._make_generator", wraps=lambda seed: MagicMock()) as m_gen:
+        generate_sprite_pair("fire lizard", [], str(front), str(back), pipeline=pipe, seed=5)
+    assert [c.args[0] for c in m_gen.call_args_list] == [5, 7]
+
+
+def test_pair_lighting_reroll_render_failure_keeps_the_first_render(tmp_path, capsys):
+    result = MagicMock()
+    result.images = [_lit_pair_canvas(nw_lit=False)]
+    pipe = MagicMock(side_effect=[result, RuntimeError("inference crash")])
+    front, back = tmp_path / "sprite.png", tmp_path / "sprite_back.png"
+    generate_sprite_pair("fire lizard", [], str(front), str(back), pipeline=pipe)
+    assert front.exists()
+    assert "lighting reroll render failed" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# generate_sprite_pair() raw (no-chroma-key) recovery saves
+# ---------------------------------------------------------------------------
+# The keyed outputs are irreversible: quantization + background flattening
+# destroy the render they came from, so a mis-keyed background (a pocket that
+# was creature detail, key colour bleeding into the body) used to mean a
+# reroll. The raw paths save the squared RGB halves exactly as handed to
+# quantization, so a human can re-key or hand-fix instead.
+
+def test_pair_saves_raw_halves_when_paths_given(tmp_path):
+    pipe = _fake_pair_pipeline(_clean_split_canvas())
+    front, back = tmp_path / "sprite.png", tmp_path / "sprite_back.png"
+    front_raw, back_raw = tmp_path / "sprite_raw.png", tmp_path / "sprite_back_raw.png"
+
+    generate_sprite_pair(
+        "fire lizard", [], str(front), str(back), pipeline=pipe,
+        front_raw_output_path=str(front_raw), back_raw_output_path=str(back_raw),
+    )
+
+    for path in (front_raw, back_raw):
+        saved = Image.open(path)
+        # RGB and unquantized: squared to the canvas height, not resized to the
+        # 768 sprite size, and carrying none of the Gen-3 palette contract.
+        assert saved.mode == "RGB"
+        assert saved.size == (100, 100)
+    # The raw halves must not have been background-keyed: the key colour
+    # appears nowhere in a render whose backdrop is _PAIR_BG.
+    raw_front = Image.open(front_raw)
+    assert (200, 200, 168) not in {p for p in raw_front.get_flattened_data()}
+
+
+def test_pair_saves_no_raw_files_by_default(tmp_path):
+    pipe = _fake_pair_pipeline(_clean_split_canvas())
+    front, back = tmp_path / "sprite.png", tmp_path / "sprite_back.png"
+    generate_sprite_pair("fire lizard", [], str(front), str(back), pipeline=pipe)
+    assert list(tmp_path.iterdir()) and not list(tmp_path.glob("*raw*"))
+
+
+def test_pair_raw_saves_do_not_change_the_keyed_outputs(tmp_path):
+    pipe = _fake_pair_pipeline(_clean_split_canvas())
+    plain_front, plain_back = tmp_path / "plain.png", tmp_path / "plain_back.png"
+    generate_sprite_pair("fire lizard", [], str(plain_front), str(plain_back), pipeline=pipe)
+
+    pipe2 = _fake_pair_pipeline(_clean_split_canvas())
+    front, back = tmp_path / "sprite.png", tmp_path / "sprite_back.png"
+    generate_sprite_pair(
+        "fire lizard", [], str(front), str(back), pipeline=pipe2,
+        front_raw_output_path=str(tmp_path / "sprite_raw.png"),
+        back_raw_output_path=str(tmp_path / "sprite_back_raw.png"),
+    )
+
+    assert Image.open(front).tobytes() == Image.open(plain_front).tobytes()
+    assert Image.open(back).tobytes() == Image.open(plain_back).tobytes()
+
+
+def test_pair_raw_back_is_saved_even_when_keyed_back_is_skipped_as_empty(tmp_path, capsys):
+    """The empty-back skip is exactly a judgement the raw exists to let a human
+    second-guess, so the skip must not take the recovery artifact with it."""
+    pipe = _fake_pair_pipeline(_pair_canvas((30, 94, _PAIR_FRONT_COLOR)))
+    front, back = tmp_path / "sprite.png", tmp_path / "sprite_back.png"
+    back_raw = tmp_path / "sprite_back_raw.png"
+
+    generate_sprite_pair(
+        "fire lizard", [], str(front), str(back), pipeline=pipe,
+        back_raw_output_path=str(back_raw),
+    )
+
+    assert not back.exists()
+    assert back_raw.exists()
+    assert "empty/background-only" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
 # generate_sprite_img2img()
 # ---------------------------------------------------------------------------
 

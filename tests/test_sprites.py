@@ -40,6 +40,7 @@ from fakemon_forge.sprites import (
     _despeckle_cell,
     _restore_cell_outline,
     _relative_luma,
+    _is_nw_lit,
     _CLIP_TOKEN_LIMIT,
     _FRAMING_TAGS,
     _KEY_COLOR,
@@ -187,6 +188,34 @@ def test_build_prompt_framing_strip_is_case_insensitive_and_word_bounded():
     assert "enlarged" in build_prompt("enlarged horn")
 
 
+def test_build_prompt_strips_small_size_words_but_keeps_their_tags():
+    """The small direction of the same failure: on the first ROM-injection
+    round, 94 of 99 stage-1 prompts said "tiny"/"small" and filled a median
+    48% of the canvas against 78% without — a speck once a GBA cell divides
+    that by 12. Only the size word goes; the anatomy it modified stays."""
+    result = build_prompt("tiny round rodent, small pointed ears, little claws")
+    for banned in ("tiny", "small", "little"):
+        assert banned not in result.lower()
+    assert "round rodent" in result
+    assert "pointed ears" in result
+    assert "claws" in result
+
+
+def test_build_prompt_small_strip_is_word_bounded():
+    """"smallpox pattern" is fanciful but "minicorn" makes the point: no
+    substring mangling on either side of the new words."""
+    assert "minicorn horn" in build_prompt("minicorn horn")
+    assert "smallish" in build_prompt("smallish frill")
+
+
+def test_build_prompt_leaves_proportion_words_alone():
+    """"stubby"/"short" describe the creature's shape, not the framing — they
+    are exactly where juvenile-ness goes now that size words are stripped."""
+    result = build_prompt("stubby limbs, short tail, plump body")
+    assert "stubby limbs" in result
+    assert "short tail" in result
+
+
 def test_build_prompt_drops_a_tag_that_was_only_a_framing_word():
     result = build_prompt("round blob, imposing, teal scales")
     body = result[len(f"gen3, {_FRAMING_TAGS}, "):-len(", white background")]
@@ -196,7 +225,7 @@ def test_build_prompt_drops_a_tag_that_was_only_a_framing_word():
 def test_build_prompt_leaves_a_clean_prompt_unstripped(capsys):
     """No warning when there was nothing to strip — the message means a real
     contract violation happened, so it must not cry wolf."""
-    build_prompt("small round ceramic mug, glossy white porcelain")
+    build_prompt("round ceramic mug, glossy white porcelain")
     assert "stripped framing/scale words" not in capsys.readouterr().err
 
 
@@ -2108,6 +2137,79 @@ def test_quantize_gen3_does_not_mutate_input():
     _qg96(img)
     assert img.size == original_size
     assert list(img.get_flattened_data()) == original_data
+
+
+# ---------------------------------------------------------------------------
+# _is_nw_lit() — lighting gate measurement
+# ---------------------------------------------------------------------------
+# Real Gen-3 sprites are NW-lit (21/22 measured Ruby/Sapphire sprites pair
+# near-black SE edges with lit NW edges). The gate vetoes only on CLEAR
+# inversion — flat or ambiguous renders pass, because a reroll costs a full
+# render and the sheet cleanup imposes the outline convention anyway.
+
+_LIT_BG = (250, 250, 250)
+_LIT_BRIGHT = (230, 180, 120)
+_LIT_DARK = (60, 40, 30)
+_LIT_MID = (150, 110, 80)
+
+
+def _shaded_block(top_color, bottom_color):
+    """A creature block whose top half is ``top_color``, bottom ``bottom_color``."""
+    img = Image.new("RGB", (100, 100), _LIT_BG)
+    d = ImageDraw.Draw(img)
+    d.rectangle((20, 20, 79, 49), fill=top_color)
+    d.rectangle((20, 50, 79, 79), fill=bottom_color)
+    return img
+
+
+def test_nw_lit_block_passes():
+    assert _is_nw_lit(_shaded_block(_LIT_BRIGHT, _LIT_DARK))
+
+
+def test_se_lit_block_fails():
+    """Bright SE edges against dark NW edges: the shadowed side faces the
+    light — the edge signal's clear inversion."""
+    assert not _is_nw_lit(_shaded_block(_LIT_DARK, _LIT_BRIGHT))
+
+
+def test_flat_block_passes():
+    """No lighting direction at all is not an inversion: only a clear
+    wrong-side render is worth the cost of a reroll."""
+    assert _is_nw_lit(_shaded_block(_LIT_MID, _LIT_MID))
+
+
+def _ringed_interior_block(top_color, bottom_color):
+    """A block with a uniform mid-tone edge ring, so only the INTERIOR
+    carries the lighting: the edge signal ties and the verdict comes from
+    the highlight/shadow mass centroids."""
+    img = Image.new("RGB", (100, 100), _LIT_BG)
+    d = ImageDraw.Draw(img)
+    d.rectangle((20, 20, 79, 79), fill=_LIT_MID)
+    d.rectangle((24, 24, 75, 49), fill=top_color)
+    d.rectangle((24, 50, 75, 75), fill=bottom_color)
+    return img
+
+
+def test_interior_highlight_on_top_passes():
+    assert _is_nw_lit(_ringed_interior_block(_LIT_BRIGHT, _LIT_DARK))
+
+
+def test_interior_highlight_on_bottom_fails():
+    """The failure no post-pass can fix: edges neutral, but the highlight
+    mass sits SE of the shadow mass."""
+    assert not _is_nw_lit(_ringed_interior_block(_LIT_DARK, _LIT_BRIGHT))
+
+
+def test_all_background_passes():
+    """Nothing to judge must never trigger a lighting reroll on top of
+    whatever went wrong first."""
+    assert _is_nw_lit(Image.new("RGB", (100, 100), _LIT_BG))
+
+
+def test_tiny_creature_passes():
+    img = Image.new("RGB", (100, 100), _LIT_BG)
+    ImageDraw.Draw(img).rectangle((48, 48, 51, 51), fill=_LIT_DARK)
+    assert _is_nw_lit(img)
 
 
 # ---------------------------------------------------------------------------
