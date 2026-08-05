@@ -170,6 +170,7 @@ def test_sprite_pair_called_with_raw_recovery_paths(ctx):
     kwargs = ctx["sprite"].call_args.kwargs
     assert kwargs["front_raw_output_path"] == str(ctx["stage_dir"] / "sprite_raw.png")
     assert kwargs["back_raw_output_path"] == str(ctx["stage_dir"] / "sprite_back_raw.png")
+    assert kwargs["quality_output_path"] == str(ctx["stage_dir"] / "sprite_quality.json")
 
 
 def test_txt2img_sprite_called_with_stage_prompt(ctx):
