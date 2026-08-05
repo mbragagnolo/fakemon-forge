@@ -639,6 +639,39 @@ def test_system_prompt_says_the_sprite_model_never_sees_the_types_field():
 
 
 # ---------------------------------------------------------------------------
+# sprite_prompt requires a colour scheme
+# ---------------------------------------------------------------------------
+# The model echoes whatever colours the user's description mentions, so a
+# monochrome description becomes a monochrome sprite: a live 3-stage dragon
+# line ("orange-red ... amber belly ...") rendered warm-on-warm across all
+# three stages. And generate_shiny's hue rotation preserves the palette's
+# internal structure, so a monochrome normal necessarily yields a monochrome
+# shiny — the scheme requirement here is the only counterweight.
+
+def test_system_prompt_requires_a_colour_scheme():
+    assert "2 or 3 DISTINCT colours" in _SYSTEM_PROMPT
+
+
+def test_system_prompt_says_shades_are_not_a_scheme():
+    """Without this, "orange scales, amber belly" satisfies a naive reading of
+    "2 colours" — the failure observed live."""
+    assert "one colour twice" in _SYSTEM_PROMPT
+
+
+def test_system_prompt_gives_colour_scheme_example():
+    """Abstract rules under-deliver with these models; the worked example is
+    what turns the rule into renderable wording."""
+    assert "orange body" in _SYSTEM_PROMPT
+    assert "cream belly" in _SYSTEM_PROMPT
+
+
+def test_system_prompt_tells_model_to_invent_secondary_for_monochrome_input():
+    """The trigger case: a user description naming only one colour family must
+    gain a contrasting secondary, not have its shades echoed back."""
+    assert "invent a fitting secondary" in _SYSTEM_PROMPT
+
+
+# ---------------------------------------------------------------------------
 # sprite_prompt is tags, and short enough to survive CLIP
 # ---------------------------------------------------------------------------
 # The sprite LoRA is trained on comma-separated tags, so prose is off

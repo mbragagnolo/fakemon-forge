@@ -131,6 +131,15 @@ Each element represents one evolutionary stage and must have exactly these field
     first. Going long does not add detail, it deletes the background and style
     instructions.
     Order: overall body shape first, then main colours, then distinctive features.
+    The main colours must form a real scheme of 2 or 3 DISTINCT colours: a
+    dominant body colour, a secondary colour covering a large region (belly,
+    wings, shell, mane, crest), and optionally one small accent (eyes, markings,
+    tips). Shades of one colour are not a scheme — "orange scales, amber belly"
+    is one colour twice. The secondary can be a neutral (cream, grey, charcoal,
+    off-white) or a genuinely different hue: think Charizard — orange body,
+    cream belly, teal wing membranes. When the user's description names only
+    one colour family, keep it dominant and invent a fitting secondary rather
+    than repeating shades of the same family.
     Never use framing or absolute-size words here, in either direction: no
     "large", "huge", "giant", "massive", "towering", "imposing", "close-up",
     "dramatic", "epic" — and no "tiny", "small", "little", "miniature". The sprite
