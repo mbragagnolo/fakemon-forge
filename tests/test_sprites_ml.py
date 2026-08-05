@@ -305,15 +305,41 @@ def test_pair_unseeded_reroll_stays_unseeded(tmp_path):
     assert m_gen.call_args_list[1].args[0] is None
 
 
-def test_pair_never_calls_pipeline_a_third_time_when_both_canvases_fail_to_split(tmp_path, capsys):
+def test_pair_reroll_budget_caps_at_three_renders(tmp_path, capsys):
+    """The shared quality budget: 1 render + at most 2 rerolls across ALL
+    gates. Three gapless canvases exhaust it — a fourth pipeline() call
+    would raise StopIteration (side_effect exhausted) — and the best attempt
+    (here: the first, all tied) is accepted with a warning."""
     pipe = _fake_pair_pipeline(
-        _no_split_canvas(_PAIR_FRONT_COLOR), _no_split_canvas(_PAIR_BACK_COLOR)
+        _no_split_canvas(_PAIR_FRONT_COLOR),
+        _no_split_canvas(_PAIR_BACK_COLOR),
+        _no_split_canvas(_PAIR_FRONT_COLOR),
     )
     front, back = tmp_path / "sprite.png", tmp_path / "sprite_back.png"
-    # A third pipeline() call would raise StopIteration (side_effect exhausted).
     generate_sprite_pair("fire lizard", [], str(front), str(back), pipeline=pipe)
-    assert pipe.call_count == 2
-    assert capsys.readouterr().err   # naive-midline-fallback warning
+    assert pipe.call_count == 3
+    err = capsys.readouterr().err
+    assert "accepted a render failing quality gates" in err
+    assert "no content-aware split" in err
+    assert front.exists()
+
+
+def test_pair_content_aware_split_outranks_quality_violations(tmp_path):
+    """Ranking: a gapless canvas (naive midline cut) never beats one that
+    split content-aware, however many quality gates the latter fails."""
+    pipe = _fake_pair_pipeline(
+        _no_split_canvas(_PAIR_FRONT_COLOR),   # no gap: naive cut
+        _lit_pair_canvas(nw_lit=False),        # splits, but SE-lit
+        _lit_pair_canvas(nw_lit=False),        # splits, but SE-lit
+    )
+    front, back = tmp_path / "sprite.png", tmp_path / "sprite_back.png"
+    generate_sprite_pair("fire lizard", [], str(front), str(back), pipeline=pipe)
+    assert pipe.call_count == 3
+    # The chosen render is one of the SE-lit split ones, not the naive cut:
+    # its creature is the two-tone lit block, not the solid band.
+    saved = Image.open(front).convert("RGB")
+    colors = set(saved.get_flattened_data())
+    assert _PAIR_FRONT_COLOR not in colors
 
 
 def test_pair_pipeline_error_propagates(tmp_path):
@@ -424,33 +450,63 @@ def test_pair_wrong_lit_render_rerolls_once_and_adopts_a_good_one(tmp_path, caps
     assert top > bottom  # the adopted render is the NW-lit one
 
 
-def test_pair_wrong_lit_twice_keeps_the_first_render_and_warns(tmp_path, capsys):
-    pipe = _fake_pair_pipeline(_lit_pair_canvas(nw_lit=False), _lit_pair_canvas(nw_lit=False))
+def test_pair_wrong_lit_every_attempt_keeps_the_first_render_and_warns(tmp_path, capsys):
+    """Three SE-lit renders exhaust the budget on ties: the earliest attempt
+    wins, and accepting it is warned with the gates it fails."""
+    pipe = _fake_pair_pipeline(*[_lit_pair_canvas(nw_lit=False)] * 3)
     front, back = tmp_path / "sprite.png", tmp_path / "sprite_back.png"
     generate_sprite_pair("fire lizard", [], str(front), str(back), pipeline=pipe)
-    assert pipe.call_count == 2
-    assert "lighting reroll was no better" in capsys.readouterr().err
+    assert pipe.call_count == 3
+    assert "wrong-side lighting" in capsys.readouterr().err
     assert front.exists()
 
 
-def test_pair_lighting_reroll_uses_seed_plus_two(tmp_path):
-    """seed + 1 belongs to the split reroll; the lighting reroll must not
-    collide with it."""
+def test_pair_quality_rerolls_walk_the_seed_ladder(tmp_path):
+    """Attempt N renders with seed + N, whatever gate triggered the reroll —
+    one ladder shared by every gate."""
     pipe = _fake_pair_pipeline(_lit_pair_canvas(nw_lit=False), _lit_pair_canvas(nw_lit=True))
     front, back = tmp_path / "sprite.png", tmp_path / "sprite_back.png"
     with patch("fakemon_forge.sprites._make_generator", wraps=lambda seed: MagicMock()) as m_gen:
         generate_sprite_pair("fire lizard", [], str(front), str(back), pipeline=pipe, seed=5)
-    assert [c.args[0] for c in m_gen.call_args_list] == [5, 7]
+    assert [c.args[0] for c in m_gen.call_args_list] == [5, 6]
 
 
-def test_pair_lighting_reroll_render_failure_keeps_the_first_render(tmp_path, capsys):
+def test_pair_quality_reroll_render_failure_keeps_the_best_so_far(tmp_path, capsys):
     result = MagicMock()
     result.images = [_lit_pair_canvas(nw_lit=False)]
     pipe = MagicMock(side_effect=[result, RuntimeError("inference crash")])
     front, back = tmp_path / "sprite.png", tmp_path / "sprite_back.png"
     generate_sprite_pair("fire lizard", [], str(front), str(back), pipeline=pipe)
     assert front.exists()
-    assert "lighting reroll render failed" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "quality-reroll render failed" in err
+    assert "accepted a render failing quality gates" in err
+
+
+def test_pair_quality_report_written_when_path_given(tmp_path):
+    import json as _json
+    pipe = _fake_pair_pipeline(_lit_pair_canvas(nw_lit=False), _lit_pair_canvas(nw_lit=True))
+    front, back = tmp_path / "sprite.png", tmp_path / "sprite_back.png"
+    quality = tmp_path / "sprite_quality.json"
+    generate_sprite_pair(
+        "fire lizard", [], str(front), str(back), pipeline=pipe,
+        quality_output_path=str(quality),
+    )
+    report = _json.loads(quality.read_text(encoding="utf-8"))
+    assert report["chosen_attempt"] == 1
+    assert report["violations"] == []
+    assert report["attempts"][0]["violations"] == ["wrong-side lighting"]
+    # Un-gated diagnostics ride along for cross-round threshold tuning.
+    for key in ("frame_contact", "darkest_percentile_luma", "nw_lit",
+                "color_economy_64px", "fragmentation"):
+        assert key in report["diagnostics"]
+
+
+def test_pair_no_quality_report_by_default(tmp_path):
+    pipe = _fake_pair_pipeline(_clean_split_canvas())
+    front, back = tmp_path / "sprite.png", tmp_path / "sprite_back.png"
+    generate_sprite_pair("fire lizard", [], str(front), str(back), pipeline=pipe)
+    assert not list(tmp_path.glob("*.json"))
 
 
 # ---------------------------------------------------------------------------

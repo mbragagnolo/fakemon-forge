@@ -32,7 +32,10 @@ from fakemon_forge.sprites import (
     _border_ring,
     _border_is_uniform,
     _detect_background,
-    _split_front_back_with_retry,
+    _evaluate_pair_canvas,
+    _frame_contact,
+    _darkest_percentile_luma,
+    _front_quality_violations,
     _fit_half_to_square,
     _content_columns,
     _estimate_clip_tokens,
@@ -1548,11 +1551,12 @@ def test_split_single_sprite_canvas_succeeds_with_one_empty_half():
 
 
 # ---------------------------------------------------------------------------
-# _split_front_back_with_retry()
+# Quality gates: _frame_contact / _darkest_percentile_luma /
+# _front_quality_violations / _evaluate_pair_canvas
 # ---------------------------------------------------------------------------
-# Reuses `_split_canvas` / `_SPLIT_*` above: a "clean" canvas has a full-height
-# background gap in the search window, a "dirty" one has a single band
-# spanning the whole window (no clean split possible).
+# Reuses `_split_canvas` / `_SPLIT_*` above. `_SPLIT_FRONT_COLOR` is dark
+# (luma ~55) and solid, so the standard fixtures pass every quality gate —
+# each test then breaks exactly one property.
 
 def _clean_split_canvas(front_color=_SPLIT_FRONT_COLOR, back_color=_SPLIT_BACK_COLOR):
     return _split_canvas((30, 94, front_color), (105, 170, back_color))
@@ -1562,63 +1566,75 @@ def _dirty_canvas(color):
     return _split_canvas((70, 130, color))
 
 
-def test_retry_clean_first_canvas_never_regenerates():
-    canvas = _clean_split_canvas()
+def test_frame_contact_is_zero_for_a_contained_creature():
+    front_half, _, _ = _evaluate_pair_canvas(_clean_split_canvas())
+    assert _frame_contact(front_half) == 0.0
 
-    def _regenerate():
-        raise AssertionError("regenerate must not be called on a clean first split")
 
-    front_half, back_half = _split_front_back_with_retry(canvas, _regenerate)
+def test_frame_contact_gate_fires_on_a_flooded_border():
+    """The scenery failure mode: real sprites max out at 12% border contact
+    (Dragonite); a painted floor floods it (Fortressk measured 99%)."""
+    half = Image.new("RGB", (100, 100), _SPLIT_BG)
+    # A ground band running through the bottom border, Fortressk-style.
+    ImageDraw.Draw(half).rectangle((0, 70, 99, 99), fill=_SPLIT_FRONT_COLOR)
+    assert _frame_contact(half) > 0.2
+    assert "frame contact" in _front_quality_violations(half)
+
+
+def test_washout_gate_fires_when_the_creature_has_no_darks():
+    """Every real sprite commits to near-black somewhere (worst: Seedot, 75).
+    A render whose darkest 5% sits above that has no outline to survive the
+    64px downscale."""
+    pale = (215, 215, 255)  # far enough from _SPLIT_BG, luma ~220
+    half = Image.new("RGB", (100, 100), _SPLIT_BG)
+    ImageDraw.Draw(half).rectangle((20, 20, 79, 79), fill=pale)
+    assert _darkest_percentile_luma(half) > 80
+    assert "washout" in _front_quality_violations(half)
+
+
+def test_washout_gate_stays_quiet_for_a_dark_creature():
+    half, _, _ = _evaluate_pair_canvas(_clean_split_canvas())
+    assert "washout" not in _front_quality_violations(half)
+
+
+def test_quality_violations_empty_for_a_clean_half():
+    front_half, _, violations = _evaluate_pair_canvas(_clean_split_canvas())
+    assert violations == []
+    assert _front_quality_violations(front_half) == []
+
+
+def test_quality_violations_skip_a_degenerate_half():
+    """Too little creature to judge must not fabricate violations — an empty
+    half already carries its own failure (the empty-back skip)."""
+    assert _front_quality_violations(Image.new("RGB", (100, 100), _SPLIT_BG)) == []
+
+
+def test_evaluate_clean_canvas_returns_the_content_aware_split():
+    front_half, back_half, violations = _evaluate_pair_canvas(_clean_split_canvas())
+    assert violations == []
     assert front_half.getpixel((60, 50)) == _SPLIT_FRONT_COLOR
     assert back_half.getpixel((5, 50)) == _SPLIT_BACK_COLOR
 
 
-def test_retry_falls_back_to_regenerated_canvas_when_first_has_no_split():
-    dirty = _dirty_canvas(_SPLIT_FRONT_COLOR)
-    clean = _clean_split_canvas()
-
-    front_half, back_half = _split_front_back_with_retry(dirty, lambda: clean)
-    assert front_half.getpixel((60, 50)) == _SPLIT_FRONT_COLOR
-    assert back_half.getpixel((5, 50)) == _SPLIT_BACK_COLOR
-
-
-def test_retry_naive_midline_fallback_uses_the_second_canvas_and_warns(capsys):
-    # Distinct colours per canvas so the naive-split result can be traced back
-    # to whichever canvas it actually came from.
-    first = _dirty_canvas(_SPLIT_FRONT_COLOR)
-    second = _dirty_canvas(_SPLIT_BACK_COLOR)
-
-    front_half, back_half = _split_front_back_with_retry(first, lambda: second)
+def test_evaluate_no_gap_canvas_cuts_naive_midline_with_violation():
+    front_half, back_half, violations = _evaluate_pair_canvas(
+        _dirty_canvas(_SPLIT_FRONT_COLOR)
+    )
+    assert "no content-aware split" in violations
     assert front_half.size == (100, 100)
     assert back_half.size == (100, 100)
-    # The band (columns 70-130) straddles the naive cut at column 100; a pixel
-    # from it on either side must show the SECOND canvas's colour.
-    assert front_half.getpixel((90, 50)) == _SPLIT_BACK_COLOR
-    assert back_half.getpixel((10, 50)) == _SPLIT_BACK_COLOR
-    assert capsys.readouterr().err
-
-
-def test_retry_reroll_render_failure_degrades_to_the_first_canvas_and_warns(capsys):
-    """A raising `regenerate` must not cost the caller the first canvas.
-
-    The contract is a best-effort result plus a warning, never a raise — so a
-    transient failure on the second wide render (an OOM, say) falls back to a
-    naive midline split of the canvas already in hand rather than discarding a
-    front sprite that canvas could still have produced.
-    """
-    first = _dirty_canvas(_SPLIT_FRONT_COLOR)
-
-    def _regenerate():
-        raise RuntimeError("CUDA out of memory")
-
-    front_half, back_half = _split_front_back_with_retry(first, _regenerate)
-    assert front_half.size == (100, 100)
-    assert back_half.size == (100, 100)
-    # The band (columns 70-130) straddles the naive cut at column 100, so a
-    # pixel from it on either side must show the FIRST canvas's colour.
+    # The band (columns 70-130) straddles the naive cut at column 100.
     assert front_half.getpixel((90, 50)) == _SPLIT_FRONT_COLOR
     assert back_half.getpixel((10, 50)) == _SPLIT_FRONT_COLOR
-    assert "CUDA out of memory" in capsys.readouterr().err
+
+
+def test_evaluate_no_gap_canvas_still_runs_the_quality_gates():
+    """The naive front is gated too, so the loop can rank two gapless
+    attempts by their remaining quality."""
+    pale = (215, 215, 255)
+    _, _, violations = _evaluate_pair_canvas(_dirty_canvas(pale))
+    assert "no content-aware split" in violations
+    assert "washout" in violations
 
 
 # ---------------------------------------------------------------------------

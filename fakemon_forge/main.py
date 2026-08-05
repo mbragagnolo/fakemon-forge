@@ -119,6 +119,7 @@ def main(argv=None):
                 pipeline=pipeline, seed=seed,
                 front_raw_output_path=str(stage_dir / "sprite_raw.png"),
                 back_raw_output_path=str(stage_dir / "sprite_back_raw.png"),
+                quality_output_path=str(stage_dir / "sprite_quality.json"),
             )
         except Exception as exc:
             print(

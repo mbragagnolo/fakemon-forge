@@ -1,5 +1,6 @@
 import colorsys
 import hashlib
+import json
 import re
 import statistics
 import sys
@@ -1155,48 +1156,180 @@ def generate_sprite(
     sprite.save(output_path)
 
 
-def _split_front_back_with_retry(canvas: Image.Image, regenerate):
-    """Split a front/back canvas, rerolling once and falling back to a naive cut.
+# The remaining quality gates a rendered pair must clear, unified with the
+# split and lighting checks into one scored reroll loop (see
+# ``generate_sprite_pair``). Both are calibrated against the same 22 measured
+# Ruby/Sapphire sprites as the lighting gate, and validated on the
+# verification round's 13 raw front halves:
+#
+#   * frame contact — the fraction of the half's border ring covered by
+#     creature. Real sprites sit inside their frame (max measured: Dragonite,
+#     12%); a render that floods the border painted scenery or a full-bleed
+#     close-up (the round's Fortressk lava floor measured 99%, Stormis 64%,
+#     every healthy render 0%). The ring-mean background this is measured
+#     against degrades as contact rises — acceptable, because by then the
+#     fraction is far beyond the threshold either way.
+#   * washout — the 5th-percentile creature luma. Every real sprite commits
+#     to near-black somewhere (worst case: Seedot, 75); a render with no
+#     true darks (the round's palest measured 84-85) has no outline to
+#     survive the 64px downscale and reads as mush in-game.
+#
+# ``_QUALITY_REROLL_BUDGET`` caps the whole loop: at most this many extra
+# renders per pair, shared by ALL gates. The per-gate retries this replaces
+# (one split reroll + one lighting reroll) could already stack to the same
+# worst case, so the budget changes the shape of the cost, not its ceiling.
+# Thresholds are tunable eyeball placeholders anchored to the measurements.
+_MAX_FRAME_CONTACT = 0.20
+_WASHOUT_P5_LUMA = 80
+_QUALITY_REROLL_BUDGET = 2
 
-    Torch-free: ``regenerate`` is a zero-arg callable the caller supplies to
-    produce a fresh canvas (``generate_sprite_pair`` wires it to a second
-    ``pipeline`` call), kept external so this retry/fallback decision stays a
-    plain, unit-testable function. Tries ``split_front_back_canvas`` on
-    ``canvas``; on failure calls ``regenerate()`` once and tries again on the
-    fresh canvas; on a second failure falls back to a naive midline split of
-    that fresh canvas and warns. Mirrors ``_flatten_background_to_key``'s
-    gradient-border fallback: a best-effort result plus a ``stderr`` warning,
-    never a raise — including when ``regenerate`` itself raises.
+
+def _frame_contact(image: Image.Image) -> float:
+    """Fraction (0.0-1.0) of ``image``'s border ring covered by creature."""
+    ring = _border_ring(image)
+    bg = _detect_background(ring)
+    outside = sum(1 for c in ring if _rgb_distance(c, bg) > _KEY_TOLERANCE)
+    return outside / len(ring)
+
+
+def _darkest_percentile_luma(image: Image.Image) -> float | None:
+    """5th-percentile luma of the creature pixels, or ``None`` when there is
+    too little creature to judge (mirroring ``_is_nw_lit``'s refusal to rule
+    on degenerate input)."""
+    small = image.copy()
+    small.thumbnail((_LIGHT_MEASURE_SIZE, _LIGHT_MEASURE_SIZE), Image.NEAREST)
+    bg = _detect_background(_border_ring(small))
+    lumas = sorted(
+        _relative_luma(c) for c in small.get_flattened_data()
+        if _rgb_distance(c, bg) > _KEY_TOLERANCE
+    )
+    if len(lumas) < 20:
+        return None
+    return lumas[len(lumas) // 20]
+
+
+def _front_quality_violations(front_half: Image.Image) -> list[str]:
+    """Names of the calibrated quality gates ``front_half`` fails.
+
+    Only the front is gated: it drives every downstream artefact (icon,
+    frames, footprint), and the back is palette-locked to it anyway.
     """
-    result = split_front_back_canvas(canvas)
-    if result is not None:
-        return result
+    violations = []
+    if _frame_contact(front_half) > _MAX_FRAME_CONTACT:
+        violations.append("frame contact")
+    p5 = _darkest_percentile_luma(front_half)
+    if p5 is not None and p5 > _WASHOUT_P5_LUMA:
+        violations.append("washout")
+    if not _is_nw_lit(front_half):
+        violations.append("wrong-side lighting")
+    return violations
 
-    try:
-        fresh = regenerate()
-    except Exception as exc:
-        # A failed reroll (a transient OOM on the second 1536-wide render, say)
-        # must not cost the caller the front sprite the first canvas can still
-        # give up — fall through to a naive split of the canvas already in hand.
-        print(
-            f"warning: _split_front_back_with_retry reroll render failed ({exc}); "
-            "falling back to a naive midline split of the first canvas",
-            file=sys.stderr,
-        )
-    else:
-        result = split_front_back_canvas(fresh)
-        if result is not None:
-            return result
-        canvas = fresh
-        print(
-            "warning: _split_front_back_with_retry found no clean split column even "
-            "after a reroll; falling back to a naive midline split",
-            file=sys.stderr,
-        )
 
-    w, h = canvas.size
-    cut = w // 2
-    return canvas.crop((0, 0, cut, h)), canvas.crop((cut, 0, w, h))
+def _evaluate_pair_canvas(canvas: Image.Image):
+    """Split one rendered pair canvas and quality-gate its front half.
+
+    Returns ``(front_half, back_half, violations)``. A canvas with no
+    content-aware split gap is cut at the naive midline and carries the
+    ``"no content-aware split"`` violation in addition to whatever the
+    quality gates find on that naive front — ``generate_sprite_pair``'s loop
+    ranks a content-aware split above any count of quality violations, so a
+    naive cut is only ever accepted when every attempt lacked a gap.
+    """
+    split = split_front_back_canvas(canvas)
+    if split is None:
+        w, h = canvas.size
+        cut = w // 2
+        front_half = canvas.crop((0, 0, cut, h))
+        back_half = canvas.crop((cut, 0, w, h))
+        return front_half, back_half, (
+            ["no content-aware split"] + _front_quality_violations(front_half)
+        )
+    front_half, back_half = split
+    return front_half, back_half, _front_quality_violations(front_half)
+
+
+def _color_economy(image: Image.Image) -> int | None:
+    """5-bit colours covering 95% of the creature pixels at 64px.
+
+    Diagnostic only (see ``_quality_diagnostics``): real sprites measure
+    7-13, but every raw render measures far higher (71-920 on the
+    verification round) because anti-aliased gradients survive the NEAREST
+    downscale — the metric ranks painterly noise (Tempestris, 920) against
+    clean flat renders (Dewpol, 71) rather than separating good from bad
+    outright, so it is logged for cross-round calibration, not gated.
+    """
+    small = image.resize((64, 64), Image.NEAREST)
+    bg = _detect_background(_border_ring(small))
+    counts = Counter(
+        (c[0] >> 3, c[1] >> 3, c[2] >> 3)
+        for c in small.get_flattened_data()
+        if _rgb_distance(c, bg) > _KEY_TOLERANCE
+    )
+    total = sum(counts.values())
+    if total < 20:
+        return None
+    covered = 0
+    for i, (_, n) in enumerate(counts.most_common(), 1):
+        covered += n
+        if covered >= 0.95 * total:
+            return i
+    return len(counts)
+
+
+def _fragmentation(image: Image.Image) -> float | None:
+    """Creature mass outside the largest 8-connected component (0.0-1.0).
+
+    Diagnostic only: real sprites measure ~0 (max 0.2%), but satellites are
+    sometimes intentional design (Dewpol's droplets) and the sheet despeckle
+    already cleans small ones, so this is logged, not gated.
+    """
+    small = image.copy()
+    small.thumbnail((_LIGHT_MEASURE_SIZE, _LIGHT_MEASURE_SIZE), Image.NEAREST)
+    w, h = small.size
+    px = small.load()
+    bg = _detect_background(_border_ring(small))
+    mask = {
+        (x, y) for y in range(h) for x in range(w)
+        if _rgb_distance(px[x, y], bg) > _KEY_TOLERANCE
+    }
+    if not mask:
+        return None
+    seen = set()
+    sizes = []
+    for start in mask:
+        if start in seen:
+            continue
+        seen.add(start)
+        stack = [start]
+        size = 0
+        while stack:
+            x, y = stack.pop()
+            size += 1
+            for nx in (x - 1, x, x + 1):
+                for ny in (y - 1, y, y + 1):
+                    if (nx, ny) in mask and (nx, ny) not in seen:
+                        seen.add((nx, ny))
+                        stack.append((nx, ny))
+        sizes.append(size)
+    return 1 - max(sizes) / sum(sizes)
+
+
+def _quality_diagnostics(front_half: Image.Image) -> dict:
+    """Every quality metric of a front half, gated and un-gated alike.
+
+    Written into the ``quality_output_path`` report so each round yields the
+    data the next threshold-tuning pass needs, instead of re-measuring by
+    hand.
+    """
+    p5 = _darkest_percentile_luma(front_half)
+    frag = _fragmentation(front_half)
+    return {
+        "frame_contact": round(_frame_contact(front_half), 3),
+        "darkest_percentile_luma": round(p5, 1) if p5 is not None else None,
+        "nw_lit": _is_nw_lit(front_half),
+        "color_economy_64px": _color_economy(front_half),
+        "fragmentation": round(frag, 4) if frag is not None else None,
+    }
 
 
 def generate_sprite_pair(
@@ -1204,21 +1337,31 @@ def generate_sprite_pair(
     *, pipeline, seed: int | None = None,
     front_raw_output_path: str | None = None,
     back_raw_output_path: str | None = None,
+    quality_output_path: str | None = None,
 ) -> None:
     """Generate a front+back sprite pair from one side-by-side SDXL canvas.
 
     One ``pipeline`` txt2img call renders a ``_PAIR_WIDTH`` x ``_GEN_SIZE``
     canvas — front on the left half, back on the right half, per the fused
-    back&front LoRA. ``_split_front_back_with_retry`` cuts the two apart
-    (rerolling with ``seed + 1`` once, then falling back to a naive midline
-    split, if the content-aware split fails), and ``_fit_half_to_square``
-    squares each half up so the off-centre cut costs neither view its
-    proportions. The front is quantized adaptively via ``postprocess`` and
-    always saved. The back is locked to the front's exact palette via
-    ``quantize_to_reference``; if it comes back empty/background-only (every
-    pixel at the Gen-3 contract's key index 0), it is skipped with a ``stderr``
-    warning instead of being saved — this function never raises for a split or
-    empty-back degradation, only for a genuine ``pipeline`` failure.
+    back&front LoRA — and each attempt runs through one unified quality gate
+    before quantization: ``_evaluate_pair_canvas`` splits it (content-aware,
+    or a naive midline cut carrying its own violation when no gap is found)
+    and checks the front half against the Gen-3-calibrated gates — frame
+    contact, washout, wrong-side lighting (see the calibration comments). A
+    clean attempt is accepted immediately; otherwise up to
+    ``_QUALITY_REROLL_BUDGET`` rerolls (``seed + 1``, ``seed + 2``) share one
+    budget across ALL gates, and the best-ranked attempt wins: a
+    content-aware split outranks any count of quality violations, then fewer
+    violations, then the earliest attempt. Accepting a still-failing best is
+    warned on ``stderr``, never raised — only a genuine first-render
+    ``pipeline`` failure raises; a failing reroll render just ends the loop.
+
+    ``_fit_half_to_square`` squares the chosen halves so an off-centre cut
+    costs neither view its proportions. The front is quantized adaptively via
+    ``postprocess`` and always saved. The back is locked to the front's exact
+    palette via ``quantize_to_reference``; if it comes back
+    empty/background-only (every pixel at the Gen-3 contract's key index 0),
+    it is skipped with a ``stderr`` warning instead of being saved.
 
     ``front_raw_output_path`` / ``back_raw_output_path``, when given, save the
     squared RGB halves exactly as handed to quantization — no palette, no
@@ -1228,13 +1371,11 @@ def generate_sprite_pair(
     back is skipped as empty: that skip is precisely a case the raw exists to
     let a human second-guess.
 
-    After the split, the front half passes the ``_is_nw_lit`` lighting gate:
-    a render clearly lit from the wrong side (real Gen-3 sprites are NW-lit —
-    see the gate's calibration comment) is rerolled ONCE with ``seed + 2``
-    (``seed + 1`` belongs to the split reroll). The reroll is adopted only if
-    it splits content-aware AND passes the gate itself; otherwise the first
-    render is kept with a ``stderr`` warning — same degrade-never-raise shape
-    as the split retry, including when the reroll render itself raises.
+    ``quality_output_path``, when given, writes a JSON report of every
+    attempt's violations, which attempt was chosen, and the chosen front's
+    full metric set including the un-gated diagnostics (colour economy,
+    fragmentation) — the data future threshold tuning needs, gathered as a
+    side effect of every run.
     """
     def _render(render_seed):
         result = pipeline(
@@ -1248,32 +1389,54 @@ def generate_sprite_pair(
         )
         return result.images[0]
 
-    canvas = _render(seed)
-    reroll_seed = seed + 1 if seed is not None else None
-    front_raw, back_raw = _split_front_back_with_retry(canvas, lambda: _render(reroll_seed))
-
-    if not _is_nw_lit(front_raw):
-        relight_seed = seed + 2 if seed is not None else None
-        try:
-            relit = split_front_back_canvas(_render(relight_seed))
-        except Exception as exc:
-            relit = None
-            print(
-                f"warning: generate_sprite_pair lighting reroll render failed ({exc}); "
-                "keeping the first render's lighting",
-                file=sys.stderr,
-            )
+    best = None  # (rank, front_half, back_half, attempt_index)
+    attempts = []
+    for attempt in range(1 + _QUALITY_REROLL_BUDGET):
+        render_seed = seed + attempt if seed is not None else None
+        if attempt == 0:
+            canvas = _render(render_seed)
         else:
-            if relit is None or not _is_nw_lit(relit[0]):
-                relit = None
+            try:
+                canvas = _render(render_seed)
+            except Exception as exc:
+                # A failed reroll (a transient OOM, say) must not cost the
+                # caller the sprite an earlier canvas can still give up.
                 print(
-                    "warning: generate_sprite_pair lighting reroll was no better "
-                    "(bad split or still lit from the wrong side); keeping the "
-                    "first render's lighting",
+                    f"warning: generate_sprite_pair quality-reroll render failed "
+                    f"({exc}); continuing with the best attempt so far",
                     file=sys.stderr,
                 )
-        if relit is not None:
-            front_raw, back_raw = relit
+                break
+        front_half, back_half, violations = _evaluate_pair_canvas(canvas)
+        attempts.append(violations)
+        rank = ("no content-aware split" in violations, len(violations))
+        if best is None or rank < best[0]:
+            best = (rank, front_half, back_half, attempt)
+        if not violations:
+            break
+
+    _, front_raw, back_raw, chosen = best
+    chosen_violations = attempts[chosen]
+    if chosen_violations:
+        print(
+            f"warning: generate_sprite_pair accepted a render failing quality "
+            f"gates ({', '.join(chosen_violations)}) after {len(attempts)} "
+            f"attempt(s)",
+            file=sys.stderr,
+        )
+
+    if quality_output_path is not None:
+        report = {
+            "attempts": [
+                {"seed_offset": i, "violations": v} for i, v in enumerate(attempts)
+            ],
+            "chosen_attempt": chosen,
+            "violations": chosen_violations,
+            "diagnostics": _quality_diagnostics(front_raw),
+        }
+        Path(quality_output_path).write_text(
+            json.dumps(report, indent=2), encoding="utf-8"
+        )
 
     front_square = _fit_half_to_square(front_raw)
     back_square = _fit_half_to_square(back_raw)
