@@ -111,9 +111,14 @@ def main(argv=None):
         sprite_path = str(stage_dir / "sprite.png")
         back_path = str(stage_dir / "sprite_back.png")
         try:
+            # The *_raw files are the same renders before palette quantization
+            # and chroma-key flattening — kept so a sprite whose background
+            # keying went wrong can be recovered by hand instead of rerolled.
             generate_sprite_pair(
                 stage["sprite_prompt"], stage["types"], sprite_path, back_path,
                 pipeline=pipeline, seed=seed,
+                front_raw_output_path=str(stage_dir / "sprite_raw.png"),
+                back_raw_output_path=str(stage_dir / "sprite_back_raw.png"),
             )
         except Exception as exc:
             print(
