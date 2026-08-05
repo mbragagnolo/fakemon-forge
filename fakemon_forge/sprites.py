@@ -1223,6 +1223,173 @@ def generate_frame2(
     frame2.save(output_path)
 
 
+# Sheet-cell cleanup, calibrated against real Gen-3 sprites (22 Ruby/Sapphire
+# species measured 2026-08-05: 12 small/early, 10 mid/final). The 768->64
+# ``k_centroid`` downscale majority-votes away the continuous 1px outline every
+# hand-pixeled sprite has — the render's faux-pixel grid is not 64-aligned, so
+# an outline thinner than one output pixel loses every tile vote — and that
+# missing line, plus the stray specks the same misalignment leaves, is most of
+# what makes a cell read as "downscaled render" instead of "sprite". Measured
+# properties of the real outlines the pass restores:
+#
+#   * Outline pixels sit at ~0.40-0.51x the interior's median luma and KEEP
+#     THE BODY'S HUE — Charizard's outline is dark red-brown (153, 51, 16),
+#     Gyarados' dark blue, Tyranitar's dark green. They are existing dark
+#     palette entries, not black paint (pure black is common only on
+#     small/baby sprites), and only ~75-80% of the silhouette is
+#     outline-dark — highlights legitimately break the line.
+#   * Lighting is north-west: 21/22 real sprites have near-black SE-facing
+#     edges (median luma 0-16) against lit NW-facing edges (60-140).
+#
+# So: SE-facing edges take the darkest colour the cell already has, NW-facing
+# edges a lighter tinted dark, side edges the measured mid ratio — always
+# snapped to the cell's own colours, so the 16-colour palette gains nothing.
+# The factors below are tunable eyeball placeholders anchored to those
+# measurements (see the module spec).
+_CELL_BACKGROUND_TOLERANCE = 8   # cell colours come from the palette, so near-exact
+_CELL_DARK_LUMA = 95             # at/below this a pixel already reads as outline
+_OUTLINE_NW_LUMA_FACTOR = 0.60   # lit side: a lighter dark
+_OUTLINE_SIDE_LUMA_FACTOR = 0.45 # the measured outline/interior luma ratio
+_RIM_SHADE_LUMA_GAP = 15         # a rim-shade step must differ by at least this
+_RIM_DARKEN_FACTOR = 0.75
+_RIM_BRIGHTEN_FACTOR = 1.25
+
+
+def _is_cell_background(color) -> bool:
+    """Whether a sheet-cell pixel is the flattened transparency background."""
+    return _rgb_distance(color, _KEY_COLOR) <= _CELL_BACKGROUND_TOLERANCE
+
+
+def _nearest_color(pool, target):
+    """The colour in ``pool`` nearest ``target``, or ``None`` on an empty pool."""
+    return min(pool, key=lambda c: _rgb_distance(c, target)) if pool else None
+
+
+def _despeckle_cell(cell: Image.Image) -> Image.Image:
+    """Key out isolated creature specks: <=1 creature neighbour (8-connected).
+
+    The downscale's grid misalignment strands lone pixels of creature colour in
+    the background (drifting embers, aura noise) that hand-pixeled sprites never
+    carry. Decided in a single simultaneous pass over the input, so a chain of
+    specks does not erode from its end inward. Returns a new RGB cell.
+    """
+    out = cell.copy()
+    px = cell.load()
+    opx = out.load()
+    w, h = cell.size
+    for y in range(h):
+        for x in range(w):
+            if _is_cell_background(px[x, y]):
+                continue
+            neighbours = sum(
+                1
+                for nx in (x - 1, x, x + 1)
+                for ny in (y - 1, y, y + 1)
+                if (nx, ny) != (x, y) and 0 <= nx < w and 0 <= ny < h
+                and not _is_cell_background(px[nx, ny])
+            )
+            if neighbours <= 1:
+                opx[x, y] = _KEY_COLOR
+    return out
+
+
+def _restore_cell_outline(cell: Image.Image) -> Image.Image:
+    """Restore a NW-lit Gen-3 outline on a downscaled sheet cell.
+
+    Every creature pixel 4-adjacent to the background (within the canvas —
+    content clipped by the cell border gets no line there) becomes outline,
+    directional per the measured convention: SE-facing edges take the darkest
+    colour the cell already has, NW-facing edges keep the light (a tinted dark
+    at ``_OUTLINE_NW_LUMA_FACTOR``, and only if the pixel was bright enough to
+    need darkening at all), side edges the measured
+    ``_OUTLINE_SIDE_LUMA_FACTOR``. 1px-thin features (background on both
+    opposite sides) are the feature itself, not its edge, and are left alone —
+    darkening them would erase a crane's wing rather than outline it.
+
+    A 1px interior rim-shade then nudges the body the same way: pixels inward
+    of an SE edge drop to the cell's nearest darker colour, pixels inward of a
+    NW edge rise to its nearest brighter one. Every replacement colour already
+    occurs in the cell (reserved black is the only fallback, for a cell with no
+    dark colour of its own), so the Gen-3 16-colour budget is untouched.
+    Returns a new RGB cell.
+    """
+    out = cell.copy()
+    px = out.load()
+    w, h = out.size
+
+    colors = {px[x, y] for y in range(h) for x in range(w)
+              if not _is_cell_background(px[x, y])}
+    dark_pool = [c for c in colors if _relative_luma(c) < _CELL_DARK_LUMA]
+    darkest = min(dark_pool, key=_relative_luma) if dark_pool else (0, 0, 0)
+
+    edits = {}
+    se_edge, nw_edge = [], []
+    for y in range(h):
+        for x in range(w):
+            p = px[x, y]
+            if _is_cell_background(p):
+                continue
+            ox = oy = 0
+            n_bg = 0
+            for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                nx, ny = x + dx, y + dy
+                if 0 <= nx < w and 0 <= ny < h and _is_cell_background(px[nx, ny]):
+                    n_bg += 1
+                    ox += dx
+                    oy += dy
+            if not n_bg:
+                continue
+
+            def bg(nx, ny):
+                return 0 <= nx < w and 0 <= ny < h and _is_cell_background(px[nx, ny])
+
+            if (bg(x - 1, y) and bg(x + 1, y)) or (bg(x, y - 1) and bg(x, y + 1)):
+                continue  # 1px-thin feature
+            direction = ox + oy
+            if direction > 0:
+                se_edge.append((x, y))
+                edits[(x, y)] = darkest
+            elif direction < 0:
+                nw_edge.append((x, y))
+                if _relative_luma(p) >= _CELL_DARK_LUMA:
+                    target = tuple(int(c * _OUTLINE_NW_LUMA_FACTOR) for c in p)
+                    edits[(x, y)] = _nearest_color(dark_pool, target) or darkest
+            elif _relative_luma(p) >= _CELL_DARK_LUMA:
+                target = tuple(int(c * _OUTLINE_SIDE_LUMA_FACTOR) for c in p)
+                edits[(x, y)] = _nearest_color(dark_pool, target) or darkest
+
+    for (x, y), c in edits.items():
+        px[x, y] = c
+
+    # Interior rim-shade: one existing-palette step darker inward of the SE
+    # outline, brighter inward of the NW edge. Built per source colour once.
+    darker_of, brighter_of = {}, {}
+    for c in colors:
+        darker = [k for k in colors
+                  if _relative_luma(k) < _relative_luma(c) - _RIM_SHADE_LUMA_GAP]
+        brighter = [k for k in colors
+                    if _relative_luma(k) > _relative_luma(c) + _RIM_SHADE_LUMA_GAP]
+        darker_of[c] = _nearest_color(
+            darker, tuple(int(v * _RIM_DARKEN_FACTOR) for v in c)) or c
+        brighter_of[c] = _nearest_color(
+            brighter, tuple(min(255, int(v * _RIM_BRIGHTEN_FACTOR)) for v in c)) or c
+    for edge, inward, mapping in ((se_edge, -1, darker_of), (nw_edge, 1, brighter_of)):
+        for x, y in edge:
+            nx, ny = x + inward, y + inward
+            if not (0 <= nx < w and 0 <= ny < h):
+                continue
+            p = px[nx, ny]
+            if _is_cell_background(p) or (nx, ny) in edits:
+                continue
+            px[nx, ny] = mapping.get(p, p)
+    return out
+
+
+def _cleanup_sheet_cell(cell: Image.Image) -> Image.Image:
+    """Full sheet-cell cleanup: despeckle, then restore the NW-lit outline."""
+    return _restore_cell_outline(_despeckle_cell(cell))
+
+
 # Cell layout of the 4x2 stitched sheet, matching the hand-made reference
 # sheets kept outside the repo (Blitin, Bluchis, and one official sheet):
 # row 0 is normal/shiny column pairs of front then back, row 1 is frame 2.
@@ -1248,6 +1415,11 @@ def stitch_spritesheet(stage_dir: str, output_path: str, *, cell_size: int = 64)
     ``k_centroid`` downscale (768/64 = an exact /12) — one resample from full
     detail, never a chain — which picks each cell's dominant tile colour
     without blending new colours into the palette.
+
+    Each cell then goes through ``_cleanup_sheet_cell`` — despeckle plus the
+    NW-lit outline restoration calibrated against real Gen-3 sprites (see the
+    calibration comment above ``_despeckle_cell``) — which likewise only reuses
+    colours the cell already has.
     """
     sheet = Image.new("RGB", (4 * cell_size, 2 * cell_size), _KEY_COLOR)
     for name, col, row in _SHEET_LAYOUT:
@@ -1257,7 +1429,7 @@ def stitch_spritesheet(stage_dir: str, output_path: str, *, cell_size: int = 64)
         cell = Image.open(path).convert("RGB")
         if cell.size != (cell_size, cell_size):
             cell = k_centroid(cell, cell_size, cell_size)
-        sheet.paste(cell, (col * cell_size, row * cell_size))
+        sheet.paste(_cleanup_sheet_cell(cell), (col * cell_size, row * cell_size))
     sheet.save(output_path)
 
 

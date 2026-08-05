@@ -36,6 +36,10 @@ from fakemon_forge.sprites import (
     _fit_half_to_square,
     _content_columns,
     _estimate_clip_tokens,
+    _cleanup_sheet_cell,
+    _despeckle_cell,
+    _restore_cell_outline,
+    _relative_luma,
     _CLIP_TOKEN_LIMIT,
     _FRAMING_TAGS,
     _KEY_COLOR,
@@ -2195,6 +2199,128 @@ def test_spritesheet_downscale_introduces_no_new_colors(tmp_path):
     sheet_colors = set(Image.open(out).convert("RGB").get_flattened_data())
     allowed = set(_VIEW_COLORS.values()) | {_KEY_COLOR}
     assert sheet_colors <= allowed
+
+
+# ---------------------------------------------------------------------------
+# _cleanup_sheet_cell() — despeckle + NW-lit outline restoration
+# ---------------------------------------------------------------------------
+# Calibrated against real Ruby/Sapphire sprites: SE-facing silhouette edges are
+# near-black (measured median luma 0-16), NW-facing edges stay lit (60-140),
+# and outline colours are existing dark palette entries, not black paint.
+
+_CELL_BODY = (200, 80, 60)       # luma ~114: bright enough to need outlining
+_CELL_DARK1 = (60, 20, 20)       # luma ~32: the cell's darkest colour
+_CELL_DARK2 = (120, 40, 40)      # luma ~64: a lighter dark
+
+
+def _body_cell(size=32, block=(10, 10, 21, 21)):
+    """A key-background cell holding one bright block with two dark interior
+    pixels (so the outline pass has a dark pool to draw from)."""
+    cell = Image.new("RGB", (size, size), _KEY_COLOR)
+    d = ImageDraw.Draw(cell)
+    d.rectangle(block, fill=_CELL_BODY)
+    cell.putpixel((14, 14), _CELL_DARK1)
+    cell.putpixel((16, 16), _CELL_DARK2)
+    return cell
+
+
+def test_despeckle_removes_isolated_creature_pixel():
+    cell = _body_cell()
+    cell.putpixel((3, 3), _CELL_BODY)
+    out = _despeckle_cell(cell)
+    assert out.getpixel((3, 3)) == _KEY_COLOR
+
+
+def test_despeckle_keeps_the_body_and_does_not_mutate_input():
+    cell = _body_cell()
+    before = list(cell.get_flattened_data())
+    out = _despeckle_cell(cell)
+    assert out.getpixel((15, 15)) == _CELL_BODY
+    assert list(cell.get_flattened_data()) == before
+
+
+def test_outline_se_edges_take_the_darkest_cell_colour():
+    out = _restore_cell_outline(_body_cell())
+    # Bottom and right block edges face SE: the near-black shadow side.
+    assert out.getpixel((15, 21)) == _CELL_DARK1
+    assert out.getpixel((21, 15)) == _CELL_DARK1
+
+
+def test_outline_nw_edges_stay_lighter_than_se_edges():
+    """The measured NW-light convention: 21/22 real sprites have lit NW edges
+    against near-black SE edges. The NW edge snaps to a lighter dark."""
+    out = _restore_cell_outline(_body_cell())
+    nw = out.getpixel((15, 10))
+    se = out.getpixel((15, 21))
+    assert nw == _CELL_DARK2
+    assert _relative_luma(nw) > _relative_luma(se)
+
+
+def test_outline_reuses_only_colours_the_cell_already_has():
+    """Palette neutrality: real outlines are existing dark entries, and the
+    Gen-3 16-colour budget must not grow at the sheet stage."""
+    cell = _body_cell()
+    before = set(cell.get_flattened_data())
+    out = _cleanup_sheet_cell(cell)
+    assert set(out.get_flattened_data()) <= before
+
+
+def test_outline_falls_back_to_reserved_black_without_a_dark_pool():
+    """A cell with no dark colour of its own can only take the palette's
+    reserved black — never an invented tint."""
+    cell = Image.new("RGB", (32, 32), _KEY_COLOR)
+    ImageDraw.Draw(cell).rectangle((10, 10, 21, 21), fill=_CELL_BODY)
+    out = _restore_cell_outline(cell)
+    assert out.getpixel((15, 21)) == (0, 0, 0)
+
+
+def test_outline_protects_one_pixel_thin_features():
+    """A 1px feature IS the feature, not its edge — darkening it would erase a
+    crane's wing rather than outline it."""
+    cell = _body_cell()
+    for y in range(4, 10):  # 1px antenna, attached to the block's top edge
+        cell.putpixel((15, y), _CELL_BODY)
+    out = _restore_cell_outline(cell)
+    assert out.getpixel((15, 6)) == _CELL_BODY
+
+
+def test_rim_shade_darkens_inward_of_the_se_outline():
+    """One existing-palette step darker just inside the SE silhouette — the
+    interior nudge toward the same NW light the outline states."""
+    out = _restore_cell_outline(_body_cell())
+    assert out.getpixel((14, 20)) == _CELL_DARK2
+
+
+def test_cleanup_leaves_an_all_background_cell_alone():
+    cell = Image.new("RGB", (32, 32), _KEY_COLOR)
+    out = _cleanup_sheet_cell(cell)
+    assert set(out.get_flattened_data()) == {_KEY_COLOR}
+
+
+def test_cleanup_ignores_content_clipped_by_the_cell_border():
+    """Only in-canvas background counts as an edge: a solid full-bleed cell
+    (or a creature running off the cell) gets no line along the canvas
+    border — the creature continues conceptually."""
+    cell = Image.new("RGB", (32, 32), _CELL_BODY)
+    out = _cleanup_sheet_cell(cell)
+    assert set(out.get_flattened_data()) == {_CELL_BODY}
+
+
+def test_spritesheet_cells_carry_the_restored_outline(tmp_path):
+    """Integration: a 64px view skips the downscale and lands in the sheet
+    with its SE edge on the cell's darkest colour and a lighter NW edge."""
+    cell = Image.new("RGB", (64, 64), _KEY_COLOR)
+    d = ImageDraw.Draw(cell)
+    d.rectangle((20, 20, 43, 43), fill=_CELL_BODY)
+    cell.putpixel((30, 30), _CELL_DARK1)
+    cell.putpixel((32, 32), _CELL_DARK2)
+    cell.quantize(colors=4).save(str(tmp_path / "sprite.png"))
+    out = tmp_path / "spritesheet.png"
+    stitch_spritesheet(str(tmp_path), str(out))
+    sheet = Image.open(out).convert("RGB")
+    assert sheet.getpixel((31, 43)) == _CELL_DARK1                  # SE edge
+    assert _relative_luma(sheet.getpixel((31, 20))) > _relative_luma(
+        sheet.getpixel((31, 43)))                                   # NW lit
 
 
 # --------------------------------------------------------------------------
