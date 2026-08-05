@@ -7,6 +7,7 @@ Pillow, and mistralai, e.g. the keep sandbox. Tests that trigger real
 `import torch` calls live in test_sprites_ml.py.
 """
 
+import colorsys
 import random
 import pytest
 from unittest.mock import MagicMock, patch
@@ -44,6 +45,9 @@ from fakemon_forge.sprites import (
     _restore_cell_outline,
     _relative_luma,
     _is_nw_lit,
+    _circular_mean_hue,
+    _shiny_hue_shift,
+    _HUE_FAMILIES,
     _CLIP_TOKEN_LIMIT,
     _FRAMING_TAGS,
     _KEY_COLOR,
@@ -511,6 +515,60 @@ def test_generate_shiny_pins_white_black_but_rotates_creature(tmp_path):
             assert shiny[i:i + 3] == triple
     # ... yet rotation still happened for at least one creature (mid-tone) entry.
     assert any(orig[i:i + 3] != shiny[i:i + 3] for i in range(9, len(orig), 3))
+
+
+# ---------------------------------------------------------------------------
+# Shiny family targeting (_circular_mean_hue / _shiny_hue_shift)
+# ---------------------------------------------------------------------------
+
+def test_circular_mean_hue_wraps_around_red():
+    # 0.97 and 0.03 straddle the hue wrap: the mean is ~0.0, not the cyan at
+    # 0.5 an arithmetic mean would report.
+    mean = _circular_mean_hue([0.97, 0.03])
+    assert mean < 0.01 or mean > 0.99
+
+
+def test_shiny_hue_shift_never_lands_adjacent_to_source():
+    orange = [0.06, 0.08, 0.10]  # a mostly-orange creature
+    dominant = _circular_mean_hue(orange)
+    source_family = int(dominant * _HUE_FAMILIES)
+    for i in range(100):
+        target = (dominant + _shiny_hue_shift(f"Mon{i}", orange)) % 1.0
+        target_family = int(target * _HUE_FAMILIES)
+        dist = min((target_family - source_family) % _HUE_FAMILIES,
+                   (source_family - target_family) % _HUE_FAMILIES)
+        assert dist >= 2
+
+
+def test_shiny_targets_cover_every_allowed_family():
+    # The fix for "every orange mon becomes blue": across many names, an
+    # orange source must reach ALL nine allowed families — pink, yellow, and
+    # purple exactly as reachable as blue or green. 200 uniform draws over 9
+    # bins miss one with probability ~5e-10, so equality is safe to assert.
+    orange = [0.06, 0.08, 0.10]
+    dominant = _circular_mean_hue(orange)
+    families = {
+        int(((dominant + _shiny_hue_shift(f"Mon{i}", orange)) % 1.0) * _HUE_FAMILIES)
+        for i in range(200)
+    }
+    assert len(families) == _HUE_FAMILIES - 3
+
+
+def test_generate_shiny_lifts_low_saturation(tmp_path):
+    # A tan mid-tone (s = 0.4) must come out more saturated at unchanged
+    # value, so brown mons land on a legible colour instead of a different
+    # flavour of mud.
+    img = Image.new("P", (4, 4), 3)
+    img.putpalette([200, 200, 168, 0, 0, 0, 255, 255, 255, 150, 120, 90] + [0, 0, 0] * 252)
+    src = tmp_path / "sprite.png"
+    out = tmp_path / "sprite_shiny.png"
+    img.save(str(src))
+    generate_shiny(str(src), "Muddle", str(out))
+    r, g, b = Image.open(str(out)).getpalette()[9:12]
+    _, s_orig, v_orig = colorsys.rgb_to_hsv(150 / 255, 120 / 255, 90 / 255)
+    _, s_new, v_new = colorsys.rgb_to_hsv(r / 255, g / 255, b / 255)
+    assert s_new > s_orig
+    assert abs(v_new - v_orig) < 0.01
 
 
 # ---------------------------------------------------------------------------
