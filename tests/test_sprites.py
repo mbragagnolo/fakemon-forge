@@ -36,6 +36,7 @@ from fakemon_forge.sprites import (
     _fit_half_to_square,
     _content_columns,
     _estimate_clip_tokens,
+    _is_nw_lit,
     _CLIP_TOKEN_LIMIT,
     _FRAMING_TAGS,
     _KEY_COLOR,
@@ -2132,6 +2133,79 @@ def test_quantize_gen3_does_not_mutate_input():
     _qg96(img)
     assert img.size == original_size
     assert list(img.get_flattened_data()) == original_data
+
+
+# ---------------------------------------------------------------------------
+# _is_nw_lit() — lighting gate measurement
+# ---------------------------------------------------------------------------
+# Real Gen-3 sprites are NW-lit (21/22 measured Ruby/Sapphire sprites pair
+# near-black SE edges with lit NW edges). The gate vetoes only on CLEAR
+# inversion — flat or ambiguous renders pass, because a reroll costs a full
+# render and the sheet cleanup imposes the outline convention anyway.
+
+_LIT_BG = (250, 250, 250)
+_LIT_BRIGHT = (230, 180, 120)
+_LIT_DARK = (60, 40, 30)
+_LIT_MID = (150, 110, 80)
+
+
+def _shaded_block(top_color, bottom_color):
+    """A creature block whose top half is ``top_color``, bottom ``bottom_color``."""
+    img = Image.new("RGB", (100, 100), _LIT_BG)
+    d = ImageDraw.Draw(img)
+    d.rectangle((20, 20, 79, 49), fill=top_color)
+    d.rectangle((20, 50, 79, 79), fill=bottom_color)
+    return img
+
+
+def test_nw_lit_block_passes():
+    assert _is_nw_lit(_shaded_block(_LIT_BRIGHT, _LIT_DARK))
+
+
+def test_se_lit_block_fails():
+    """Bright SE edges against dark NW edges: the shadowed side faces the
+    light — the edge signal's clear inversion."""
+    assert not _is_nw_lit(_shaded_block(_LIT_DARK, _LIT_BRIGHT))
+
+
+def test_flat_block_passes():
+    """No lighting direction at all is not an inversion: only a clear
+    wrong-side render is worth the cost of a reroll."""
+    assert _is_nw_lit(_shaded_block(_LIT_MID, _LIT_MID))
+
+
+def _ringed_interior_block(top_color, bottom_color):
+    """A block with a uniform mid-tone edge ring, so only the INTERIOR
+    carries the lighting: the edge signal ties and the verdict comes from
+    the highlight/shadow mass centroids."""
+    img = Image.new("RGB", (100, 100), _LIT_BG)
+    d = ImageDraw.Draw(img)
+    d.rectangle((20, 20, 79, 79), fill=_LIT_MID)
+    d.rectangle((24, 24, 75, 49), fill=top_color)
+    d.rectangle((24, 50, 75, 75), fill=bottom_color)
+    return img
+
+
+def test_interior_highlight_on_top_passes():
+    assert _is_nw_lit(_ringed_interior_block(_LIT_BRIGHT, _LIT_DARK))
+
+
+def test_interior_highlight_on_bottom_fails():
+    """The failure no post-pass can fix: edges neutral, but the highlight
+    mass sits SE of the shadow mass."""
+    assert not _is_nw_lit(_ringed_interior_block(_LIT_DARK, _LIT_BRIGHT))
+
+
+def test_all_background_passes():
+    """Nothing to judge must never trigger a lighting reroll on top of
+    whatever went wrong first."""
+    assert _is_nw_lit(Image.new("RGB", (100, 100), _LIT_BG))
+
+
+def test_tiny_creature_passes():
+    img = Image.new("RGB", (100, 100), _LIT_BG)
+    ImageDraw.Draw(img).rectangle((48, 48, 51, 51), fill=_LIT_DARK)
+    assert _is_nw_lit(img)
 
 
 # ---------------------------------------------------------------------------
