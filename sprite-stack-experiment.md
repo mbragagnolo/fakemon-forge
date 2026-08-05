@@ -111,17 +111,8 @@ evidence — one good seed here plus one mediocre shipped sprite.
 
 ## Still unresolved
 
-**V-Pred-1.0 at CFG 1.0–1.5.** This is the one untested lever that could make
-the stack work, and the ladder motivates it precisely: v-prediction's defining
-property is holding full value range at low guidance, and CFG 1.0–1.5 — where
-the pair survives but tone washes out — is exactly where epsilon is known to
-fail. `Laxhar/noobai-XL-Vpred-1.0` is on HF in diffusers format, ungated,
-~6.6 GB. Porting needs `prediction_type="v_prediction"`,
-`rescale_betas_zero_snr=True`, and probably a `guidance_rescale`.
-
-The sharp one-render test: **CFG 1.5, 10 steps, trailing, seed 1234.** If tone
-fills in while the pair holds, the stack works. If it stays pale, the stack is
-closed.
+**V-Pred-1.0 at CFG 1.0–1.5.** ~~This is the one untested lever~~ **Executed
+2026-08-05 — see the addendum below. Verdict: closed for production.**
 
 Lower-priority unknowns:
 
@@ -150,3 +141,54 @@ Two practical notes: renders take ~3 min each on the RTX 4000, so launch
 detached (`Start-Process`) rather than under a tool timeout; and verify a LoRA
 stack actually landed via `pipe.get_list_adapters()` plus a before/after weight
 delta, rather than assuming.
+
+## Addendum (2026-08-05): the V-Pred test — executed and closed
+
+Ran the pre-registered test and two follow-up rounds on
+`Laxhar/noobai-XL-Vpred-1.0` (fp16, `prediction_type="v_prediction"`,
+`rescale_betas_zero_snr=True`, trailing spacing, full stack, 10 steps, Euler,
+seed 1234, no negative, `clip_skip=1`). Renders: 12–13 s each on this GPU,
+peak 6.5 GiB — ~14x faster than main's 28-step config. Evidence in
+`sprite-stack-experiment/vpred_*.png`.
+
+**Round 1 — the pre-registered ladder (CFG 1.0 / 1.5 / 2.0, plus 1.5 with
+`guidance_rescale=0.7`).** V-Pred delivered exactly what motivated it: tone
+holds at low CFG (storm-gray with real values, saturated blue wings and yellow
+accents — nothing washed out, at every rung). But the **pair is gone at every
+CFG, including 1.0** where epsilon held it: one wide centred creature filling
+the 2:1 canvas each time. Same prompt (preserved in
+`resources/Screenshot 2026-08-04 *.png` — Thundro's `run.json` was lost in an
+archive move; the tag string in those screenshots is the same prompt).
+
+**Round 2 — summoning the pair.** Two levers: the author's 3:2 aspect
+(1216×832), and *asking* for the layout — `multiple views, front and back,`
+inserted after `gen3,` (danbooru vocabulary the base knows; on epsilon the
+pair came from the LoRA prior alone, the prompt never asked). The aspect alone
+does nothing. **The tag works**: clean two-view canvases on both aspects at
+CFG 1.5, well-separated with a splittable background gap.
+
+**Round 3 — does the tagged pair survive real guidance?** CFG 2.0 / 2.5 / 3.0
+with the tag on 2:1. The layout now survives to ~2.5 (tone improving with
+CFG), and the halves begin merging across the midline at 3.0. So the epsilon
+trade ("pair XOR tone") genuinely resolves on V-Pred + tag at CFG ~2.5.
+
+**Why it is still closed:** across every variant, all seeds-1234 renders
+produce **mirrored twins, never a genuine back view** — the right-hand
+creature shows its face. The `multiple views` tag summons the *layout* but
+not the trained front/back semantics, which apparently do not survive on this
+base at any tested setting. Design richness also stays visibly below the
+epsilon baseline (`baseline_cfg5.5_s28_canvas.png` — compare its true
+back-view right half and detailed mane). A back sprite that is a mirrored
+front is worse than no back sprite: it lies about the creature.
+
+**What survives the closure:**
+
+- 13-second renders make this stack the right harness for *future rendering
+  experiments* (prompt A/Bs, seed sweeps) even though production stays on
+  main — 14x cheaper iteration.
+- The `multiple views, front and back` tag finding is prompt-side and
+  base-independent in principle; if the pair layout ever weakens on main's
+  epsilon config, it is the first thing to try there.
+- One seed only, as before. The mirrored-twin failure was consistent across
+  all 7 pair renders, though, which is more evidence than the single-seed
+  caveats elsewhere in this log.
