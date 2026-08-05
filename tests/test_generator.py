@@ -669,6 +669,23 @@ def test_system_prompt_bans_framing_words_in_sprite_prompt():
         assert f'"{banned}"' in _SYSTEM_PROMPT
 
 
+def test_system_prompt_bans_small_size_words_in_sprite_prompt():
+    """The other direction of the same failure: on the first ROM-injection
+    round, 94 of 99 stage-1 prompts said "tiny"/"small" and their sprites
+    filled a median 48% of the canvas against 78% without — unreadable once a
+    GBA cell scales that by 1/12. build_prompt strips these mechanically; the
+    ban here is what lets the model spend the tag on something that helps."""
+    for banned in ("tiny", "small", "little", "miniature"):
+        assert f'"{banned}"' in _SYSTEM_PROMPT
+
+
+def test_system_prompt_redirects_juvenile_smallness_into_proportions():
+    """The ban needs somewhere for juvenile-ness to go, or the model just picks
+    a synonym — a child form shows as simpler, rounder proportions."""
+    assert "SIMPLER, ROUNDER" in _SYSTEM_PROMPT
+    assert "plump undeveloped body" in _SYSTEM_PROMPT
+
+
 def test_system_prompt_bans_enclosing_and_scenery_words_in_sprite_prompt():
     """An enclosing shape becomes the picture's frame, and a setting becomes
     painted scenery. Both defeat the flat-backdrop precondition that

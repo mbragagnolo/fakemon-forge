@@ -50,9 +50,20 @@ _FRAMING_TAGS = "single creature, full body, centered"
 # the guarantee does not depend on a model following an instruction. Scale
 # belongs in height_dm/weight_hg; in a prompt it only tells the renderer how
 # much of the frame to fill.
+#
+# The small-side words cost the opposite failure, measured on the first full
+# ROM-injection round (185 sprites): 94 of 99 stage-1 prompts carried "tiny"/
+# "small" (the evo-progression wording steers juveniles there), and prompts
+# with a small-size word filled a median 48% of the canvas against 78%
+# without — unreadably tiny once a GBA cell scales that by 1/12. Proportion
+# words ("stubby", "short") are deliberately NOT stripped: they describe the
+# creature's shape, which is exactly where juvenile-ness is supposed to live
+# once the size words are gone.
 _FRAMING_WORDS = (
     "large", "huge", "giant", "gigantic", "enormous", "colossal", "massive",
     "towering", "imposing", "close-up", "closeup", "dramatic", "epic",
+    "tiny", "small", "little", "miniature", "mini", "minuscule", "diminutive",
+    "petite",
 )
 _FRAMING_WORD_RE = re.compile(
     r"\b(?:" + "|".join(re.escape(w) for w in _FRAMING_WORDS) + r")\b", re.IGNORECASE
@@ -1084,6 +1095,8 @@ def _split_front_back_with_retry(canvas: Image.Image, regenerate):
 def generate_sprite_pair(
     prompt: str, types: list[str], front_output_path: str, back_output_path: str,
     *, pipeline, seed: int | None = None,
+    front_raw_output_path: str | None = None,
+    back_raw_output_path: str | None = None,
 ) -> None:
     """Generate a front+back sprite pair from one side-by-side SDXL canvas.
 
@@ -1099,6 +1112,14 @@ def generate_sprite_pair(
     pixel at the Gen-3 contract's key index 0), it is skipped with a ``stderr``
     warning instead of being saved — this function never raises for a split or
     empty-back degradation, only for a genuine ``pipeline`` failure.
+
+    ``front_raw_output_path`` / ``back_raw_output_path``, when given, save the
+    squared RGB halves exactly as handed to quantization — no palette, no
+    background keying — as recovery artifacts for when the chroma-key flatten
+    misjudges a background (a keyed pocket that was creature detail, a key
+    colour bleeding into the body). The raw back is saved even when the keyed
+    back is skipped as empty: that skip is precisely a case the raw exists to
+    let a human second-guess.
     """
     def _render(render_seed):
         result = pipeline(
@@ -1116,10 +1137,17 @@ def generate_sprite_pair(
     reroll_seed = seed + 1 if seed is not None else None
     front_raw, back_raw = _split_front_back_with_retry(canvas, lambda: _render(reroll_seed))
 
-    front = postprocess(_fit_half_to_square(front_raw))
+    front_square = _fit_half_to_square(front_raw)
+    back_square = _fit_half_to_square(back_raw)
+    if front_raw_output_path is not None:
+        front_square.save(front_raw_output_path)
+    if back_raw_output_path is not None:
+        back_square.save(back_raw_output_path)
+
+    front = postprocess(front_square)
     front.save(front_output_path)
 
-    back = quantize_to_reference(_fit_half_to_square(back_raw), front)
+    back = quantize_to_reference(back_square, front)
     if _content_bbox(back, background=0) is None:
         print(
             f"warning: generate_sprite_pair back half for {back_output_path} is "

@@ -183,6 +183,34 @@ def test_build_prompt_framing_strip_is_case_insensitive_and_word_bounded():
     assert "enlarged" in build_prompt("enlarged horn")
 
 
+def test_build_prompt_strips_small_size_words_but_keeps_their_tags():
+    """The small direction of the same failure: on the first ROM-injection
+    round, 94 of 99 stage-1 prompts said "tiny"/"small" and filled a median
+    48% of the canvas against 78% without — a speck once a GBA cell divides
+    that by 12. Only the size word goes; the anatomy it modified stays."""
+    result = build_prompt("tiny round rodent, small pointed ears, little claws")
+    for banned in ("tiny", "small", "little"):
+        assert banned not in result.lower()
+    assert "round rodent" in result
+    assert "pointed ears" in result
+    assert "claws" in result
+
+
+def test_build_prompt_small_strip_is_word_bounded():
+    """"smallpox pattern" is fanciful but "minicorn" makes the point: no
+    substring mangling on either side of the new words."""
+    assert "minicorn horn" in build_prompt("minicorn horn")
+    assert "smallish" in build_prompt("smallish frill")
+
+
+def test_build_prompt_leaves_proportion_words_alone():
+    """"stubby"/"short" describe the creature's shape, not the framing — they
+    are exactly where juvenile-ness goes now that size words are stripped."""
+    result = build_prompt("stubby limbs, short tail, plump body")
+    assert "stubby limbs" in result
+    assert "short tail" in result
+
+
 def test_build_prompt_drops_a_tag_that_was_only_a_framing_word():
     result = build_prompt("round blob, imposing, teal scales")
     body = result[len(f"gen3, {_FRAMING_TAGS}, "):-len(", white background")]
@@ -192,7 +220,7 @@ def test_build_prompt_drops_a_tag_that_was_only_a_framing_word():
 def test_build_prompt_leaves_a_clean_prompt_unstripped(capsys):
     """No warning when there was nothing to strip — the message means a real
     contract violation happened, so it must not cry wolf."""
-    build_prompt("small round ceramic mug, glossy white porcelain")
+    build_prompt("round ceramic mug, glossy white porcelain")
     assert "stripped framing/scale words" not in capsys.readouterr().err
 
 
