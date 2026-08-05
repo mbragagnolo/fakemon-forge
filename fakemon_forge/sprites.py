@@ -1,6 +1,7 @@
 import colorsys
 import hashlib
 import json
+import math
 import re
 import statistics
 import sys
@@ -646,37 +647,97 @@ def _is_achromatic(r: int, g: int, b: int) -> bool:
     return lum < 40 or lum > 215
 
 
+# 30°-wide named-colour bins on the hue wheel (red, orange, yellow, ...).
+_HUE_FAMILIES = 12
+# Gamma lift applied to saturation during the shiny move: low-sat browns/tans
+# gain the most (0.4 → ~0.5) while vivid colours barely move, so a brown mon
+# can land on a legible colour instead of a different flavour of mud.
+_SHINY_SAT_GAMMA = 0.75
+# Hues this close to grey carry no reliable hue information (rgb_to_hsv
+# reports h=0 for pure grey), so they don't vote on the dominant hue.
+_MIN_CHROMATIC_SAT = 0.05
+
+
+def _circular_mean_hue(hues: list[float]) -> float:
+    """Circular mean of hues in [0, 1): reds at 0.97 and 0.03 average to ~0.0,
+    not to the cyan at 0.5 an arithmetic mean would report."""
+    x = sum(math.cos(2 * math.pi * h) for h in hues)
+    y = sum(math.sin(2 * math.pi * h) for h in hues)
+    if abs(x) < 1e-9 and abs(y) < 1e-9:
+        # Perfectly opposing hues have no meaningful mean; any deterministic
+        # pick works — the family move only needs *a* reference point.
+        return hues[0]
+    return (math.atan2(y, x) / (2 * math.pi)) % 1.0
+
+
+def _shiny_hue_shift(name: str, source_hues: list[float]) -> float:
+    """Pick the shiny hue shift by targeting a colour *family*, not raw degrees.
+
+    A shift sampled uniformly in degrees lands in the green-through-blue arc
+    most of the time — those families span roughly half the wheel while red,
+    orange, and yellow are narrow slivers — which is why every orange mon went
+    blue. Instead, bin the wheel into ``_HUE_FAMILIES`` equal families, find
+    the family of the dominant source hue, and let the name hash pick uniformly
+    among the families at least two bins away. Pink, yellow, and purple become
+    exactly as likely destinations as blue or green, and the dominant hue
+    always moves ≥ 45°, so the shiny is never a near-miss of the normal.
+    """
+    seed = int(hashlib.md5(name.encode()).hexdigest(), 16)
+    dominant = _circular_mean_hue(source_hues) if source_hues else 0.0
+    source_family = int(dominant * _HUE_FAMILIES) % _HUE_FAMILIES
+    offset = 2 + seed % (_HUE_FAMILIES - 3)  # 2..10: skips source and both neighbours
+    target_family = (source_family + offset) % _HUE_FAMILIES
+    target_hue = (target_family + 0.5) / _HUE_FAMILIES
+    return (target_hue - dominant) % 1.0
+
+
 def generate_shiny(sprite_path: str, name: str, output_path: str) -> None:
-    """Derive a shiny palette from an existing sprite by hue-rotating mid-tone colors.
+    """Derive a shiny palette by moving mid-tone colors to another hue family.
 
     The Gen-3 contract's reserved entries are pinned unconditionally, never left
     to the achromatic threshold: the transparency key at **index 0** (the key
     ``(200, 200, 168)`` is chromatic — lum ~196 — so the threshold would rotate
     it), plus any ``(255, 255, 255)`` (white) or ``(0, 0, 0)`` (black) entry.
-    All other (creature) entries are hue-rotated by a shift seeded from the
-    Pokémon's name so each one is unique. ``_is_achromatic`` still preserves any
-    remaining very-bright/very-dark creature entries.
+    All other (creature) entries are hue-rotated by a single shift that lands
+    the dominant creature hue in a different colour family picked from the
+    name hash (see ``_shiny_hue_shift``), with a gamma lift on saturation so
+    low-sat browns stay legible. ``_is_achromatic`` still preserves any
+    remaining very-bright/very-dark creature entries. The shift is a pure
+    function of (palette, name), so views sharing one palette share one shiny
+    palette.
     """
     img = Image.open(sprite_path)
     if img.mode != "P":
         raise ValueError(f"Expected palette-mode image, got {img.mode}")
 
-    hue_shift = (int(hashlib.md5(name.encode()).hexdigest(), 16) % 300 + 30) / 360.0
-
     flat = img.getpalette()  # [R, G, B, R, G, B, ...] × 256
-    new_palette = []
-    for i in range(0, len(flat), 3):
-        r, g, b = flat[i], flat[i + 1], flat[i + 2]
+
+    def _rotates(i: int, r: int, g: int, b: int) -> bool:
         # Pin key (index 0), white, and black unconditionally — by explicit
         # match, independent of _is_achromatic — so the chromatic key is
         # provably never rotated.
         if i == 0 or (r, g, b) == (255, 255, 255) or (r, g, b) == (0, 0, 0):
-            new_palette.extend([r, g, b])
-        elif _is_achromatic(r, g, b):
+            return False
+        return not _is_achromatic(r, g, b)
+
+    source_hues = []
+    for i in range(0, len(flat), 3):
+        r, g, b = flat[i], flat[i + 1], flat[i + 2]
+        if _rotates(i, r, g, b):
+            h, s, _ = colorsys.rgb_to_hsv(r / 255, g / 255, b / 255)
+            if s >= _MIN_CHROMATIC_SAT:
+                source_hues.append(h)
+    hue_shift = _shiny_hue_shift(name, source_hues)
+
+    new_palette = []
+    for i in range(0, len(flat), 3):
+        r, g, b = flat[i], flat[i + 1], flat[i + 2]
+        if not _rotates(i, r, g, b):
             new_palette.extend([r, g, b])
         else:
             h, s, v = colorsys.rgb_to_hsv(r / 255, g / 255, b / 255)
             h = (h + hue_shift) % 1.0
+            s = s ** _SHINY_SAT_GAMMA
             nr, ng, nb = colorsys.hsv_to_rgb(h, s, v)
             new_palette.extend([round(nr * 255), round(ng * 255), round(nb * 255)])
 
