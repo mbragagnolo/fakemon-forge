@@ -1,7 +1,13 @@
 import json
 import pytest
 
-from fakemon_forge.export_ini import export_ini, _resolve_type, _type_index
+from fakemon_forge.export_ini import (
+    _TRAIT_MOVES,
+    _resolve_type,
+    _type_index,
+    enrich_line,
+    export_ini,
+)
 from fakemon_forge.generator import _TYPE_POOL
 
 # ---------------------------------------------------------------------------
@@ -513,6 +519,188 @@ def test_claws_unlock_cut(tmp_path):
         tmp_path, {**_BASE, "types": ["Grass"], "traits": ["claws"]},
     ))
     assert _CUT in machines
+
+
+# ---------------------------------------------------------------------------
+# Species record — catch rate, exp, gender, growth, egg groups
+# ---------------------------------------------------------------------------
+
+def _blob(fields):
+    return bytes.fromhex(fields["BaseStats"])
+
+
+# _BASE's BST is 315 (attack 52): the 300-379 catch band, no legendary gate.
+_LEGENDARY_STATS = {"hp": 100, "attack": 100, "defense": 95,
+                    "sp_atk": 95, "sp_def": 95, "speed": 95}  # BST 580
+
+
+def test_species_record_is_derived_not_flat(tmp_path):
+    """Regression: catch 120 / exp 80 / gender 0x7F / Amorphous eggs were
+    hardcoded for every species."""
+    blob = _blob(_export(tmp_path, dict(_BASE)))
+    assert blob[8] == 180                 # catch: 300-379 band
+    assert blob[9] == 86                  # exp: round(315*0.4)-40
+    assert blob[16] == 0x7F               # gendered
+    assert blob[18] == 70                 # happiness
+    assert blob[19] == 0                  # growth: Medium Fast (own BST < 400)
+    assert (blob[20], blob[21]) == (5, 5)  # Field/Field, not Amorphous
+
+
+def test_legendary_grade_record(tmp_path):
+    """BST 580 is the legendary band's flat total: genderless, unbreedable,
+    catch rate 3, aloof happiness."""
+    blob = _blob(_export(tmp_path, {**_BASE, "base_stats": _LEGENDARY_STATS}))
+    assert blob[8] == 3
+    assert blob[16] == 0xFF
+    assert blob[18] == 35
+    assert (blob[20], blob[21]) == (15, 15)  # Undiscovered
+
+
+@pytest.mark.parametrize("extra, expected", [
+    ({"types": ["Water"], "traits": ["wings"]}, (2, 4)),    # Water 1 / Flying
+    ({"types": ["Steel"], "traits": ["fists"]}, (10, 8)),   # Mineral / Human-Like
+    ({"types": ["Ghost"]}, (11, 11)),                       # Amorphous
+    ({"types": ["Fire"], "levitates": True}, (11, 11)),     # Amorphous
+    ({"types": ["Dragon"]}, (14, 14)),                      # Dragon
+    # Ground is not a mineral body: a Ground mammal breeds in Field like
+    # Sandshrew and Phanpy, not with Geodude.
+    ({"types": ["Ground"], "traits": ["claws"]}, (5, 5)),   # Field
+    ({"types": ["Fairy"]}, (6, 6)),                         # export alias
+])
+def test_egg_groups_follow_type_and_anatomy(tmp_path, extra, expected):
+    blob = _blob(_export(tmp_path, {**_BASE, **extra}))
+    assert (blob[20], blob[21]) == expected
+
+
+def test_stored_record_fields_win_over_derivation(tmp_path):
+    fields = _export(tmp_path, {
+        **_BASE, "catch_rate": 45, "gender_ratio": 254, "egg_groups": [1, 5],
+    })
+    blob = _blob(fields)
+    assert blob[8] == 45
+    assert blob[16] == 254
+    assert (blob[20], blob[21]) == (1, 5)
+
+
+def test_malformed_stored_record_falls_back(tmp_path):
+    fields = _export(tmp_path, {
+        **_BASE, "catch_rate": "many", "base_exp": -3, "egg_groups": [0, 99],
+    })
+    blob = _blob(fields)
+    assert blob[8] == 180
+    assert blob[9] == 86
+    assert (blob[20], blob[21]) == (5, 5)
+
+
+def test_out_of_range_growth_rate_falls_back(tmp_path):
+    """Growth's byte range is 0-5, not 0-255: a stored 77 would be a broken
+    exp curve, so it fails validation even though it fits the byte."""
+    blob = _blob(_export(tmp_path, {**_BASE, "growth_rate": 77}))
+    assert blob[19] == 0  # derived: own BST 315 < 400 → Medium Fast
+
+
+# ---------------------------------------------------------------------------
+# Stored derivations — stats.json as the machine contract
+# ---------------------------------------------------------------------------
+
+def test_stored_moveset_is_serialized_verbatim(tmp_path):
+    fields = _export(tmp_path, {**_BASE, "moveset": [[5, 52], [1, 33]]})
+    assert _moves(fields) == [(1, 33), (5, 52)]
+
+
+@pytest.mark.parametrize("bad", [
+    "junk", [], [[1]], [["a", "b"]], [[0, 33]], [[1, 999]], [[1, 33, 7]],
+])
+def test_malformed_stored_moveset_falls_back_to_derivation(tmp_path, bad):
+    fields = _export(tmp_path, {**_BASE, "moveset": bad})
+    assert len(_moves(fields)) == 13
+
+
+def test_stored_tmhm_is_serialized_verbatim(tmp_path):
+    fields = _export(tmp_path, {**_BASE, "tmhm": "00000000000000ff"})
+    assert fields["TMHMCompatibility"] == "00000000000000FF"
+
+
+@pytest.mark.parametrize("bad", ["xyz", "1234", 42, None])
+def test_malformed_stored_tmhm_falls_back_to_derivation(tmp_path, bad):
+    fields = _export(tmp_path, {**_BASE, "tmhm": bad})
+    assert _TOXIC in _machines(fields)
+
+
+# ---------------------------------------------------------------------------
+# enrich_line — line-coherent derivation
+# ---------------------------------------------------------------------------
+
+def _stage(name, stage_no, types, stats_delta=0, traits=("fangs", "tail")):
+    stats = {k: v + stats_delta for k, v in _BASE["base_stats"].items()}
+    return {**_BASE, "name": name, "stage": stage_no, "types": list(types),
+            "base_stats": stats, "traits": list(traits)}
+
+
+def test_enrich_attaches_the_full_contract():
+    stage = enrich_line([_stage("Solo", 1, ["Fire"])])[0]
+    assert stage["moveset"] and stage["tmhm"]
+    assert {"catch_rate", "base_exp", "gender_ratio", "egg_cycles",
+            "base_happiness", "growth_rate", "egg_groups"} <= set(stage)
+
+
+def test_enriched_stats_roundtrip_through_export(tmp_path):
+    """The ini serializes exactly what stats.json carries — derivation
+    happens once, at enrichment."""
+    stage = enrich_line([_stage("Solo", 1, ["Fire"])])[0]
+    fields = _export(tmp_path, stage)
+    assert _moves(fields) == sorted(tuple(m) for m in stage["moveset"])
+    assert fields["TMHMCompatibility"] == stage["tmhm"]
+    assert _blob(fields)[8] == stage["catch_rate"]
+
+
+def test_line_shares_one_growth_rate():
+    """Evolving must never change a mon's exp group: one rate per line,
+    from the final stage's BST (base+60 on each stat = 675, Slow)."""
+    stages = enrich_line([
+        _stage("Pup", 1, ["Normal"], 0),
+        _stage("Adult", 2, ["Normal"], 30),
+        _stage("Apex", 3, ["Normal"], 60),
+    ])
+    assert [s["growth_rate"] for s in stages] == [5, 5, 5]
+
+
+def test_line_stages_share_one_pick_order():
+    """Same line, same traits, different names: both stages draw their
+    bucket picks from one shuffled order (seeded by stage 1's name), so the
+    stage with less room takes a prefix of the other's picks instead of
+    re-rolling — the Pupwol line's Bite-vanishes-at-stage-2 bug."""
+    pup, apex = enrich_line([
+        _stage("Pup", 1, ["Normal"]),
+        _stage("Apex", 3, ["Normal", "Dark"]),
+    ])
+    bucket_ids = {mid for t in ("fangs", "tail") for _, mid in _TRAIT_MOVES[t]}
+    pup_picks = {mid for _, mid in pup["moveset"]} & bucket_ids
+    apex_picks = {mid for _, mid in apex["moveset"]} & bucket_ids
+    assert apex_picks  # the trait floor guarantees some
+    assert apex_picks <= pup_picks
+
+
+def test_identical_siblings_get_identical_movesets():
+    """The seed is the line, not the stage name — two stages that differ
+    only in name learn the same moves."""
+    a, b = enrich_line([
+        _stage("Pup", 1, ["Normal"]), _stage("Wolfy", 2, ["Normal"]),
+    ])
+    assert a["moveset"] == b["moveset"]
+
+
+def test_reenriching_rebuilds_stale_derivations():
+    """Enrichment is authoritative: a stage carrying values from an earlier
+    enrichment (or a hand edit) gets them re-derived, so re-enriching after
+    a table change refreshes movesets and TM bits, not just the record.
+    Stored-field trust belongs to export_ini alone."""
+    stage = {**_stage("Solo", 1, ["Fire"]),
+             "moveset": [[1, 1]], "tmhm": "00" * 8}
+    enriched = enrich_line([stage])[0]
+    assert enriched["moveset"] != [[1, 1]]
+    assert len(enriched["moveset"]) == 13
+    assert enriched["tmhm"] != "00" * 8
 
 
 # ---------------------------------------------------------------------------

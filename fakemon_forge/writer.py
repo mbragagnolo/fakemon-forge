@@ -13,6 +13,14 @@ _STATS_DEFAULTS = {"levitates": False, "height_dm": 5, "weight_hg": 30,
 
 _STATS_KEYS = {"name", "stage", "types", "ability", "base_stats", *_STATS_DEFAULTS}
 
+# ROM-derived fields attached by ``export_ini.enrich_line``; persisted only
+# when present so a hand-built stage dict (or a pre-enrichment caller) still
+# writes cleanly, and ``export_ini`` re-derives whatever is absent.
+_STATS_DERIVED = {
+    "moveset", "tmhm", "catch_rate", "base_exp", "gender_ratio",
+    "egg_cycles", "base_happiness", "growth_rate", "egg_groups",
+}
+
 # Repo root, resolved the same way generator.py/export_ini.py locate
 # resources/: two levels up from this file (fakemon_forge/../).
 _REPO_ROOT = Path(__file__).parent.parent
@@ -113,6 +121,9 @@ def _write_stats(stage: dict, stage_dir: Path) -> None:
     data = {k: stage[k] for k in _STATS_KEYS if k not in _STATS_DEFAULTS}
     for key, fallback in _STATS_DEFAULTS.items():
         data[key] = stage.get(key, fallback)
+    for key in sorted(_STATS_DERIVED):
+        if key in stage:
+            data[key] = stage[key]
     (stage_dir / "stats.json").write_text(
         json.dumps(data, indent=2), encoding="utf-8"
     )
