@@ -40,7 +40,9 @@ _TYPE_BODY_COLOR = {
     0x11: 4,  # Dark → Black
 }
 
-# Thematic level-up move pools per type (level, move_id)
+# Thematic level-up move pools per type (level, move_id). Every pool opens
+# with a damaging move: a low-level encounter draws only the last entries at
+# or below its level, so a status opener would leave it unable to attack.
 _MOVE_POOL: dict[str, list[tuple[int, int]]] = {
     "Normal":   [(1,33),(6,45),(14,34),(24,216),(36,39),(44,63)],
     "Water":    [(1,145),(8,55),(15,61),(22,240),(30,57),(38,352),(46,56)],
@@ -50,16 +52,21 @@ _MOVE_POOL: dict[str, list[tuple[int, int]]] = {
     "Ice":      [(1,181),(10,58),(20,196),(30,59),(40,258),(50,329)],
     "Fighting": [(1,67),(10,68),(20,238),(30,280),(40,276),(50,223)],
     "Poison":   [(1,40),(10,51),(20,124),(30,188),(40,92),(50,305)],
-    "Ground":   [(1,28),(10,89),(20,189),(30,341),(40,330),(50,284)],
+    "Ground":   [(1,189),(10,89),(20,28),(30,341),(40,330),(50,284)],
     "Flying":   [(1,16),(10,64),(20,332),(30,314),(40,239),(50,143)],
-    "Bug":      [(1,81),(10,42),(20,210),(30,318),(40,224),(50,141)],
+    "Bug":      [(1,42),(10,81),(20,210),(30,318),(40,224),(50,141)],
     "Rock":     [(1,88),(10,157),(20,317),(30,350),(40,246),(50,307)],
     "Ghost":    [(1,310),(10,247),(20,109),(30,325),(40,171),(50,194)],
     "Dragon":   [(1,82),(10,239),(20,225),(30,337),(40,349),(50,200)],
     "Dark":     [(1,44),(10,168),(20,228),(30,242),(40,247),(50,262)],
-    "Steel":    [(1,106),(10,232),(20,211),(30,309),(40,334),(50,231)],
+    "Steel":    [(1,232),(10,106),(20,211),(30,309),(40,334),(50,231)],
     "Psychic":  [(1,93),(10,95),(20,60),(30,94),(40,347),(50,326)],
 }
+
+# Normal staples every species learns regardless of typing — real dex entries
+# carry these alongside their type moves, and they guarantee an attack from
+# level 1 even for mons whose secondary pools skew toward status.
+_NORMAL_BACKBONE: list[tuple[int, int]] = [(1, 33), (4, 45)]  # Tackle, Growl
 
 # Extra thematic moves injected per custom ability name
 _ABILITY_MOVES: dict[str, list[tuple[int, int]]] = {
@@ -227,23 +234,31 @@ def _build_moveset(data: dict) -> list[tuple[int, int]]:
     types = [t if t != "Fairy" else "Normal" for t in data["types"]]
     ability = data.get("ability", "")
 
-    seen: dict[int, int] = {}  # level → move_id
+    # Deduped by move id, not by level: Gen 3 tables allow several moves at
+    # one level, and keying on level silently dropped whichever colliding
+    # move arrived second.
+    seen: set[int] = set()
+    moves: list[tuple[int, int]] = []
 
     def add(level: int, mid: int) -> None:
-        if level not in seen:
-            seen[level] = mid
+        if mid not in seen:
+            seen.add(mid)
+            moves.append((level, mid))
+
+    for lv, mid in _NORMAL_BACKBONE:
+        add(lv, mid)
 
     for lv, mid in _MOVE_POOL.get(types[0], []):
         add(lv, mid)
 
     if len(types) > 1 and types[1] != types[0]:
         for lv, mid in _MOVE_POOL.get(types[1], [])[1::2]:
-            add(lv + (2 if lv in seen else 0), mid)
+            add(lv, mid)
 
     for lv, mid in _ABILITY_MOVES.get(ability, []):
-        add(lv + (2 if lv in seen else 0), mid)
+        add(lv, mid)
 
-    return sorted(seen.items())
+    return sorted(moves)
 
 
 def _encode_jambo51(moves: list[tuple[int, int]]) -> str:

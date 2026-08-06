@@ -267,6 +267,82 @@ def test_fairy_still_encodes_as_normal(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Level-up moves
+# ---------------------------------------------------------------------------
+
+_TACKLE, _GROWL = 33, 45
+
+
+def _moves(fields):
+    """Decoded (level, move_id) pairs from the original-format level-up blob."""
+    blob = fields["LevelUpAttacksOriginal"]
+    assert blob.endswith("FFFF0000")
+    body = blob[:-8]
+    pairs = []
+    for i in range(0, len(body), 4):
+        val = int(body[i:i + 2], 16) | (int(body[i + 2:i + 4], 16) << 8)
+        pairs.append((val >> 9, val & 0x1FF))
+    return pairs
+
+
+def test_every_species_learns_the_normal_backbone(tmp_path):
+    moves = _moves(_export(tmp_path, {**_BASE, "types": ["Ghost"]}))
+    assert (1, _TACKLE) in moves
+    assert (4, _GROWL) in moves
+
+
+def test_backbone_does_not_displace_the_primary_type_level_one_attack(tmp_path):
+    """Tackle also sits at level 1 — Ember must coexist with it, not vanish."""
+    moves = _moves(_export(tmp_path, dict(_BASE)))
+    assert (1, 52) in moves  # Ember
+    assert (1, _TACKLE) in moves
+
+
+def test_backbone_is_not_duplicated_for_normal_types(tmp_path):
+    """A Normal mon draws Tackle/Growl from its own pool too — once each."""
+    moves = _moves(_export(tmp_path, {**_BASE, "types": ["Normal"]}))
+    ids = [mid for _, mid in moves]
+    assert len(ids) == len(set(ids))
+    assert moves.count((1, _TACKLE)) == 1
+    # Growl keeps its backbone slot; the pool's level-6 copy is the duplicate.
+    assert (4, _GROWL) in moves and (6, _GROWL) not in moves
+
+
+@pytest.mark.parametrize("type_name, attack", [
+    ("Ground", 189),  # Mud-Slap, not Sand Attack
+    ("Steel", 232),   # Metal Claw, not Harden
+    ("Bug", 42),      # Pin Missile, not String Shot
+])
+def test_every_type_pool_opens_with_a_damaging_move(tmp_path, type_name, attack):
+    """The three pools that used to open with a status move — a low-level
+    encounter drew only that move and had no way to deal damage."""
+    moves = _moves(_export(tmp_path, {**_BASE, "types": [type_name]}))
+    assert (1, attack) in moves
+
+
+def test_same_level_moves_from_both_types_coexist(tmp_path):
+    """Water's Water Gun and Fire's Flamethrower slice both land on level 8;
+    Gen 3 tables allow that, so neither is shifted or dropped."""
+    moves = _moves(_export(tmp_path, {**_BASE, "types": ["Water", "Fire"]}))
+    assert (8, 55) in moves
+    assert (8, 83) in moves
+
+
+def test_ability_move_survives_a_double_level_collision(tmp_path):
+    """Fire/Normal + Comfy Hide: Rest's level 24 and the +2 bump slot were both
+    taken, which used to drop the move entirely."""
+    fields = _export(tmp_path, {
+        **_BASE, "types": ["Fire", "Normal"], "ability": "Comfy Hide",
+    })
+    assert 156 in [mid for _, mid in _moves(fields)]  # Rest
+
+
+def test_moveset_is_sorted_by_level(tmp_path):
+    moves = _moves(_export(tmp_path, {**_BASE, "types": ["Water", "Fire"]}))
+    assert moves == sorted(moves)
+
+
+# ---------------------------------------------------------------------------
 # Errors — unchanged propagation for genuinely missing input
 # ---------------------------------------------------------------------------
 
