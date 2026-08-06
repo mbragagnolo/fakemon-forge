@@ -9,7 +9,7 @@ from pathlib import Path
 # Keys persisted only if the stage dict carries them, with the fallback used
 # when it does not — hand-built/partial stage dicts must still write cleanly.
 _STATS_DEFAULTS = {"levitates": False, "height_dm": 5, "weight_hg": 30,
-                   "abilities_gen3": [], "category": ""}
+                   "abilities_gen3": [], "category": "", "traits": []}
 
 _STATS_KEYS = {"name", "stage", "types", "ability", "base_stats", *_STATS_DEFAULTS}
 

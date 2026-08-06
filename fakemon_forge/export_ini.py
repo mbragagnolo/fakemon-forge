@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import random
 import sys
 import textwrap
 from functools import lru_cache
@@ -40,32 +41,72 @@ _TYPE_BODY_COLOR = {
     0x11: 4,  # Dark → Black
 }
 
-# Thematic level-up move pools per type (level, move_id). Every pool opens
-# with a damaging move: a low-level encounter draws only the last entries at
-# or below its level, so a status opener would leave it unable to attack.
+# Thematic level-up move pools per type (level, move_id).
+#
+# Curation rules, enforced by tests/test_move_tables.py:
+#   * every entry is the pool's own type — no Muddy Water in Ground;
+#   * damaging moves come in non-decreasing power order, so a mon's newest
+#     attack is never weaker than one it already knows;
+#   * every pool opens with a damaging move at level 1 — a low-level
+#     encounter draws only the entries at or below its level, and a status
+#     opener would leave it unable to attack;
+#   * body-part moves (punches, kicks, fangs, tail, wings, beak, horn,
+#     claws) live in `_TRAIT_MOVES`, not here, so a wingless Steel type no
+#     longer learns Steel Wing. Two documented exceptions stay: Metal Claw
+#     is the only non-anatomical damaging Steel move in Gen 3, and Dragon
+#     Claw stays because dragons have claws by definition.
 _MOVE_POOL: dict[str, list[tuple[int, int]]] = {
-    "Normal":   [(1,33),(6,45),(14,34),(24,216),(36,39),(44,63)],
-    "Water":    [(1,145),(8,55),(15,61),(22,240),(30,57),(38,352),(46,56)],
-    "Fire":     [(1,52),(8,83),(16,53),(24,126),(32,241),(44,315)],
-    "Grass":    [(1,22),(8,71),(16,75),(24,76),(32,202),(44,338)],
-    "Electric": [(1,84),(10,86),(20,85),(30,87),(40,351),(50,192)],
-    "Ice":      [(1,181),(10,58),(20,196),(30,59),(40,258),(50,329)],
-    "Fighting": [(1,67),(10,68),(20,238),(30,280),(40,276),(50,223)],
-    "Poison":   [(1,40),(10,51),(20,124),(30,188),(40,92),(50,305)],
-    "Ground":   [(1,189),(10,89),(20,28),(30,341),(40,330),(50,284)],
-    "Flying":   [(1,16),(10,64),(20,332),(30,314),(40,239),(50,143)],
-    "Bug":      [(1,42),(10,81),(20,210),(30,318),(40,224),(50,141)],
-    "Rock":     [(1,88),(10,157),(20,317),(30,350),(40,246),(50,307)],
-    "Ghost":    [(1,310),(10,247),(20,109),(30,325),(40,171),(50,194)],
-    "Dragon":   [(1,82),(10,239),(20,225),(30,337),(40,349),(50,200)],
-    "Dark":     [(1,44),(10,168),(20,228),(30,242),(40,247),(50,262)],
-    "Steel":    [(1,232),(10,106),(20,211),(30,309),(40,334),(50,231)],
-    "Psychic":  [(1,93),(10,95),(20,60),(30,94),(40,347),(50,326)],
+    "Normal":   [(1,98),(13,29),(19,104),(27,34),(35,216),(43,38),(50,63)],
+    "Water":    [(1,145),(7,55),(13,352),(19,61),(26,240),(33,127),(41,57),(49,56)],
+    "Fire":     [(1,52),(12,172),(19,241),(26,53),(34,257),(43,126),(50,315)],
+    "Grass":    [(1,71),(7,22),(13,75),(20,73),(26,202),(33,80),(41,76),(49,338)],
+    "Electric": [(1,84),(9,86),(16,351),(24,209),(31,85),(40,192),(48,87)],
+    "Ice":      [(1,181),(10,196),(18,62),(25,258),(32,58),(41,59),(50,329)],
+    "Fighting": [(1,67),(10,68),(16,233),(24,280),(33,238),(45,276)],
+    "Poison":   [(1,40),(8,51),(15,77),(22,124),(30,92),(38,188)],
+    "Ground":   [(1,189),(9,28),(16,341),(23,91),(33,89),(44,90)],
+    "Flying":   [(1,16),(11,314),(19,332),(28,19),(46,143)],
+    "Bug":      [(1,42),(8,81),(15,141),(24,318),(36,324)],
+    "Rock":     [(1,205),(9,88),(17,317),(25,246),(36,157)],
+    "Ghost":    [(1,310),(9,101),(16,109),(26,247),(35,171),(44,194)],
+    "Dragon":   [(1,239),(10,82),(18,225),(27,337),(36,349),(46,200)],
+    "Dark":     [(1,228),(9,168),(17,185),(26,269)],
+    "Steel":    [(1,232),(12,319),(29,334),(46,353)],
+    "Psychic":  [(1,93),(9,95),(17,60),(25,347),(33,248),(45,94)],
 }
+
+# Body-part move buckets, keyed by the trait vocabulary in
+# ``resources/traits.json`` (which the generator constrains the model to).
+# A mon only draws from the buckets whose traits it actually has, which is
+# both what keeps Steel Wing off wingless mons and where cross-type coverage
+# comes from — elemental punches, kicks and fangs reach outside the mon's
+# own types. Same curation rules as ``_MOVE_POOL``: damaging power
+# non-decreasing within each bucket.
+_TRAIT_MOVES: dict[str, list[tuple[int, int]]] = {
+    "fists": [(7,4),(16,325),(22,7),(23,8),(24,9),(31,327),(37,309),(44,223),(50,264)],
+    "kicks": [(8,24),(15,27),(23,26),(31,299),(38,136),(47,25)],
+    "fangs": [(11,305),(18,44),(30,158),(39,242)],
+    "tail":  [(6,39),(19,342),(28,21),(41,231)],
+    "wings": [(13,17),(27,211),(36,297)],
+    "beak":  [(6,64),(34,65)],
+    "horn":  [(10,30),(37,224),(49,32)],
+    "claws": [(5,154),(12,10),(23,163),(35,306)],
+    "shell": [(5,110),(11,111),(20,229),(38,334)],
+}
+
+# Trait-free Normal reach moves used to top a thin moveset up to
+# ``_MOVESET_TARGET`` — mono-types and trait-poor bodies would otherwise end
+# up with visibly fewer moves than a dual-type.
+_FILLER_MOVES: list[tuple[int, int]] = [(18,129),(26,263),(34,161),(42,36)]
+
+# How many level-up moves a species should carry. Base moves (backbone, type
+# pools, ability moves) are never trimmed to reach it; trait and filler picks
+# stop being added once it is met.
+_MOVESET_TARGET = 13
 
 # Normal staples every species learns regardless of typing — real dex entries
 # carry these alongside their type moves, and they guarantee an attack from
-# level 1 even for mons whose secondary pools skew toward status.
+# level 1 even for mons whose type pools open softly.
 _NORMAL_BACKBONE: list[tuple[int, int]] = [(1, 33), (4, 45)]  # Tackle, Growl
 
 # Extra thematic moves injected per custom ability name
@@ -230,6 +271,27 @@ def _encode_base_stats(data: dict, ability1_idx: int, ability2_idx: int) -> str:
     return raw.hex().upper()
 
 
+def _moveset_rng(name: str) -> random.Random:
+    """Deterministic picker seeded from the species name.
+
+    "Random" trait/filler picks must not reshuffle on re-export, and tests
+    must be able to pin them down — the same reasoning that already seeds
+    the dex number from a name hash in ``_dex_number``.
+    """
+    digest = hashlib.sha256(name.encode("utf-8")).hexdigest()
+    return random.Random(int(digest[:16], 16))
+
+
+def _traits(data: dict) -> list[str]:
+    """The stage's trait list, read with the same tolerance as every other
+    optional stats.json field: absent, malformed or unknown entries mean
+    fewer buckets, never a raise."""
+    raw = data.get("traits")
+    if not isinstance(raw, list):
+        return []
+    return [t for t in raw if isinstance(t, str) and t in _TRAIT_MOVES]
+
+
 def _build_moveset(data: dict) -> list[tuple[int, int]]:
     types = [t if t != "Fairy" else "Normal" for t in data["types"]]
     ability = data.get("ability", "")
@@ -245,6 +307,14 @@ def _build_moveset(data: dict) -> list[tuple[int, int]]:
             seen.add(mid)
             moves.append((level, mid))
 
+    def fill_from(pool: list[tuple[int, int]], rng: random.Random) -> None:
+        candidates = [(lv, mid) for lv, mid in pool if mid not in seen]
+        shortfall = _MOVESET_TARGET - len(moves)
+        if shortfall <= 0 or not candidates:
+            return
+        for lv, mid in rng.sample(candidates, min(shortfall, len(candidates))):
+            add(lv, mid)
+
     for lv, mid in _NORMAL_BACKBONE:
         add(lv, mid)
 
@@ -257,6 +327,13 @@ def _build_moveset(data: dict) -> list[tuple[int, int]]:
 
     for lv, mid in _ABILITY_MOVES.get(ability, []):
         add(lv, mid)
+
+    # Trait buckets, then trait-free filler, top the moveset up to the
+    # target — mono-types have more room than dual-types, so they draw more
+    # picks and both land at comparable sizes.
+    rng = _moveset_rng(data["name"])
+    fill_from([m for trait in _traits(data) for m in _TRAIT_MOVES[trait]], rng)
+    fill_from(_FILLER_MOVES, rng)
 
     return sorted(moves)
 

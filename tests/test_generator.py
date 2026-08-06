@@ -14,6 +14,8 @@ from fakemon_forge.generator import (
     _SYSTEM_PROMPT,
     _ABILITY_POOL,
     _TYPE_POOL,
+    _TRAIT_POOL,
+    _normalize_traits,
     _normalize_types,
     _HASH_SPACE,
     _MEDIAN,
@@ -1249,6 +1251,65 @@ def test_generate_fakemon_normalizes_types():
     client = _make_client(json.dumps([stage]))
     result = generate_fakemon("singing onion", "single", client=client)
     assert result[0]["types"] == ["Grass"]
+
+
+# ---------------------------------------------------------------------------
+# traits field: vocabulary constraint + repair
+# ---------------------------------------------------------------------------
+
+def test_trait_pool_is_the_shared_vocabulary():
+    assert set(_TRAIT_POOL) == {
+        "fists", "kicks", "fangs", "tail", "wings", "beak", "horn",
+        "claws", "shell",
+    }
+
+
+def test_system_prompt_lists_every_trait():
+    for trait in _TRAIT_POOL:
+        assert trait in _SYSTEM_PROMPT
+
+
+def test_normalize_traits_canonicalizes_spelling():
+    assert _normalize_traits(["Wings", "  CLAWS "]) == ["wings", "claws"]
+
+
+def test_normalize_traits_drops_unknown_entries():
+    """Traits gate move buckets at export, so an invented body part must not
+    survive to be looked up there."""
+    assert _normalize_traits(["wings", "gills", "tentacles"]) == ["wings"]
+
+
+def test_normalize_traits_collapses_duplicates():
+    assert _normalize_traits(["wings", "Wings"]) == ["wings"]
+
+
+def test_normalize_traits_caps_at_four():
+    assert _normalize_traits(
+        ["fists", "kicks", "fangs", "tail", "wings"]
+    ) == ["fists", "kicks", "fangs", "tail"]
+
+
+@pytest.mark.parametrize("raw", [None, "wings", 42, {"trait": "wings"}])
+def test_normalize_traits_treats_a_non_list_as_absent(raw):
+    assert _normalize_traits(raw) == []
+
+
+def test_normalize_traits_skips_non_string_entries():
+    assert _normalize_traits([42, None, "beak"]) == ["beak"]
+
+
+def test_normalize_emits_traits_on_every_stage():
+    """Even when the model omits the field entirely, every stage carries it."""
+    assert all("traits" not in s for s in _LINE)
+    result = _normalize([dict(s) for s in _LINE], "line", "standard")
+    assert [s["traits"] for s in result] == [[], [], []]
+
+
+def test_generate_fakemon_normalizes_traits():
+    stage = {**_STAGE_1, "traits": ["Wings", "gills"]}
+    client = _make_client(json.dumps([stage]))
+    result = generate_fakemon("winged fish", "single", client=client)
+    assert result[0]["traits"] == ["wings"]
 
 
 # ---------------------------------------------------------------------------

@@ -321,11 +321,11 @@ def test_every_type_pool_opens_with_a_damaging_move(tmp_path, type_name, attack)
 
 
 def test_same_level_moves_from_both_types_coexist(tmp_path):
-    """Water's Water Gun and Fire's Flamethrower slice both land on level 8;
+    """Water's Rain Dance and Fire's Flamethrower slice both land on level 26;
     Gen 3 tables allow that, so neither is shifted or dropped."""
     moves = _moves(_export(tmp_path, {**_BASE, "types": ["Water", "Fire"]}))
-    assert (8, 55) in moves
-    assert (8, 83) in moves
+    assert (26, 240) in moves
+    assert (26, 53) in moves
 
 
 def test_ability_move_survives_a_double_level_collision(tmp_path):
@@ -340,6 +340,75 @@ def test_ability_move_survives_a_double_level_collision(tmp_path):
 def test_moveset_is_sorted_by_level(tmp_path):
     moves = _moves(_export(tmp_path, {**_BASE, "types": ["Water", "Fire"]}))
     assert moves == sorted(moves)
+
+
+# ---------------------------------------------------------------------------
+# Trait buckets and filler
+# ---------------------------------------------------------------------------
+
+_STEEL_WING, _WING_ATTACK, _FEATHER_DANCE = 211, 17, 297
+_FILLER_IDS = [129, 263, 161, 36]  # Swift, Facade, Tri Attack, Take Down
+
+
+def test_no_trait_means_no_bucket_moves(tmp_path):
+    """The complaint that started this: Steelit learned Steel Wing without
+    wings. Without the trait, nothing from the wings bucket may appear."""
+    moves = _moves(_export(tmp_path, {**_BASE, "types": ["Steel"]}))
+    ids = {mid for _, mid in moves}
+    assert not ids & {_STEEL_WING, _WING_ATTACK, _FEATHER_DANCE}
+
+
+def test_trait_unlocks_its_bucket(tmp_path):
+    """A mono-Steel's shortfall exceeds the wings bucket, so having the trait
+    deterministically pulls in the whole bucket."""
+    fields = _export(tmp_path, {**_BASE, "types": ["Steel"], "traits": ["wings"]})
+    ids = {mid for _, mid in _moves(fields)}
+    assert {_STEEL_WING, _WING_ATTACK, _FEATHER_DANCE} <= ids
+
+
+def test_malformed_traits_are_tolerated(tmp_path):
+    """A non-list, or unknown/non-string entries, mean fewer buckets — never
+    a raise, matching every other optional stats.json field."""
+    for traits in ("wings", 42, ["wings", 7, "gills"]):
+        fields = _export(tmp_path, {**_BASE, "types": ["Steel"], "traits": traits})
+        assert "LevelUpAttacksOriginal" in fields
+
+
+def test_filler_tops_a_thin_moveset_up(tmp_path):
+    """Mono-Steel with no traits has the thinnest base; all four filler
+    moves must be drawn in."""
+    moves = _moves(_export(tmp_path, {**_BASE, "types": ["Steel"]}))
+    ids = {mid for _, mid in moves}
+    assert set(_FILLER_IDS) <= ids
+
+
+def test_mono_and_dual_types_reach_the_same_size(tmp_path):
+    """The old builder gave a mono-type visibly fewer moves than a dual."""
+    mono = _moves(_export(tmp_path, {**_BASE, "types": ["Water"]}))
+    dual = _moves(_export(tmp_path, {**_BASE, "types": ["Water", "Fire"]}))
+    assert len(mono) == len(dual) == 13
+
+
+def test_moveset_is_stable_across_reexports(tmp_path):
+    """Trait/filler picks are seeded from the name: re-exporting the same
+    stage must never reshuffle its moves."""
+    data = {**_BASE, "types": ["Steel"], "traits": ["wings", "claws"]}
+    dir_a, dir_b = tmp_path / "a", tmp_path / "b"
+    dir_a.mkdir()
+    dir_b.mkdir()
+    first = _export(dir_a, data)
+    second = _export(dir_b, data)
+    assert first["LevelUpAttacksOriginal"] == second["LevelUpAttacksOriginal"]
+
+
+def test_moveset_never_repeats_a_move(tmp_path):
+    """Trait buckets overlap the pools (Iron Defense is in both the Steel
+    pool and the shell bucket); dedup is by move id."""
+    fields = _export(tmp_path, {
+        **_BASE, "types": ["Steel"], "traits": ["shell", "fists", "tail"],
+    })
+    ids = [mid for _, mid in _moves(fields)]
+    assert len(ids) == len(set(ids))
 
 
 # ---------------------------------------------------------------------------

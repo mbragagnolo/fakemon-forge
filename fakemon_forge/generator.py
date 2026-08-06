@@ -38,6 +38,16 @@ _TYPE_POOL = list(_TYPES_BY_INDEX.values())
 _TYPE_LOOKUP = {_lookup_key(name): name for name in _TYPE_POOL}
 _DEFAULT_TYPE = "Normal"
 
+# Body-characteristic vocabulary, shared with ``export_ini`` through one
+# resource file for the same reason as the type pool: each trait unlocks a
+# move bucket at export, so the traits the model may claim and the buckets
+# that exist cannot drift apart.
+_TRAIT_POOL: list[str] = json.loads(
+    (_RESOURCES / "traits.json").read_text(encoding="utf-8")
+)
+_TRAIT_LOOKUP = {_lookup_key(name): name for name in _TRAIT_POOL}
+_MAX_TRAITS = 4
+
 _MAX_NAME_LEN = 10
 _MAX_CATEGORY_LEN = 11
 
@@ -174,6 +184,14 @@ Each element represents one evolutionary stage and must have exactly these field
     so on for every type you assigned. The sprite model is given this string and
     nothing else: it never sees the types field, so a type you do not describe here
     cannot reach the sprite.
+  traits        – list of 0 to 4 body-characteristic strings, chosen only from this list:
+    {", ".join(_TRAIT_POOL)}
+    Include a trait ONLY if the creature's body visibly has that part: fists
+    need arms ending in hands or fists, kicks need strong legs, fangs need a
+    biting jaw, tail needs a substantial tail, and wings, beak, horn, claws
+    and shell are literal (shell also covers heavy armour plating). Each trait
+    unlocks level-up moves that use that body part — claiming wings for a
+    wingless creature would teach it Wing Attack. An empty list is fine.
   levitates     – boolean; true only if the creature levitates, is bodiless/gaseous/amorphous, or otherwise never touches the ground (e.g. floating orbs, ghosts, cloud/gas creatures); otherwise false
   height_dm – height in decimetres (integer).
   weight_hg – weight in hectograms (integer).
@@ -464,6 +482,30 @@ def _normalize_types(raw) -> list[str]:
         seen.add(key)
         result.append(canonical)
     return result[:2] or [_DEFAULT_TYPE]
+
+
+def _normalize_traits(raw) -> list[str]:
+    """Drop entries outside the trait vocabulary, canonicalize spelling,
+    collapse duplicates, then cap at ``_MAX_TRAITS`` — the same order, and for
+    the same reason, as ``_normalize_abilities_gen3``.
+
+    Empty is a valid outcome, not a failure: a creature with none of the
+    listed body parts simply draws no bucket moves at export.
+    """
+    if not isinstance(raw, list):
+        return []
+    result = []
+    seen = set()
+    for entry in raw:
+        if not isinstance(entry, str):
+            continue
+        key = _lookup_key(entry)
+        canonical = _TRAIT_LOOKUP.get(key)
+        if canonical is None or key in seen:
+            continue
+        seen.add(key)
+        result.append(canonical)
+    return result[:_MAX_TRAITS]
 
 
 _POKEMON_SUFFIX = " POKEMON"
@@ -767,6 +809,7 @@ def _normalize(
         if "pokedex_entry" in stage:
             stage["pokedex_entry"] = _repair_entry(stage["pokedex_entry"])
         stage["abilities_gen3"] = _normalize_abilities_gen3(stage.get("abilities_gen3", []))
+        stage["traits"] = _normalize_traits(stage.get("traits"))
         # Before category: it falls back to the primary type word, which must be
         # a real type rather than whatever the model invented.
         stage["types"] = _normalize_types(stage.get("types"))
