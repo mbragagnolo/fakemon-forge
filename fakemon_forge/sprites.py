@@ -221,11 +221,14 @@ def k_centroid(image: Image.Image, width: int, height: int, centroids: int = 2) 
 
     For each output pixel, clusters the corresponding source tile into
     ``centroids`` colours (k-means quantize) and keeps the largest cluster's
-    colour. Unlike ``NEAREST`` (picks one arbitrary source pixel per tile) or
-    blended filters like ``LANCZOS`` (can synthesize colours absent from the
-    tile via ringing at hard edges), this always emits a colour that actually
-    occurs in the tile, aligned with the tile's dominant content — the
-    property pixel-art downscaling needs. MIT-licensed algorithm ported from
+    most frequent *actual* colour — never the cluster centroid itself, which
+    is an average that need not occur in the tile (#92: emitting centroids
+    broke the Gen-3 16-colour contract on every stitched sheet). Unlike
+    ``NEAREST`` (picks one arbitrary source pixel per tile) or blended
+    filters like ``LANCZOS`` (can synthesize colours absent from the tile via
+    ringing at hard edges), this always emits a colour that actually occurs
+    in the tile, aligned with the tile's dominant content — the property
+    pixel-art downscaling needs. MIT-licensed algorithm ported from
     Astropulse's "pixeldetector". Does not mutate ``image``.
 
     Only downscales meaningfully: if either target dimension exceeds the
@@ -242,11 +245,14 @@ def k_centroid(image: Image.Image, width: int, height: int, centroids: int = 2) 
     for x in range(width):
         for y in range(height):
             tile = image.crop((int(x * wf), int(y * hf), int((x + 1) * wf), int((y + 1) * hf)))
-            tile = tile.quantize(colors=centroids, method=1, kmeans=centroids)
-            counts = tile.getcolors()
+            clustered = tile.quantize(colors=centroids, method=1, kmeans=centroids)
+            counts = clustered.getcolors()
             idx = max(counts, key=lambda c: c[0])[1]
-            pal = tile.getpalette()
-            out.putpixel((x, y), tuple(pal[idx * 3:idx * 3 + 3]))
+            dominant = Counter(
+                p for p, q in zip(tile.get_flattened_data(), clustered.get_flattened_data())
+                if q == idx
+            )
+            out.putpixel((x, y), dominant.most_common(1)[0][0])
     return out
 
 

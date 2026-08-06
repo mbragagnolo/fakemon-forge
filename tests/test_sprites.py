@@ -2377,6 +2377,30 @@ def test_spritesheet_downscale_introduces_no_new_colors(tmp_path):
     assert sheet_colors <= allowed
 
 
+def test_spritesheet_multi_tone_views_stay_on_source_palette(tmp_path):
+    # #92: with kmeans refinement the downscale emitted cluster *centroids* —
+    # averaged colours occurring nowhere in the source view — so every real
+    # (multi-tone) sheet broke the 16-colour contract even though each view
+    # honoured it. Solid-colour fixtures can't catch this (a uniform cluster's
+    # centroid IS its colour), so these views carry a gradient quantized to a
+    # P-mode palette, like real sprites.
+    gradient = Image.new("RGB", (192, 192))
+    gradient.putdata(
+        [(40 + x, 30 + y // 2, 220 - x) for y in range(192) for x in range(192)]
+    )
+    view = gradient.quantize(colors=12)
+    for name in _VIEW_COLORS:
+        view.save(str(tmp_path / name))
+    pal = view.getpalette()
+    # Zero-padded trailing palette entries equal reserved black, which the
+    # outline fallback may legitimately paint anyway; the canvas is the key.
+    allowed = {tuple(pal[i * 3:i * 3 + 3]) for i in range(256)} | {_KEY_COLOR, (0, 0, 0)}
+    out = tmp_path / "spritesheet.png"
+    stitch_spritesheet(str(tmp_path), str(out))
+    sheet_colors = set(Image.open(out).convert("RGB").get_flattened_data())
+    assert sheet_colors <= allowed
+
+
 # ---------------------------------------------------------------------------
 # _cleanup_sheet_cell() — despeckle + NW-lit outline restoration
 # ---------------------------------------------------------------------------
@@ -2549,6 +2573,22 @@ def test_k_centroid_mixed_tile_picks_dominant_color():
     flipped = _mixed_tile(majority=blue, minority=red)
     assert flipped.resize((1, 1), Image.NEAREST).getpixel((0, 0)) == red  # guard
     assert k_centroid(flipped, 1, 1).getpixel((0, 0)) == blue
+
+
+def test_k_centroid_multi_tone_tile_emits_only_source_colours():
+    # #92: two shades of red plus blue in one tile, two centroids — k-means
+    # merges the reds into one cluster whose centroid (~(236, 0, 0)) occurs
+    # nowhere in the tile, and that centroid used to be emitted. The docstring
+    # guarantee, as a property: every output colour occurs in the source.
+    img = Image.new("RGB", (12, 12), (255, 0, 0))
+    for y in range(6, 12):
+        for x in range(12):
+            img.putpixel((x, y), (200, 0, 0) if y < 9 else (0, 0, 255))
+    out = k_centroid(img, 1, 1)
+    assert set(out.get_flattened_data()) <= set(img.get_flattened_data())
+    # Dominant-content alignment survives the fix: the red cluster (108 px)
+    # beats blue (36 px), and its most common actual colour is pure red.
+    assert out.getpixel((0, 0)) == (255, 0, 0)
 
 
 def test_k_centroid_upscale_falls_back_to_nearest():
