@@ -273,6 +273,19 @@ def test_damaging_power_never_decreases_with_level(table):
 # Trait vocabulary stays in sync with the generator's resource file
 # ---------------------------------------------------------------------------
 
+def test_no_move_lives_in_two_trait_buckets():
+    """A move in two buckets would appear twice in the concatenated pick
+    candidates; ``rng.sample`` could then draw both copies and the by-id
+    dedup would leave the moveset one short of its target."""
+    seen: dict[int, str] = {}
+    for trait, pool in _TRAIT_MOVES.items():
+        for _, mid in pool:
+            assert mid not in seen, (
+                f"{_MOVE_DATA[mid][0]} is in both {seen[mid]!r} and {trait!r}"
+            )
+            seen[mid] = trait
+
+
 def test_trait_buckets_match_the_shared_vocabulary():
     resource = json.loads(
         (Path(__file__).parent.parent / "resources" / "traits.json")

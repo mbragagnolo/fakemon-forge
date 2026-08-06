@@ -366,12 +366,12 @@ def test_trait_unlocks_its_bucket(tmp_path):
     assert {_STEEL_WING, _WING_ATTACK, _FEATHER_DANCE} <= ids
 
 
-def test_malformed_traits_are_tolerated(tmp_path):
+@pytest.mark.parametrize("traits", ["wings", 42, ["wings", 7, "gills"]])
+def test_malformed_traits_are_tolerated(tmp_path, traits):
     """A non-list, or unknown/non-string entries, mean fewer buckets — never
     a raise, matching every other optional stats.json field."""
-    for traits in ("wings", 42, ["wings", 7, "gills"]):
-        fields = _export(tmp_path, {**_BASE, "types": ["Steel"], "traits": traits})
-        assert "LevelUpAttacksOriginal" in fields
+    fields = _export(tmp_path, {**_BASE, "types": ["Steel"], "traits": traits})
+    assert "LevelUpAttacksOriginal" in fields
 
 
 def test_filler_tops_a_thin_moveset_up(tmp_path):
@@ -387,6 +387,21 @@ def test_mono_and_dual_types_reach_the_same_size(tmp_path):
     mono = _moves(_export(tmp_path, {**_BASE, "types": ["Water"]}))
     dual = _moves(_export(tmp_path, {**_BASE, "types": ["Water", "Fire"]}))
     assert len(mono) == len(dual) == 13
+
+
+_FISTS_IDS = {4, 325, 7, 8, 9, 327, 309, 223, 264}
+
+
+def test_traits_survive_a_full_base_moveset(tmp_path):
+    """Water/Fire's pools alone fill the 13-move target; without the trait
+    floor a dual-type with fists never threw a single punch."""
+    fields = _export(tmp_path, {
+        **_BASE, "types": ["Water", "Fire"], "traits": ["fists"],
+    })
+    moves = _moves(fields)
+    ids = {mid for _, mid in moves}
+    assert len(ids & _FISTS_IDS) == 2  # the floor, and only the floor
+    assert len(moves) == 15
 
 
 def test_moveset_is_stable_across_reexports(tmp_path):

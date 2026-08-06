@@ -52,9 +52,11 @@ _TYPE_BODY_COLOR = {
 #     opener would leave it unable to attack;
 #   * body-part moves (punches, kicks, fangs, tail, wings, beak, horn,
 #     claws) live in `_TRAIT_MOVES`, not here, so a wingless Steel type no
-#     longer learns Steel Wing. Two documented exceptions stay: Metal Claw
-#     is the only non-anatomical damaging Steel move in Gen 3, and Dragon
-#     Claw stays because dragons have claws by definition.
+#     longer learns Steel Wing. Three documented exceptions stay: Metal
+#     Claw is the only non-anatomical damaging Steel move in Gen 3, Dragon
+#     Claw stays because dragons have claws by definition, and the Fighting
+#     pool keeps its kicks and hand strikes (Low Kick, Cross Chop, Brick
+#     Break) because the type itself implies martial limbs.
 _MOVE_POOL: dict[str, list[tuple[int, int]]] = {
     "Normal":   [(1,98),(13,29),(19,104),(27,34),(35,216),(43,38),(50,63)],
     "Water":    [(1,145),(7,55),(13,352),(19,61),(26,240),(33,127),(41,57),(49,56)],
@@ -100,9 +102,15 @@ _TRAIT_MOVES: dict[str, list[tuple[int, int]]] = {
 _FILLER_MOVES: list[tuple[int, int]] = [(18,129),(26,263),(34,161),(42,36)]
 
 # How many level-up moves a species should carry. Base moves (backbone, type
-# pools, ability moves) are never trimmed to reach it; trait and filler picks
-# stop being added once it is met.
+# pools, ability moves) are never trimmed to reach it; filler picks stop
+# being added once it is met.
 _MOVESET_TARGET = 13
+
+# Trait picks are guaranteed even when the base moves already fill the
+# target: a dual-type with two full pools would otherwise never show its
+# traits at all, while a thin mono-type showed five. The floor costs at most
+# this many moves over the target.
+_TRAIT_PICKS_MIN = 2
 
 # Normal staples every species learns regardless of typing — real dex entries
 # carry these alongside their type moves, and they guarantee an attack from
@@ -178,7 +186,9 @@ def _encode_tmhm(numbers: set[int]) -> str:
 
 def _tmhm_compatibility(data: dict) -> str:
     types = [t if t != "Fairy" else "Normal" for t in data["types"]]
-    base_stats = data.get("base_stats") or {}
+    # A required key like everywhere else in export; only the values are
+    # read tolerantly.
+    base_stats = data["base_stats"]
 
     numbers = set(_TM_UNIVERSAL)
     for t in types:
@@ -363,7 +373,12 @@ def _moveset_rng(name: str) -> random.Random:
 
     "Random" trait/filler picks must not reshuffle on re-export, and tests
     must be able to pin them down — the same reasoning that already seeds
-    the dex number from a name hash in ``_dex_number``.
+    the dex number from a name hash in ``_dex_number``. Two consequences
+    worth knowing: renaming a species reshuffles its picks (renames already
+    re-derive the dex number, cry and shinies — movesets join that list),
+    and cross-version stability additionally assumes CPython keeps
+    ``Random.sample``'s algorithm, which the double-export test cannot
+    detect from inside one interpreter.
     """
     digest = hashlib.sha256(name.encode("utf-8")).hexdigest()
     return random.Random(int(digest[:16], 16))
@@ -394,12 +409,14 @@ def _build_moveset(data: dict) -> list[tuple[int, int]]:
             seen.add(mid)
             moves.append((level, mid))
 
-    def fill_from(pool: list[tuple[int, int]], rng: random.Random) -> None:
+    def fill_from(
+        pool: list[tuple[int, int]], rng: random.Random, minimum: int = 0
+    ) -> None:
         candidates = [(lv, mid) for lv, mid in pool if mid not in seen]
-        shortfall = _MOVESET_TARGET - len(moves)
-        if shortfall <= 0 or not candidates:
+        want = max(_MOVESET_TARGET - len(moves), minimum)
+        if want <= 0 or not candidates:
             return
-        for lv, mid in rng.sample(candidates, min(shortfall, len(candidates))):
+        for lv, mid in rng.sample(candidates, min(want, len(candidates))):
             add(lv, mid)
 
     for lv, mid in _NORMAL_BACKBONE:
@@ -417,9 +434,14 @@ def _build_moveset(data: dict) -> list[tuple[int, int]]:
 
     # Trait buckets, then trait-free filler, top the moveset up to the
     # target — mono-types have more room than dual-types, so they draw more
-    # picks and both land at comparable sizes.
+    # picks and both land at comparable sizes. Trait picks carry a floor:
+    # even a dual-type whose pools alone fill the target still shows its
+    # anatomy and gets its coverage.
     rng = _moveset_rng(data["name"])
-    fill_from([m for trait in _traits(data) for m in _TRAIT_MOVES[trait]], rng)
+    fill_from(
+        [m for trait in _traits(data) for m in _TRAIT_MOVES[trait]],
+        rng, minimum=_TRAIT_PICKS_MIN,
+    )
     fill_from(_FILLER_MOVES, rng)
 
     return sorted(moves)
