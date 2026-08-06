@@ -202,16 +202,19 @@ _CATCH_RATE_FLOOR = 3
 _GROWTH_MEDIUM_FAST, _GROWTH_MEDIUM_SLOW, _GROWTH_SLOW = 0, 3, 5
 
 # Gen 3 egg-group bytes.
-_EGG_MONSTER, _EGG_WATER1, _EGG_BUG, _EGG_FLYING = 1, 2, 3, 4
+_EGG_WATER1, _EGG_BUG, _EGG_FLYING = 2, 3, 4
 _EGG_FIELD, _EGG_FAIRY, _EGG_GRASS, _EGG_HUMANLIKE = 5, 6, 7, 8
 _EGG_MINERAL, _EGG_AMORPHOUS, _EGG_DRAGON, _EGG_UNDISCOVERED = 10, 11, 14, 15
 
-# The int-valued fields ``enrich_line`` adds to a stage, with the validator a
-# stored value must pass before export trusts it over a fresh derivation.
-_RECORD_FIELDS = (
-    "catch_rate", "base_exp", "gender_ratio",
-    "egg_cycles", "base_happiness", "growth_rate",
-)
+# The int-valued fields ``enrich_line`` adds to a stage, mapped to the upper
+# bound a stored value must satisfy (lower bound 0) before export trusts it
+# over a fresh derivation. Growth rate is the one field whose byte range is
+# far narrower than 0..255 — Gen 3 defines exp groups 0-5, and an out-of-range
+# byte is a broken exp curve, not a strange one.
+_RECORD_FIELDS = {
+    "catch_rate": 255, "base_exp": 255, "gender_ratio": 255,
+    "egg_cycles": 255, "base_happiness": 255, "growth_rate": 5,
+}
 
 
 def _bst(data: dict) -> int:
@@ -275,7 +278,11 @@ def _egg_groups(data: dict, bst: int) -> list[int]:
         want(_EGG_BUG)
     if "Grass" in types:
         want(_EGG_GRASS)
-    if types & {"Rock", "Steel", "Ground"}:
+    if "Fairy" in types:  # export alias only — the generator never emits it
+        want(_EGG_FAIRY)
+    # Mineral needs a rock or steel BODY. Ground deliberately doesn't count:
+    # vanilla Ground mammals (Sandshrew, Phanpy, Diglett) breed in Field.
+    if types & {"Rock", "Steel"}:
         want(_EGG_MINERAL)
     if traits & {"wings", "beak"}:
         want(_EGG_FLYING)
@@ -313,10 +320,10 @@ def _species_fields(data: dict) -> dict:
     trust order as the moveset and TM bits."""
     derived = _species_record(data)
     out = {}
-    for key in _RECORD_FIELDS:
+    for key, upper in _RECORD_FIELDS.items():
         value = data.get(key)
         valid = isinstance(value, int) and not isinstance(value, bool) \
-            and 0 <= value <= 255
+            and 0 <= value <= upper
         out[key] = value if valid else derived[key]
     stored_groups = data.get("egg_groups")
     valid_groups = (
@@ -531,7 +538,9 @@ def _moveset_rng(seed_text: str) -> random.Random:
     Seeding from the line (stage 1's name) rather than each stage's own name
     is what makes an evolution continue its pre-evolution's picks instead of
     re-rolling them: every stage shuffles its candidate lists into the same
-    order and takes a prefix, so a stage with more room draws a superset.
+    order and takes a prefix, so a stage with more room draws a superset
+    (modulo pool/bucket overlaps like Iron Defense, where one stage skips an
+    entry its sibling drew from a type pool).
     Two consequences worth knowing: renaming stage 1 reshuffles the whole
     line's picks (renames already re-derive the dex number, cry and shinies
     — movesets join that list; later-stage renames are now harmless), and
@@ -663,8 +672,9 @@ def enrich_line(stages: list[dict]) -> list[dict]:
     becomes a serialization of it rather than the place derivation happens.
     Line context is what a per-stage export can never reconstruct: movesets
     seed from stage 1's name so evolutions extend their pre-evolution's picks,
-    and the growth rate comes from the final stage's BST and is shared — a
-    mon must never switch exp group by evolving.
+    and one shared growth rate comes from the line's peak BST (its final
+    stage, for generator output, whose totals ascend) — a mon must never
+    switch exp group by evolving.
 
     Adds per stage: ``moveset`` ([[level, move_id], ...]), ``tmhm`` (the
     16-hex-char ROM bitfield), and the species-record ints
@@ -676,6 +686,12 @@ def enrich_line(stages: list[dict]) -> list[dict]:
     line_name = stages[0].get("name", "")
     growth = _growth_rate(max(_bst(stage) for stage in stages))
     for stage in stages:
+        # Enrichment is the authoritative derivation: stale stored values
+        # from an earlier enrichment are dropped first, so re-enriching a
+        # line after a table change refreshes every field the same way.
+        # Stored-field trust belongs to export_ini alone.
+        stage.pop("moveset", None)
+        stage.pop("tmhm", None)
         stage["moveset"] = [
             [lv, mid] for lv, mid in _build_moveset(stage, line_name=line_name)
         ]

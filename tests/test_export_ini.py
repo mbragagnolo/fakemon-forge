@@ -562,6 +562,10 @@ def test_legendary_grade_record(tmp_path):
     ({"types": ["Ghost"]}, (11, 11)),                       # Amorphous
     ({"types": ["Fire"], "levitates": True}, (11, 11)),     # Amorphous
     ({"types": ["Dragon"]}, (14, 14)),                      # Dragon
+    # Ground is not a mineral body: a Ground mammal breeds in Field like
+    # Sandshrew and Phanpy, not with Geodude.
+    ({"types": ["Ground"], "traits": ["claws"]}, (5, 5)),   # Field
+    ({"types": ["Fairy"]}, (6, 6)),                         # export alias
 ])
 def test_egg_groups_follow_type_and_anatomy(tmp_path, extra, expected):
     blob = _blob(_export(tmp_path, {**_BASE, **extra}))
@@ -586,6 +590,13 @@ def test_malformed_stored_record_falls_back(tmp_path):
     assert blob[8] == 180
     assert blob[9] == 86
     assert (blob[20], blob[21]) == (5, 5)
+
+
+def test_out_of_range_growth_rate_falls_back(tmp_path):
+    """Growth's byte range is 0-5, not 0-255: a stored 77 would be a broken
+    exp curve, so it fails validation even though it fits the byte."""
+    blob = _blob(_export(tmp_path, {**_BASE, "growth_rate": 77}))
+    assert blob[19] == 0  # derived: own BST 315 < 400 → Medium Fast
 
 
 # ---------------------------------------------------------------------------
@@ -677,6 +688,19 @@ def test_identical_siblings_get_identical_movesets():
         _stage("Pup", 1, ["Normal"]), _stage("Wolfy", 2, ["Normal"]),
     ])
     assert a["moveset"] == b["moveset"]
+
+
+def test_reenriching_rebuilds_stale_derivations():
+    """Enrichment is authoritative: a stage carrying values from an earlier
+    enrichment (or a hand edit) gets them re-derived, so re-enriching after
+    a table change refreshes movesets and TM bits, not just the record.
+    Stored-field trust belongs to export_ini alone."""
+    stage = {**_stage("Solo", 1, ["Fire"]),
+             "moveset": [[1, 1]], "tmhm": "00" * 8}
+    enriched = enrich_line([stage])[0]
+    assert enriched["moveset"] != [[1, 1]]
+    assert len(enriched["moveset"]) == 13
+    assert enriched["tmhm"] != "00" * 8
 
 
 # ---------------------------------------------------------------------------
