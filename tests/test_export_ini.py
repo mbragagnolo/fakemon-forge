@@ -412,6 +412,95 @@ def test_moveset_never_repeats_a_move(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# TM / HM compatibility
+# ---------------------------------------------------------------------------
+
+_TOXIC, _HYPER_BEAM, _FLAMETHROWER, _STEEL_WING_TM = 6, 15, 35, 47
+_FOCUS_PUNCH, _BRICK_BREAK, _STRENGTH = 1, 31, 54
+_CUT, _FLY, _SURF, _WATERFALL, _DIVE = 51, 52, 53, 57, 58
+
+# _BASE's stats sum to 331 with attack 52 — under both stat gates, so tests
+# opt in explicitly where a gate is the subject.
+_STRONG_STATS = {"hp": 80, "attack": 80, "defense": 70,
+                 "sp_atk": 70, "sp_def": 60, "speed": 60}
+
+
+def _machines(fields):
+    """TM/HM numbers (1-50, 51-58 = HM01-08) decoded from the bitfield."""
+    raw = int.from_bytes(bytes.fromhex(fields["TMHMCompatibility"]), "little")
+    return {n for n in range(1, 59) if raw & (1 << (n - 1))}
+
+
+def test_tmhm_blob_stays_eight_bytes(tmp_path):
+    assert len(_export(tmp_path, dict(_BASE))["TMHMCompatibility"]) == 16
+
+
+def test_tmhm_bit_layout_matches_the_rom_record(tmp_path):
+    """Pins endianness against the injector's verbatim 8-byte write: TM06
+    (Toxic) is byte 0 bit 5, HM03 (Surf) is byte 6 bit 4."""
+    blob = bytes.fromhex(
+        _export(tmp_path, {**_BASE, "types": ["Water"]})["TMHMCompatibility"]
+    )
+    assert blob[0] >> 5 & 1  # TM06 Toxic, universal
+    assert blob[6] >> 4 & 1  # HM03 Surf, Water
+
+
+def test_every_mon_gets_the_universal_machines(tmp_path):
+    machines = _machines(_export(tmp_path, {**_BASE, "types": ["Ghost"]}))
+    assert _TOXIC in machines
+
+
+def test_type_machines_follow_the_types(tmp_path):
+    machines = _machines(_export(tmp_path, dict(_BASE)))  # mono-Fire
+    assert _FLAMETHROWER in machines
+    assert not machines & {_SURF, _WATERFALL, _DIVE}
+
+
+def test_water_types_can_learn_the_field_hms(tmp_path):
+    machines = _machines(_export(tmp_path, {**_BASE, "types": ["Water"]}))
+    assert {_SURF, _WATERFALL, _DIVE} <= machines
+
+
+def test_trait_machines_follow_the_traits(tmp_path):
+    bare = _machines(_export(tmp_path, {**_BASE, "types": ["Steel"]}))
+    winged = _machines(_export(
+        tmp_path, {**_BASE, "types": ["Steel"], "traits": ["wings"]},
+    ))
+    assert not bare & {_STEEL_WING_TM, _FLY}
+    assert {_STEEL_WING_TM, _FLY} <= winged
+
+
+def test_fists_unlock_the_punch_machines(tmp_path):
+    machines = _machines(_export(
+        tmp_path, {**_BASE, "types": ["Steel"], "traits": ["fists"]},
+    ))
+    assert {_FOCUS_PUNCH, _BRICK_BREAK, _STRENGTH} <= machines
+
+
+def test_hyper_beam_needs_the_bst_gate(tmp_path):
+    weak = _machines(_export(tmp_path, dict(_BASE)))
+    strong = _machines(_export(
+        tmp_path, {**_BASE, "base_stats": _STRONG_STATS},
+    ))
+    assert _HYPER_BEAM not in weak
+    assert _HYPER_BEAM in strong
+
+
+def test_strength_comes_from_attack_without_fists(tmp_path):
+    machines = _machines(_export(
+        tmp_path, {**_BASE, "base_stats": _STRONG_STATS},
+    ))
+    assert _STRENGTH in machines
+
+
+def test_claws_unlock_cut(tmp_path):
+    machines = _machines(_export(
+        tmp_path, {**_BASE, "types": ["Grass"], "traits": ["claws"]},
+    ))
+    assert _CUT in machines
+
+
+# ---------------------------------------------------------------------------
 # Errors — unchanged propagation for genuinely missing input
 # ---------------------------------------------------------------------------
 

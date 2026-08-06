@@ -20,6 +20,9 @@ from fakemon_forge.export_ini import (
     _FILLER_MOVES,
     _MOVE_POOL,
     _NORMAL_BACKBONE,
+    _TM_BY_TRAIT,
+    _TM_BY_TYPE,
+    _TM_UNIVERSAL,
     _TRAIT_MOVES,
 )
 
@@ -276,3 +279,36 @@ def test_trait_buckets_match_the_shared_vocabulary():
         .read_text(encoding="utf-8")
     )
     assert set(_TRAIT_MOVES) == set(resource)
+
+
+# ---------------------------------------------------------------------------
+# TM / HM tables
+# ---------------------------------------------------------------------------
+
+def test_tm_type_table_covers_exactly_the_move_pool_types():
+    assert set(_TM_BY_TYPE) == set(_MOVE_POOL)
+
+
+def test_tm_trait_table_matches_the_shared_vocabulary():
+    resource = json.loads(
+        (Path(__file__).parent.parent / "resources" / "traits.json")
+        .read_text(encoding="utf-8")
+    )
+    assert set(_TM_BY_TRAIT) == set(resource)
+
+
+def test_tm_numbers_stay_inside_the_58_machine_range():
+    """1-50 are TMs, 51-58 are HMs; anything else would set a bit the ROM
+    record does not have."""
+    all_numbers = set(_TM_UNIVERSAL)
+    for pool in (*_TM_BY_TYPE.values(), *_TM_BY_TRAIT.values()):
+        all_numbers |= pool
+    assert all_numbers <= set(range(1, 59))
+
+
+def test_anatomy_machines_are_not_granted_by_type():
+    """Steel Wing (TM47), Cut (HM01) and Iron Tail (TM23) are trait-gated;
+    granting them per type would recreate the Steelit-with-Steel-Wing bug
+    at the TM layer."""
+    for type_name, pool in _TM_BY_TYPE.items():
+        assert not pool & {47, 51, 23}, type_name

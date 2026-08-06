@@ -109,6 +109,93 @@ _MOVESET_TARGET = 13
 # level 1 even for mons whose type pools open softly.
 _NORMAL_BACKBONE: list[tuple[int, int]] = [(1, 33), (4, 45)]  # Tackle, Growl
 
+# ── TM / HM compatibility ──────────────────────────────────────────────────────
+#
+# Gen 3 numbers TM01-TM50 and HM01-HM08. One shared numbering here: 1-50 are
+# the TMs, 51-58 are HM01-08. ``_encode_tmhm`` turns a number set into the
+# ROM's 8-byte bitfield (bit n-1 = number n, little-endian), emitted as the
+# raw record bytes in hex — the injector can ``bytes.fromhex`` the field and
+# write it verbatim over its ``TMHMCompatibility`` table entry.
+
+# Machines nearly every vanilla species is compatible with: Toxic, Hidden
+# Power, Light Screen, Protect, Safeguard, Frustration, Return, Double Team,
+# Reflect, Facade, Secret Power, Rest, Attract.
+_TM_UNIVERSAL: frozenset[int] = frozenset(
+    {6, 10, 16, 17, 20, 21, 27, 32, 33, 42, 43, 44, 45}
+)
+
+# Per-type machines. Every Gen 3 type has a key so the sync test can spot a
+# typo'd or missing type, even where the honest answer is "no type TMs"
+# (Gen 3 shipped no Bug or Normal-exclusive machine worth gating).
+_TM_BY_TYPE: dict[str, frozenset[int]] = {
+    "Normal":   frozenset({5}),                        # Roar
+    "Fighting": frozenset({8, 31, 56}),                # Bulk Up, Brick Break, Rock Smash
+    "Flying":   frozenset({40, 52}),                   # Aerial Ace, Fly
+    "Poison":   frozenset({36}),                       # Sludge Bomb
+    "Ground":   frozenset({26, 28, 37, 39, 56}),       # Earthquake, Dig, Sandstorm, Rock Tomb, Rock Smash
+    "Rock":     frozenset({26, 37, 39, 56}),           # Earthquake, Sandstorm, Rock Tomb, Rock Smash
+    "Bug":      frozenset(),
+    "Ghost":    frozenset({30, 46, 48}),               # Shadow Ball, Thief, Skill Swap
+    "Steel":    frozenset({26, 37}),                   # Earthquake, Sandstorm
+    "Fire":     frozenset({11, 35, 38, 50}),           # Sunny Day, Flamethrower, Fire Blast, Overheat
+    "Water":    frozenset({3, 13, 14, 18, 53, 57, 58}),  # Water Pulse, Ice Beam, Blizzard, Rain Dance, Surf, Waterfall, Dive
+    "Grass":    frozenset({9, 19, 22}),                # Bullet Seed, Giga Drain, SolarBeam
+    "Electric": frozenset({24, 25, 34, 55}),           # Thunderbolt, Thunder, Shock Wave, Flash
+    "Psychic":  frozenset({4, 29, 48, 55}),            # Calm Mind, Psychic, Skill Swap, Flash
+    "Ice":      frozenset({7, 13, 14}),                # Hail, Ice Beam, Blizzard
+    "Dragon":   frozenset({2}),                        # Dragon Claw
+    "Dark":     frozenset({12, 41, 46, 49}),           # Taunt, Torment, Thief, Snatch
+}
+
+# Per-trait machines — the same anatomy gate as the level-up buckets, and
+# the same source of cross-type reach.
+_TM_BY_TRAIT: dict[str, frozenset[int]] = {
+    "fists": frozenset({1, 31, 54, 56}),   # Focus Punch, Brick Break, Strength, Rock Smash
+    "kicks": frozenset({31, 56}),          # Brick Break, Rock Smash
+    "fangs": frozenset(),
+    "tail":  frozenset({23}),              # Iron Tail
+    "wings": frozenset({40, 47, 52}),      # Aerial Ace, Steel Wing, Fly
+    "beak":  frozenset({40}),              # Aerial Ace
+    "horn":  frozenset(),
+    "claws": frozenset({28, 51}),          # Dig, Cut
+    "shell": frozenset(),
+}
+
+# Stat-gated machines: Hyper Beam goes to species with real bulk behind it,
+# Strength to anything that plausibly shoves boulders. Thresholds sit under
+# the standard single-stage BST band (median ~430) and the common physical
+# attack line, so ordinary mons qualify and only genuine weaklings miss out.
+_HYPER_BEAM, _HYPER_BEAM_MIN_BST = 15, 420
+_STRENGTH, _STRENGTH_MIN_ATTACK = 54, 60
+
+
+def _encode_tmhm(numbers: set[int]) -> str:
+    bits = 0
+    for n in numbers:
+        bits |= 1 << (n - 1)
+    return bits.to_bytes(8, "little").hex().upper()
+
+
+def _tmhm_compatibility(data: dict) -> str:
+    types = [t if t != "Fairy" else "Normal" for t in data["types"]]
+    base_stats = data.get("base_stats") or {}
+
+    numbers = set(_TM_UNIVERSAL)
+    for t in types:
+        numbers |= _TM_BY_TYPE.get(t, frozenset())
+    for trait in _traits(data):
+        numbers |= _TM_BY_TRAIT.get(trait, frozenset())
+
+    stats = [v for v in base_stats.values() if isinstance(v, int)]
+    if sum(stats) >= _HYPER_BEAM_MIN_BST:
+        numbers.add(_HYPER_BEAM)
+    if isinstance(base_stats.get("attack"), int) and \
+            base_stats["attack"] >= _STRENGTH_MIN_ATTACK:
+        numbers.add(_STRENGTH)
+
+    return _encode_tmhm(numbers)
+
+
 # Extra thematic moves injected per custom ability name
 _ABILITY_MOVES: dict[str, list[tuple[int, int]]] = {
     "Steam Engine": [(6, 108), (22, 240)],           # Smokescreen, Rain Dance
@@ -387,7 +474,7 @@ def export_ini(stage_dir: Path) -> Path:
         "FrontAnimationTable=0",
         "BackAnimTable=0",
         "AnimDelayTable=0",
-        "TMHMCompatibility=0000000000000000",
+        f"TMHMCompatibility={_tmhm_compatibility(data)}",
         f"NationalDexNumber={dex}",
         f"SecondDexNumber={dex}",
         f"Hght={height_dm}",
