@@ -20,7 +20,7 @@ from fakemon_forge.sprites import (
 from fakemon_forge.icon import generate_icon
 from fakemon_forge.writer import write_output
 from fakemon_forge.footprint import generate_footprint
-from fakemon_forge.export_ini import export_ini
+from fakemon_forge.export_ini import enrich_line, export_ini
 from fakemon_forge.cries import generate_cry
 
 
@@ -66,6 +66,10 @@ def main(argv=None):
     forms = generate_fakemon(
         combined, args.mode, tier=args.tier, stages=args.stages, client=client
     )
+    # Line-coherent ROM derivations (movesets, TM bits, species record) are
+    # computed here, where every stage is in hand, and persisted in
+    # stats.json — the injector's input. export_ini serializes them.
+    forms = enrich_line(forms)
 
     # Always the txt2img pipeline, even for --image runs (issue #69): the
     # drawing's content reaches the sprite renderer only via describe_image's

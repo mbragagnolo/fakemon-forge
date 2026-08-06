@@ -121,6 +121,29 @@ def test_stats_json_excludes_llm_only_fields(tmp_path):
     assert not (_LLM_ONLY & set(data.keys()))
 
 
+def test_stats_json_persists_derived_fields_when_present(tmp_path):
+    """The enrich_line output (moveset, tmhm, species record) must reach
+    stats.json — it is the injector's input."""
+    stage = {**_STAGE_1, "moveset": [[1, 33], [4, 45]], "tmhm": "AB" * 8,
+             "catch_rate": 120, "egg_groups": [5, 5]}
+    dirs = write_output([stage], _RUN_INFO, base_dir=str(tmp_path))
+    data = json.loads((dirs[0] / "stats.json").read_text())
+    assert data["moveset"] == [[1, 33], [4, 45]]
+    assert data["tmhm"] == "AB" * 8
+    assert data["catch_rate"] == 120
+    assert data["egg_groups"] == [5, 5]
+
+
+def test_stats_json_omits_derived_fields_when_absent(tmp_path):
+    """A pre-enrichment stage dict writes cleanly with no null placeholders;
+    export_ini re-derives whatever is missing."""
+    dirs = write_output(_SINGLE, _RUN_INFO, base_dir=str(tmp_path))
+    data = json.loads((dirs[0] / "stats.json").read_text())
+    assert "moveset" not in data
+    assert "tmhm" not in data
+    assert "catch_rate" not in data
+
+
 def test_stats_json_values_are_correct(tmp_path):
     dirs = write_output(_SINGLE, _RUN_INFO, base_dir=str(tmp_path))
     data = json.loads((dirs[0] / "stats.json").read_text())

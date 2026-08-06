@@ -176,6 +176,157 @@ _TM_BY_TRAIT: dict[str, frozenset[int]] = {
 _HYPER_BEAM, _HYPER_BEAM_MIN_BST = 15, 420
 _STRENGTH, _STRENGTH_MIN_ATTACK = 54, 60
 
+# ── species record derivation ──────────────────────────────────────────────────
+#
+# The remaining BaseStats-blob fields, derived from data the stage already
+# carries instead of one flat default for every species. ``enrich_line``
+# computes these at generation time and persists them in stats.json (ints,
+# byte-ready for the injector); ``_encode_base_stats`` falls back to deriving
+# them for a stats.json written before they existed.
+
+# 580 is the legendary band's flat BST (mythical is 600): at or above it a
+# species is treated as legendary-grade — genderless, unbreedable, hard to
+# catch, aloof.
+_LEGENDARY_MIN_BST = 580
+
+_GENDER_5050, _GENDERLESS = 0x7F, 0xFF
+
+# (BST upper bound, catch rate): early-route trash is a guaranteed catch,
+# a finished final stage fights the ball like a vanilla pseudo (45), and
+# legendary-grade drops to the vanilla legendary 3.
+_CATCH_RATE_BANDS = [(300, 255), (380, 180), (460, 120), (540, 60), (580, 45)]
+_CATCH_RATE_FLOOR = 3
+
+# Exp-group bytes (growth rate). One rate per LINE, from the final stage's
+# BST — evolving must never change a mon's exp curve mid-line.
+_GROWTH_MEDIUM_FAST, _GROWTH_MEDIUM_SLOW, _GROWTH_SLOW = 0, 3, 5
+
+# Gen 3 egg-group bytes.
+_EGG_MONSTER, _EGG_WATER1, _EGG_BUG, _EGG_FLYING = 1, 2, 3, 4
+_EGG_FIELD, _EGG_FAIRY, _EGG_GRASS, _EGG_HUMANLIKE = 5, 6, 7, 8
+_EGG_MINERAL, _EGG_AMORPHOUS, _EGG_DRAGON, _EGG_UNDISCOVERED = 10, 11, 14, 15
+
+# The int-valued fields ``enrich_line`` adds to a stage, with the validator a
+# stored value must pass before export trusts it over a fresh derivation.
+_RECORD_FIELDS = (
+    "catch_rate", "base_exp", "gender_ratio",
+    "egg_cycles", "base_happiness", "growth_rate",
+)
+
+
+def _bst(data: dict) -> int:
+    stats = data.get("base_stats") or {}
+    return sum(
+        v for v in stats.values()
+        if isinstance(v, int) and not isinstance(v, bool)
+    )
+
+
+def _catch_rate(bst: int) -> int:
+    for bound, rate in _CATCH_RATE_BANDS:
+        if bst < bound:
+            return rate
+    return _CATCH_RATE_FLOOR
+
+
+def _base_exp(bst: int) -> int:
+    """Linear in BST, clamped to the vanilla-observed 40..255 span.
+
+    0.4·BST − 40 lands the reference points: an early-route BST 250 gives
+    ~60 like Poochyena, a 520 final ~170 like Mightyena's neighbourhood,
+    and the 580/600 legendary band ~190-200.
+    """
+    return max(40, min(255, round(bst * 0.4) - 40))
+
+
+def _growth_rate(final_bst: int) -> int:
+    if final_bst >= 540:
+        return _GROWTH_SLOW
+    if final_bst >= 400:
+        return _GROWTH_MEDIUM_SLOW
+    return _GROWTH_MEDIUM_FAST
+
+
+def _egg_groups(data: dict, bst: int) -> list[int]:
+    """Two egg-group bytes from typing and anatomy.
+
+    First two matches win, in rule order; a single match doubles up, the way
+    vanilla single-group species repeat their byte. Field is the fallback,
+    not a guaranteed second slot — a wolf is Field/Field, not Field/whatever.
+    """
+    if bst >= _LEGENDARY_MIN_BST:
+        return [_EGG_UNDISCOVERED, _EGG_UNDISCOVERED]
+
+    types = set(data.get("types") or [])
+    traits = set(_traits(data))
+    groups: list[int] = []
+
+    def want(group: int) -> None:
+        if group not in groups:
+            groups.append(group)
+
+    if data.get("levitates") is True or "Ghost" in types:
+        want(_EGG_AMORPHOUS)
+    if "Dragon" in types:
+        want(_EGG_DRAGON)
+    if "Water" in types:
+        want(_EGG_WATER1)
+    if "Bug" in types:
+        want(_EGG_BUG)
+    if "Grass" in types:
+        want(_EGG_GRASS)
+    if types & {"Rock", "Steel", "Ground"}:
+        want(_EGG_MINERAL)
+    if traits & {"wings", "beak"}:
+        want(_EGG_FLYING)
+    if traits & {"fists", "kicks"}:
+        want(_EGG_HUMANLIKE)
+    if not groups:
+        groups.append(_EGG_FIELD)
+
+    return [groups[0], groups[1] if len(groups) > 1 else groups[0]]
+
+
+def _species_record(data: dict, growth_rate: int | None = None) -> dict:
+    """Every derived species-record field for one stage.
+
+    ``growth_rate`` is passed by ``enrich_line`` (one rate per line, from the
+    final stage); a standalone derivation falls back to the stage's own BST,
+    which is only ever wrong for the lower stages of a legacy-re-exported
+    line — and only by one adjacent exp group.
+    """
+    bst = _bst(data)
+    legendary = bst >= _LEGENDARY_MIN_BST
+    return {
+        "catch_rate": _catch_rate(bst),
+        "base_exp": _base_exp(bst),
+        "gender_ratio": _GENDERLESS if legendary else _GENDER_5050,
+        "egg_cycles": 20,
+        "base_happiness": 35 if legendary else 70,
+        "growth_rate": _growth_rate(bst) if growth_rate is None else growth_rate,
+        "egg_groups": _egg_groups(data, bst),
+    }
+
+
+def _species_fields(data: dict) -> dict:
+    """Stored record fields when valid, freshly derived otherwise — the same
+    trust order as the moveset and TM bits."""
+    derived = _species_record(data)
+    out = {}
+    for key in _RECORD_FIELDS:
+        value = data.get(key)
+        valid = isinstance(value, int) and not isinstance(value, bool) \
+            and 0 <= value <= 255
+        out[key] = value if valid else derived[key]
+    stored_groups = data.get("egg_groups")
+    valid_groups = (
+        isinstance(stored_groups, list) and len(stored_groups) == 2
+        and all(isinstance(g, int) and not isinstance(g, bool)
+                and 1 <= g <= 15 for g in stored_groups)
+    )
+    out["egg_groups"] = stored_groups if valid_groups else derived["egg_groups"]
+    return out
+
 
 def _encode_tmhm(numbers: set[int]) -> str:
     bits = 0
@@ -185,6 +336,11 @@ def _encode_tmhm(numbers: set[int]) -> str:
 
 
 def _tmhm_compatibility(data: dict) -> str:
+    stored = data.get("tmhm")
+    if isinstance(stored, str) and len(stored) == 16 and \
+            all(c in "0123456789ABCDEFabcdef" for c in stored):
+        return stored.upper()
+
     types = [t if t != "Fairy" else "Normal" for t in data["types"]]
     # A required key like everywhere else in export; only the values are
     # read tolerantly.
@@ -348,18 +504,19 @@ def _encode_base_stats(data: dict, ability1_idx: int, ability2_idx: int) -> str:
     t1 = types[0] if types else _type_index()["Normal"]
     t2 = types[1] if len(types) > 1 else t1
     ev = _ev_yield(s)
+    record = _species_fields(data)
 
     raw = bytes([
         s["hp"], s["attack"], s["defense"], s["speed"], s["sp_atk"], s["sp_def"],
         t1, t2,
-        120, 80,                                 # catch rate, base exp
+        record["catch_rate"], record["base_exp"],
         ev & 0xFF, (ev >> 8) & 0xFF,            # EV yield (packed 2-bit per stat)
         0x00, 0x00, 0x00, 0x00,                  # held items (empty)
-        0x7F,                                    # gender: 50/50
-        20,                                      # egg cycles
-        70,                                      # base happiness
-        0,                                       # growth rate: Medium Fast
-        11, 11,                                  # egg groups: Amorphous
+        record["gender_ratio"],
+        record["egg_cycles"],
+        record["base_happiness"],
+        record["growth_rate"],
+        record["egg_groups"][0], record["egg_groups"][1],
         ability1_idx & 0xFF, ability2_idx & 0xFF,  # ability1, ability2
         0x00,                                    # safari flee rate
         _TYPE_BODY_COLOR.get(t1, 8),
@@ -368,19 +525,21 @@ def _encode_base_stats(data: dict, ability1_idx: int, ability2_idx: int) -> str:
     return raw.hex().upper()
 
 
-def _moveset_rng(name: str) -> random.Random:
-    """Deterministic picker seeded from the species name.
+def _moveset_rng(seed_text: str) -> random.Random:
+    """Deterministic picker seeded from the LINE name plus a per-list salt.
 
-    "Random" trait/filler picks must not reshuffle on re-export, and tests
-    must be able to pin them down — the same reasoning that already seeds
-    the dex number from a name hash in ``_dex_number``. Two consequences
-    worth knowing: renaming a species reshuffles its picks (renames already
-    re-derive the dex number, cry and shinies — movesets join that list),
-    and cross-version stability additionally assumes CPython keeps
-    ``Random.sample``'s algorithm, which the double-export test cannot
+    Seeding from the line (stage 1's name) rather than each stage's own name
+    is what makes an evolution continue its pre-evolution's picks instead of
+    re-rolling them: every stage shuffles its candidate lists into the same
+    order and takes a prefix, so a stage with more room draws a superset.
+    Two consequences worth knowing: renaming stage 1 reshuffles the whole
+    line's picks (renames already re-derive the dex number, cry and shinies
+    — movesets join that list; later-stage renames are now harmless), and
+    cross-version stability additionally assumes CPython keeps
+    ``Random.shuffle``'s algorithm, which the double-export test cannot
     detect from inside one interpreter.
     """
-    digest = hashlib.sha256(name.encode("utf-8")).hexdigest()
+    digest = hashlib.sha256(seed_text.encode("utf-8")).hexdigest()
     return random.Random(int(digest[:16], 16))
 
 
@@ -394,9 +553,33 @@ def _traits(data: dict) -> list[str]:
     return [t for t in raw if isinstance(t, str) and t in _TRAIT_MOVES]
 
 
-def _build_moveset(data: dict) -> list[tuple[int, int]]:
+def _stored_moveset(data: dict) -> list[tuple[int, int]] | None:
+    """The stats.json ``moveset`` field, when it is a well-formed list of
+    (level, move id) pairs; None sends the caller to a fresh derivation."""
+    raw = data.get("moveset")
+    if not isinstance(raw, list) or not raw:
+        return None
+    moves = []
+    for entry in raw:
+        if (not isinstance(entry, (list, tuple)) or len(entry) != 2
+                or not all(isinstance(v, int) and not isinstance(v, bool)
+                           for v in entry)):
+            return None
+        level, mid = entry
+        if not (1 <= level <= 100 and 1 <= mid <= 511):
+            return None
+        moves.append((level, mid))
+    return sorted(moves)
+
+
+def _build_moveset(data: dict, line_name: str | None = None) -> list[tuple[int, int]]:
+    stored = _stored_moveset(data)
+    if stored is not None:
+        return stored
+
     types = [t if t != "Fairy" else "Normal" for t in data["types"]]
     ability = data.get("ability", "")
+    seed_name = line_name or data["name"]
 
     # Deduped by move id, not by level: Gen 3 tables allow several moves at
     # one level, and keying on level silently dropped whichever colliding
@@ -410,14 +593,20 @@ def _build_moveset(data: dict) -> list[tuple[int, int]]:
             moves.append((level, mid))
 
     def fill_from(
-        pool: list[tuple[int, int]], rng: random.Random, minimum: int = 0
+        pool: list[tuple[int, int]], salt: str, minimum: int = 0
     ) -> None:
-        candidates = [(lv, mid) for lv, mid in pool if mid not in seen]
+        # Shuffle-then-take-prefix, not sample: every stage of a line
+        # shuffles into the same order (same seed, same salt), so a stage
+        # that draws more picks extends the picks of one that drew fewer.
+        order = list(pool)
+        _moveset_rng(f"{seed_name}:{salt}").shuffle(order)
         want = max(_MOVESET_TARGET - len(moves), minimum)
-        if want <= 0 or not candidates:
-            return
-        for lv, mid in rng.sample(candidates, min(want, len(candidates))):
-            add(lv, mid)
+        for lv, mid in order:
+            if want <= 0:
+                return
+            if mid not in seen:
+                add(lv, mid)
+                want -= 1
 
     for lv, mid in _NORMAL_BACKBONE:
         add(lv, mid)
@@ -437,12 +626,11 @@ def _build_moveset(data: dict) -> list[tuple[int, int]]:
     # picks and both land at comparable sizes. Trait picks carry a floor:
     # even a dual-type whose pools alone fill the target still shows its
     # anatomy and gets its coverage.
-    rng = _moveset_rng(data["name"])
     fill_from(
         [m for trait in _traits(data) for m in _TRAIT_MOVES[trait]],
-        rng, minimum=_TRAIT_PICKS_MIN,
+        "traits", minimum=_TRAIT_PICKS_MIN,
     )
-    fill_from(_FILLER_MOVES, rng)
+    fill_from(_FILLER_MOVES, "filler")
 
     return sorted(moves)
 
@@ -466,6 +654,35 @@ def _format_entry(text: str) -> str:
 
 
 # ── public API ─────────────────────────────────────────────────────────────────
+
+def enrich_line(stages: list[dict]) -> list[dict]:
+    """Attach every ROM-derived field to each stage dict, line-coherently.
+
+    Called by ``main`` between generation and ``write_output``, so stats.json
+    carries the complete machine contract (the injector's input) and the .ini
+    becomes a serialization of it rather than the place derivation happens.
+    Line context is what a per-stage export can never reconstruct: movesets
+    seed from stage 1's name so evolutions extend their pre-evolution's picks,
+    and the growth rate comes from the final stage's BST and is shared — a
+    mon must never switch exp group by evolving.
+
+    Adds per stage: ``moveset`` ([[level, move_id], ...]), ``tmhm`` (the
+    16-hex-char ROM bitfield), and the species-record ints
+    (catch_rate, base_exp, gender_ratio, egg_cycles, base_happiness,
+    growth_rate, egg_groups).
+    """
+    if not stages:
+        return stages
+    line_name = stages[0].get("name", "")
+    growth = _growth_rate(max(_bst(stage) for stage in stages))
+    for stage in stages:
+        stage["moveset"] = [
+            [lv, mid] for lv, mid in _build_moveset(stage, line_name=line_name)
+        ]
+        stage["tmhm"] = _tmhm_compatibility(stage)
+        stage.update(_species_record(stage, growth_rate=growth))
+    return stages
+
 
 def export_ini(stage_dir: Path) -> Path:
     data = json.loads((stage_dir / "stats.json").read_text(encoding="utf-8"))
