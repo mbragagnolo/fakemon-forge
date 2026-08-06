@@ -267,6 +267,255 @@ def test_fairy_still_encodes_as_normal(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Level-up moves
+# ---------------------------------------------------------------------------
+
+_TACKLE, _GROWL = 33, 45
+
+
+def _moves(fields):
+    """Decoded (level, move_id) pairs from the original-format level-up blob."""
+    blob = fields["LevelUpAttacksOriginal"]
+    assert blob.endswith("FFFF0000")
+    body = blob[:-8]
+    pairs = []
+    for i in range(0, len(body), 4):
+        val = int(body[i:i + 2], 16) | (int(body[i + 2:i + 4], 16) << 8)
+        pairs.append((val >> 9, val & 0x1FF))
+    return pairs
+
+
+def test_every_species_learns_the_normal_backbone(tmp_path):
+    moves = _moves(_export(tmp_path, {**_BASE, "types": ["Ghost"]}))
+    assert (1, _TACKLE) in moves
+    assert (4, _GROWL) in moves
+
+
+def test_backbone_does_not_displace_the_primary_type_level_one_attack(tmp_path):
+    """Tackle also sits at level 1 — Ember must coexist with it, not vanish."""
+    moves = _moves(_export(tmp_path, dict(_BASE)))
+    assert (1, 52) in moves  # Ember
+    assert (1, _TACKLE) in moves
+
+
+def test_backbone_is_not_duplicated_for_normal_types(tmp_path):
+    """A Normal mon draws Tackle/Growl from its own pool too — once each."""
+    moves = _moves(_export(tmp_path, {**_BASE, "types": ["Normal"]}))
+    ids = [mid for _, mid in moves]
+    assert len(ids) == len(set(ids))
+    assert moves.count((1, _TACKLE)) == 1
+    # Growl keeps its backbone slot; the pool's level-6 copy is the duplicate.
+    assert (4, _GROWL) in moves and (6, _GROWL) not in moves
+
+
+@pytest.mark.parametrize("type_name, attack", [
+    ("Ground", 189),  # Mud-Slap, not Sand Attack
+    ("Steel", 232),   # Metal Claw, not Harden
+    ("Bug", 42),      # Pin Missile, not String Shot
+])
+def test_every_type_pool_opens_with_a_damaging_move(tmp_path, type_name, attack):
+    """The three pools that used to open with a status move — a low-level
+    encounter drew only that move and had no way to deal damage."""
+    moves = _moves(_export(tmp_path, {**_BASE, "types": [type_name]}))
+    assert (1, attack) in moves
+
+
+def test_same_level_moves_from_both_types_coexist(tmp_path):
+    """Water's Rain Dance and Fire's Flamethrower slice both land on level 26;
+    Gen 3 tables allow that, so neither is shifted or dropped."""
+    moves = _moves(_export(tmp_path, {**_BASE, "types": ["Water", "Fire"]}))
+    assert (26, 240) in moves
+    assert (26, 53) in moves
+
+
+def test_ability_move_survives_a_double_level_collision(tmp_path):
+    """Fire/Normal + Comfy Hide: Rest's level 24 and the +2 bump slot were both
+    taken, which used to drop the move entirely."""
+    fields = _export(tmp_path, {
+        **_BASE, "types": ["Fire", "Normal"], "ability": "Comfy Hide",
+    })
+    assert 156 in [mid for _, mid in _moves(fields)]  # Rest
+
+
+def test_moveset_is_sorted_by_level(tmp_path):
+    moves = _moves(_export(tmp_path, {**_BASE, "types": ["Water", "Fire"]}))
+    assert moves == sorted(moves)
+
+
+# ---------------------------------------------------------------------------
+# Trait buckets and filler
+# ---------------------------------------------------------------------------
+
+_STEEL_WING, _WING_ATTACK, _FEATHER_DANCE = 211, 17, 297
+_FILLER_IDS = [129, 263, 161, 36]  # Swift, Facade, Tri Attack, Take Down
+
+
+def test_no_trait_means_no_bucket_moves(tmp_path):
+    """The complaint that started this: Steelit learned Steel Wing without
+    wings. Without the trait, nothing from the wings bucket may appear."""
+    moves = _moves(_export(tmp_path, {**_BASE, "types": ["Steel"]}))
+    ids = {mid for _, mid in moves}
+    assert not ids & {_STEEL_WING, _WING_ATTACK, _FEATHER_DANCE}
+
+
+def test_trait_unlocks_its_bucket(tmp_path):
+    """A mono-Steel's shortfall exceeds the wings bucket, so having the trait
+    deterministically pulls in the whole bucket."""
+    fields = _export(tmp_path, {**_BASE, "types": ["Steel"], "traits": ["wings"]})
+    ids = {mid for _, mid in _moves(fields)}
+    assert {_STEEL_WING, _WING_ATTACK, _FEATHER_DANCE} <= ids
+
+
+@pytest.mark.parametrize("traits", ["wings", 42, ["wings", 7, "gills"]])
+def test_malformed_traits_are_tolerated(tmp_path, traits):
+    """A non-list, or unknown/non-string entries, mean fewer buckets — never
+    a raise, matching every other optional stats.json field."""
+    fields = _export(tmp_path, {**_BASE, "types": ["Steel"], "traits": traits})
+    assert "LevelUpAttacksOriginal" in fields
+
+
+def test_filler_tops_a_thin_moveset_up(tmp_path):
+    """Mono-Steel with no traits has the thinnest base; all four filler
+    moves must be drawn in."""
+    moves = _moves(_export(tmp_path, {**_BASE, "types": ["Steel"]}))
+    ids = {mid for _, mid in moves}
+    assert set(_FILLER_IDS) <= ids
+
+
+def test_mono_and_dual_types_reach_the_same_size(tmp_path):
+    """The old builder gave a mono-type visibly fewer moves than a dual."""
+    mono = _moves(_export(tmp_path, {**_BASE, "types": ["Water"]}))
+    dual = _moves(_export(tmp_path, {**_BASE, "types": ["Water", "Fire"]}))
+    assert len(mono) == len(dual) == 13
+
+
+_FISTS_IDS = {4, 325, 7, 8, 9, 327, 309, 223, 264}
+
+
+def test_traits_survive_a_full_base_moveset(tmp_path):
+    """Water/Fire's pools alone fill the 13-move target; without the trait
+    floor a dual-type with fists never threw a single punch."""
+    fields = _export(tmp_path, {
+        **_BASE, "types": ["Water", "Fire"], "traits": ["fists"],
+    })
+    moves = _moves(fields)
+    ids = {mid for _, mid in moves}
+    assert len(ids & _FISTS_IDS) == 2  # the floor, and only the floor
+    assert len(moves) == 15
+
+
+def test_moveset_is_stable_across_reexports(tmp_path):
+    """Trait/filler picks are seeded from the name: re-exporting the same
+    stage must never reshuffle its moves."""
+    data = {**_BASE, "types": ["Steel"], "traits": ["wings", "claws"]}
+    dir_a, dir_b = tmp_path / "a", tmp_path / "b"
+    dir_a.mkdir()
+    dir_b.mkdir()
+    first = _export(dir_a, data)
+    second = _export(dir_b, data)
+    assert first["LevelUpAttacksOriginal"] == second["LevelUpAttacksOriginal"]
+
+
+def test_moveset_never_repeats_a_move(tmp_path):
+    """Trait buckets overlap the pools (Iron Defense is in both the Steel
+    pool and the shell bucket); dedup is by move id."""
+    fields = _export(tmp_path, {
+        **_BASE, "types": ["Steel"], "traits": ["shell", "fists", "tail"],
+    })
+    ids = [mid for _, mid in _moves(fields)]
+    assert len(ids) == len(set(ids))
+
+
+# ---------------------------------------------------------------------------
+# TM / HM compatibility
+# ---------------------------------------------------------------------------
+
+_TOXIC, _HYPER_BEAM, _FLAMETHROWER, _STEEL_WING_TM = 6, 15, 35, 47
+_FOCUS_PUNCH, _BRICK_BREAK, _STRENGTH = 1, 31, 54
+_CUT, _FLY, _SURF, _WATERFALL, _DIVE = 51, 52, 53, 57, 58
+
+# _BASE's stats sum to 331 with attack 52 — under both stat gates, so tests
+# opt in explicitly where a gate is the subject.
+_STRONG_STATS = {"hp": 80, "attack": 80, "defense": 70,
+                 "sp_atk": 70, "sp_def": 60, "speed": 60}
+
+
+def _machines(fields):
+    """TM/HM numbers (1-50, 51-58 = HM01-08) decoded from the bitfield."""
+    raw = int.from_bytes(bytes.fromhex(fields["TMHMCompatibility"]), "little")
+    return {n for n in range(1, 59) if raw & (1 << (n - 1))}
+
+
+def test_tmhm_blob_stays_eight_bytes(tmp_path):
+    assert len(_export(tmp_path, dict(_BASE))["TMHMCompatibility"]) == 16
+
+
+def test_tmhm_bit_layout_matches_the_rom_record(tmp_path):
+    """Pins endianness against the injector's verbatim 8-byte write: TM06
+    (Toxic) is byte 0 bit 5, HM03 (Surf) is byte 6 bit 4."""
+    blob = bytes.fromhex(
+        _export(tmp_path, {**_BASE, "types": ["Water"]})["TMHMCompatibility"]
+    )
+    assert blob[0] >> 5 & 1  # TM06 Toxic, universal
+    assert blob[6] >> 4 & 1  # HM03 Surf, Water
+
+
+def test_every_mon_gets_the_universal_machines(tmp_path):
+    machines = _machines(_export(tmp_path, {**_BASE, "types": ["Ghost"]}))
+    assert _TOXIC in machines
+
+
+def test_type_machines_follow_the_types(tmp_path):
+    machines = _machines(_export(tmp_path, dict(_BASE)))  # mono-Fire
+    assert _FLAMETHROWER in machines
+    assert not machines & {_SURF, _WATERFALL, _DIVE}
+
+
+def test_water_types_can_learn_the_field_hms(tmp_path):
+    machines = _machines(_export(tmp_path, {**_BASE, "types": ["Water"]}))
+    assert {_SURF, _WATERFALL, _DIVE} <= machines
+
+
+def test_trait_machines_follow_the_traits(tmp_path):
+    bare = _machines(_export(tmp_path, {**_BASE, "types": ["Steel"]}))
+    winged = _machines(_export(
+        tmp_path, {**_BASE, "types": ["Steel"], "traits": ["wings"]},
+    ))
+    assert not bare & {_STEEL_WING_TM, _FLY}
+    assert {_STEEL_WING_TM, _FLY} <= winged
+
+
+def test_fists_unlock_the_punch_machines(tmp_path):
+    machines = _machines(_export(
+        tmp_path, {**_BASE, "types": ["Steel"], "traits": ["fists"]},
+    ))
+    assert {_FOCUS_PUNCH, _BRICK_BREAK, _STRENGTH} <= machines
+
+
+def test_hyper_beam_needs_the_bst_gate(tmp_path):
+    weak = _machines(_export(tmp_path, dict(_BASE)))
+    strong = _machines(_export(
+        tmp_path, {**_BASE, "base_stats": _STRONG_STATS},
+    ))
+    assert _HYPER_BEAM not in weak
+    assert _HYPER_BEAM in strong
+
+
+def test_strength_comes_from_attack_without_fists(tmp_path):
+    machines = _machines(_export(
+        tmp_path, {**_BASE, "base_stats": _STRONG_STATS},
+    ))
+    assert _STRENGTH in machines
+
+
+def test_claws_unlock_cut(tmp_path):
+    machines = _machines(_export(
+        tmp_path, {**_BASE, "types": ["Grass"], "traits": ["claws"]},
+    ))
+    assert _CUT in machines
+
+
+# ---------------------------------------------------------------------------
 # Errors — unchanged propagation for genuinely missing input
 # ---------------------------------------------------------------------------
 
