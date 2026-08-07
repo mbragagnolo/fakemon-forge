@@ -27,6 +27,8 @@ from fakemon_forge.sprites import (
     k_centroid,
     _k_centroid_paired_index,
     _stitch_paired_cells,
+    _cleanup_sheet_cell_pair,
+    _paired_color_map,
     _background_index,
     _flatten_background_to_key,
     _quantize_gen3,
@@ -2483,6 +2485,80 @@ def test_stitch_spritesheet_pairs_agree_on_winning_tile_after_shiny_recolor(tmp_
         assert sheet.getpixel((x, y)) == majority_color
         assert sheet.getpixel((x + 2, y)) == shiny_majority
         assert sheet.getpixel((x + 2, y)) != shiny_minority
+
+
+# ---------------------------------------------------------------------------
+# _paired_color_map() / _cleanup_sheet_cell_pair() — #105: despeckle + outline
+# restoration must not reintroduce the disagreement #103's paired downscale
+# closed.
+# ---------------------------------------------------------------------------
+
+def test_paired_color_map_maps_every_shared_index_through_both_palettes():
+    normal = Image.new("P", (2, 2))
+    normal.putpalette([10, 20, 30, 40, 50, 60] + [0, 0, 0] * 254)
+    shiny = normal.copy()
+    shiny.putpalette([70, 80, 90, 100, 110, 120] + [0, 0, 0] * 254)
+    color_map = _paired_color_map(normal, shiny)
+    assert color_map[(10, 20, 30)] == (70, 80, 90)
+    assert color_map[(40, 50, 60)] == (100, 110, 120)
+    # Reserved-black padding is pinned identically in both palettes.
+    assert color_map[(0, 0, 0)] == (0, 0, 0)
+
+
+def _straddling_pair_stage(tmp_path, size=96):
+    """A P-mode sprite whose creature area straddles two colour indices in a
+    fine pattern -- downscaling to a sheet cell leaves plenty of SE/NW edges
+    for outline restoration to touch. Saves sprite.png + a generate_shiny
+    sprite_shiny.png (a real hue-rotated recolour, not a hand palette) into
+    tmp_path and returns (normal_path, shiny_path).
+    """
+    data = [0] * (size * size)  # 0 = key/background
+    for y in range(size):
+        for x in range(size):
+            if 10 <= x < 86 and 10 <= y < 86:
+                data[y * size + x] = 1 if (x + y) % 7 else 2
+    img = Image.new("P", (size, size))
+    img.putdata(data)
+    img.putpalette([200, 200, 168, 220, 60, 60, 60, 120, 60] + [0, 0, 0] * 253)
+    normal_path = tmp_path / "sprite.png"
+    shiny_path = tmp_path / "sprite_shiny.png"
+    img.save(normal_path)
+    generate_shiny(str(normal_path), "Testmon", str(shiny_path))
+    return normal_path, shiny_path
+
+
+def test_cleanup_sheet_cell_pair_agrees_on_colour_correspondence(tmp_path):
+    """The property #105 asks for: every position sharing a normal colour
+    must map to the same shiny colour everywhere it occurs, even after
+    despeckle + outline restoration -- not just after the raw downscale.
+    """
+    normal_path, shiny_path = _straddling_pair_stage(tmp_path)
+    normal = Image.open(normal_path)
+    shiny = Image.open(shiny_path)
+    n_cell, s_cell = _k_centroid_paired_index(normal, shiny, 64, 64)
+    color_map = _paired_color_map(normal, shiny)
+    n_out, s_out = _cleanup_sheet_cell_pair(n_cell, s_cell, color_map)
+
+    seen = {}
+    for y in range(64):
+        for x in range(64):
+            nc, sc = n_out.getpixel((x, y)), s_out.getpixel((x, y))
+            assert seen.setdefault(nc, sc) == sc
+
+
+def test_stitch_spritesheet_pairs_agree_after_outline_restoration(tmp_path):
+    """End-to-end version of the above, through the public entrypoint."""
+    _straddling_pair_stage(tmp_path)
+    out = tmp_path / "spritesheet.png"
+    stitch_spritesheet(str(tmp_path), str(out))
+    sheet = Image.open(out).convert("RGB")
+
+    seen = {}
+    for y in range(64):
+        for x in range(64):
+            nc = sheet.getpixel((x, y))          # front normal cell
+            sc = sheet.getpixel((x + 64, y))      # front shiny cell
+            assert seen.setdefault(nc, sc) == sc
 
 
 # ---------------------------------------------------------------------------
