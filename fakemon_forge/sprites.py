@@ -1661,35 +1661,65 @@ def _nearest_color(pool, target):
     return min(pool, key=lambda c: _rgb_distance(c, target)) if pool else None
 
 
-def _despeckle_cell(cell: Image.Image) -> Image.Image:
-    """Key out isolated creature specks: <=1 creature neighbour (8-connected).
-
-    The downscale's grid misalignment strands lone pixels of creature colour in
-    the background (drifting embers, aura noise) that hand-pixeled sprites never
-    carry. Decided in a single simultaneous pass over the input, so a chain of
-    specks does not erode from its end inward. Returns a new RGB cell.
-    """
-    out = cell.copy()
+def _cell_background_positions(cell: Image.Image) -> set:
+    """Positions of ``cell`` classified background by ``_is_cell_background``."""
     px = cell.load()
-    opx = out.load()
     w, h = cell.size
+    return {(x, y) for y in range(h) for x in range(w) if _is_cell_background(px[x, y])}
+
+
+def _despeckled_background(background: set, w: int, h: int) -> set:
+    """``background`` plus every isolated (<=1 non-background 8-neighbour) position.
+
+    Pure geometry over a position set — no pixel colours involved — so a
+    ``background`` shared between two same-size cells (see
+    ``_cleanup_sheet_cell_pair`` and #107) despeckles identically for both,
+    regardless of which cell's own colours happened to build the set.
+    """
+    out = set(background)
     for y in range(h):
         for x in range(w):
-            if _is_cell_background(px[x, y]):
+            if (x, y) in background:
                 continue
             neighbours = sum(
                 1
                 for nx in (x - 1, x, x + 1)
                 for ny in (y - 1, y, y + 1)
                 if (nx, ny) != (x, y) and 0 <= nx < w and 0 <= ny < h
-                and not _is_cell_background(px[nx, ny])
+                and (nx, ny) not in background
             )
             if neighbours <= 1:
-                opx[x, y] = _KEY_COLOR
+                out.add((x, y))
     return out
 
 
-def _restore_cell_outline(cell: Image.Image) -> Image.Image:
+def _despeckle_cell(cell: Image.Image, background: set | None = None) -> Image.Image:
+    """Key out isolated creature specks: <=1 creature neighbour (8-connected).
+
+    The downscale's grid misalignment strands lone pixels of creature colour in
+    the background (drifting embers, aura noise) that hand-pixeled sprites never
+    carry. Decided in a single simultaneous pass over the input, so a chain of
+    specks does not erode from its end inward. Returns a new RGB cell.
+
+    ``background``, if given, is the pre-despeckle set of background
+    positions to classify against instead of deriving one from ``cell``'s own
+    colours — see ``_cleanup_sheet_cell_pair`` (#107): a normal/shiny pair
+    must despeckle identically from one shared classification, since a
+    creature colour that sits just inside ``_CELL_BACKGROUND_TOLERANCE`` of
+    ``_KEY_COLOR`` in one palette can sit just outside it in the other.
+    """
+    w, h = cell.size
+    if background is None:
+        background = _cell_background_positions(cell)
+    despeckled = _despeckled_background(background, w, h)
+    out = cell.copy()
+    opx = out.load()
+    for x, y in despeckled - background:
+        opx[x, y] = _KEY_COLOR
+    return out
+
+
+def _restore_cell_outline(cell: Image.Image, background: set | None = None) -> Image.Image:
     """Restore a NW-lit Gen-3 outline on a downscaled sheet cell.
 
     Every creature pixel 4-adjacent to the background (within the canvas —
@@ -1708,13 +1738,21 @@ def _restore_cell_outline(cell: Image.Image) -> Image.Image:
     occurs in the cell (reserved black is the only fallback, for a cell with no
     dark colour of its own), so the Gen-3 16-colour budget is untouched.
     Returns a new RGB cell.
+
+    ``background``, if given, is the set of background positions to classify
+    against instead of calling ``_is_cell_background`` on ``cell``'s own
+    colours — see ``_cleanup_sheet_cell_pair`` (#107) and ``_despeckle_cell``.
     """
     out = cell.copy()
     px = out.load()
     w, h = out.size
+    if background is None:
+        background = _cell_background_positions(out)
 
-    colors = {px[x, y] for y in range(h) for x in range(w)
-              if not _is_cell_background(px[x, y])}
+    def is_bg(x, y):
+        return (x, y) in background
+
+    colors = {px[x, y] for y in range(h) for x in range(w) if not is_bg(x, y)}
     dark_pool = [c for c in colors if _relative_luma(c) < _CELL_DARK_LUMA]
     darkest = min(dark_pool, key=_relative_luma) if dark_pool else (0, 0, 0)
 
@@ -1723,23 +1761,20 @@ def _restore_cell_outline(cell: Image.Image) -> Image.Image:
     for y in range(h):
         for x in range(w):
             p = px[x, y]
-            if _is_cell_background(p):
+            if is_bg(x, y):
                 continue
             ox = oy = 0
             n_bg = 0
             for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1)):
                 nx, ny = x + dx, y + dy
-                if 0 <= nx < w and 0 <= ny < h and _is_cell_background(px[nx, ny]):
+                if 0 <= nx < w and 0 <= ny < h and is_bg(nx, ny):
                     n_bg += 1
                     ox += dx
                     oy += dy
             if not n_bg:
                 continue
 
-            def bg(nx, ny):
-                return 0 <= nx < w and 0 <= ny < h and _is_cell_background(px[nx, ny])
-
-            if (bg(x - 1, y) and bg(x + 1, y)) or (bg(x, y - 1) and bg(x, y + 1)):
+            if (is_bg(x - 1, y) and is_bg(x + 1, y)) or (is_bg(x, y - 1) and is_bg(x, y + 1)):
                 continue  # 1px-thin feature
             direction = ox + oy
             if direction > 0:
@@ -1775,7 +1810,7 @@ def _restore_cell_outline(cell: Image.Image) -> Image.Image:
             if not (0 <= nx < w and 0 <= ny < h):
                 continue
             p = px[nx, ny]
-            if _is_cell_background(p) or (nx, ny) in edits:
+            if is_bg(nx, ny) or (nx, ny) in edits:
                 continue
             px[nx, ny] = mapping.get(p, p)
     return out
@@ -1789,43 +1824,56 @@ def _cleanup_sheet_cell(cell: Image.Image) -> Image.Image:
 def _cleanup_sheet_cell_pair(
     normal_cell: Image.Image, shiny_cell: Image.Image, color_map: dict
 ) -> tuple[Image.Image, Image.Image]:
-    """Paired ``_cleanup_sheet_cell`` for a normal/shiny cell pair (#105).
+    """Paired ``_cleanup_sheet_cell`` for a normal/shiny cell pair (#105, #107).
 
-    Despeckling is already pair-safe: ``_k_centroid_paired_index`` gives both
-    cells an identical background/creature split (background pixels are
-    literally ``_KEY_COLOR`` in both, since ``generate_shiny`` pins index 0
-    unconditionally), and ``_despeckle_cell``'s only replacement colour is
-    that same constant — so both cells go through it independently with no
-    risk of disagreement. Outline restoration is not pair-safe:
-    ``_restore_cell_outline`` picks each edit's replacement colour by
-    searching *this* cell's own dark_pool for the nearest/darkest match, and
-    a hue shift doesn't preserve relative luminance ordering — the "nearest
-    darker colour available here" it lands on can be an unrelated colour
-    family on the shiny side even though the two cells started out agreeing
-    on every tile (#103's exact symptom, one function later).
+    Two independent disagreements can reopen between a pair that
+    ``_k_centroid_paired_index`` stitched in perfect agreement:
 
-    Rather than recompute the outline independently per cell, this runs the
-    unchanged ``_restore_cell_outline`` algorithm once, on the normal cell,
-    then diffs its result against the pre-outline cell to find exactly the
-    positions it touched. The shiny cell gets the identical edits — same
-    positions, values translated through ``color_map`` (normal colour ->
-    shiny colour, built by ``_paired_color_map``) instead of recomputed from
-    its own palette. Positions the outline pass left alone keep whatever
+    - **Classification (#107).** ``_is_cell_background`` compares one colour
+      to ``_KEY_COLOR``. A creature colour that happens to sit just inside
+      ``_CELL_BACKGROUND_TOLERANCE`` of the key in the normal palette can
+      land just outside it after the shiny hue shift (or vice versa) — so
+      the *same* pixel (same winning source index, guaranteed identical by
+      the paired stitch) gets called background in one cell and creature in
+      the other. Both ``_despeckle_cell`` and ``_restore_cell_outline`` key
+      their every decision off that classification, so a single disagreement
+      here cascades into different despeckle/edge/rim-shade choices even
+      before colour ever enters the picture. Fixed by classifying **once**,
+      from the normal cell only, and passing that shared ``background`` set
+      into both cells' ``_despeckle_cell``/``_restore_cell_outline`` calls
+      instead of letting each derive its own from its own colours.
+    - **Colour choice (#105).** ``_restore_cell_outline`` picks each edit's
+      replacement colour by searching *this* cell's own dark_pool for the
+      nearest/darkest match, and a hue shift doesn't preserve relative
+      luminance ordering — the "nearest darker colour available here" it
+      lands on can be an unrelated colour family on the shiny side even once
+      both sides agree on which pixels are edges. Fixed by running the
+      unchanged ``_restore_cell_outline`` algorithm once, on the normal
+      cell, then diffing its result against the pre-outline cell to find
+      exactly the positions it touched. The shiny cell gets the identical
+      edits — same positions, values translated through ``color_map``
+      (normal colour -> shiny colour, built by ``_paired_color_map``)
+      instead of recomputed from its own palette.
+
+    Positions the outline pass left alone keep whatever
     ``_k_centroid_paired_index`` produced, which already agrees between the
     pair. A colour absent from ``color_map`` (only the reserved-black
     fallback ``_restore_cell_outline`` reaches for without a dark_pool of
     its own) is applied to the shiny cell verbatim, since black is pinned
     identically in both palettes by ``generate_shiny``.
     """
-    normal_despeckled = _despeckle_cell(normal_cell)
-    shiny_despeckled = _despeckle_cell(shiny_cell)
-    normal_outlined = _restore_cell_outline(normal_despeckled)
+    w, h = normal_cell.size
+    background = _cell_background_positions(normal_cell)
+
+    normal_despeckled = _despeckle_cell(normal_cell, background)
+    shiny_despeckled = _despeckle_cell(shiny_cell, background)
+    despeckled_background = _despeckled_background(background, w, h)
+    normal_outlined = _restore_cell_outline(normal_despeckled, despeckled_background)
 
     shiny_outlined = shiny_despeckled.copy()
     before_px = normal_despeckled.load()
     after_px = normal_outlined.load()
     shiny_px = shiny_outlined.load()
-    w, h = normal_outlined.size
     for y in range(h):
         for x in range(w):
             new_color = after_px[x, y]
@@ -1931,7 +1979,7 @@ def _stitch_paired_cells(
     """Both cleaned-up cells of a normal/shiny pair, kept in sync end to end.
 
     Downscales via ``_k_centroid_paired_index`` when safe (#103), then runs
-    ``_cleanup_sheet_cell_pair`` (#105) instead of two independent
+    ``_cleanup_sheet_cell_pair`` (#105, #107) instead of two independent
     ``_cleanup_sheet_cell`` calls, so despeckle and outline restoration can't
     reintroduce the disagreement the paired downscale just closed. Returns
     fully cleaned cells — callers should paste the results directly, not run
@@ -1978,10 +2026,11 @@ def stitch_spritesheet(stage_dir: str, output_path: str, *, cell_size: int = 64)
     Each normal/shiny pair is downscaled and cleaned up together via
     ``_stitch_paired_cells`` rather than each cell on its own, so the two
     cells of a pair always agree on which source tile wins a given position
-    (#103) and never drift apart again in despeckle/outline cleanup (#105) —
-    plain ``k_centroid``/``_cleanup_sheet_cell`` each work purely from one
-    cell's own colours and have no way to keep two differently palettized
-    views of the same index data in sync.
+    (#103) and never drift apart again in despeckle/outline cleanup — neither
+    in which colour an edit picks (#105) nor in which pixels even count as
+    background to begin with (#107) — plain ``k_centroid``/``_cleanup_sheet_cell``
+    each work purely from one cell's own colours and have no way to keep two
+    differently palettized views of the same index data in sync.
 
     An unpaired cell (the other half of its pair missing) goes through
     ``_stitch_single_cell`` then the ordinary ``_cleanup_sheet_cell`` —

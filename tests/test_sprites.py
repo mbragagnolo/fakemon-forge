@@ -29,6 +29,9 @@ from fakemon_forge.sprites import (
     _stitch_paired_cells,
     _cleanup_sheet_cell_pair,
     _paired_color_map,
+    _cell_background_positions,
+    _despeckled_background,
+    _is_cell_background,
     _background_index,
     _flatten_background_to_key,
     _quantize_gen3,
@@ -2549,6 +2552,110 @@ def test_cleanup_sheet_cell_pair_agrees_on_colour_correspondence(tmp_path):
 def test_stitch_spritesheet_pairs_agree_after_outline_restoration(tmp_path):
     """End-to-end version of the above, through the public entrypoint."""
     _straddling_pair_stage(tmp_path)
+    out = tmp_path / "spritesheet.png"
+    stitch_spritesheet(str(tmp_path), str(out))
+    sheet = Image.open(out).convert("RGB")
+
+    seen = {}
+    for y in range(64):
+        for x in range(64):
+            nc = sheet.getpixel((x, y))          # front normal cell
+            sc = sheet.getpixel((x + 64, y))      # front shiny cell
+            assert seen.setdefault(nc, sc) == sc
+
+
+# ---------------------------------------------------------------------------
+# _cell_background_positions() / _despeckled_background() /
+# _cleanup_sheet_cell_pair() — #107: background/creature *classification*
+# must be shared between a pair too, not just the outline colour choice.
+# ---------------------------------------------------------------------------
+
+def test_cell_background_positions_matches_is_cell_background():
+    cell = Image.new("RGB", (2, 2), _KEY_COLOR)
+    cell.putpixel((1, 0), (220, 60, 60))
+    assert _cell_background_positions(cell) == {(0, 0), (0, 1), (1, 1)}
+
+
+def test_despeckled_background_adds_isolated_creature_position():
+    # A single non-background pixel with no non-background neighbours.
+    background = {(x, y) for x in range(3) for y in range(3)} - {(1, 1)}
+    out = _despeckled_background(background, 3, 3)
+    assert (1, 1) in out
+
+
+def test_despeckled_background_keeps_a_supported_creature_position():
+    # A 2x2 non-background block: every pixel in it has 3 non-background
+    # 8-neighbours (well above the <=1 despeckle threshold), so none of them
+    # count as an isolated speck.
+    block = {(1, 1), (1, 2), (2, 1), (2, 2)}
+    background = {(x, y) for x in range(4) for y in range(4)} - block
+    out = _despeckled_background(background, 4, 4)
+    assert not (out & block)
+
+
+def _near_key_pair_stage(tmp_path, size=96):
+    """A P-mode sprite whose creature includes a colour just *inside*
+    ``_CELL_BACKGROUND_TOLERANCE`` of ``_KEY_COLOR`` -- generate_shiny's hue
+    rotation moves that colour well outside the tolerance, so
+    ``_is_cell_background`` disagrees between the normal and shiny cell at
+    the very same (shared-index) positions (#107's exact repro shape).
+    Saves sprite.png + sprite_shiny.png into tmp_path and returns their paths.
+    """
+    near_key = (203, 199, 173)   # distance to _KEY_COLOR (200,200,168) ~5.9 < 8
+    far_color = (220, 60, 60)
+    data = [0] * (size * size)  # 0 = literal key
+    for y in range(size):
+        for x in range(size):
+            if 10 <= x < 86 and 10 <= y < 86:
+                data[y * size + x] = 1 if (x + y) % 5 == 0 else 2
+    img = Image.new("P", (size, size))
+    img.putdata(data)
+    img.putpalette([200, 200, 168] + list(near_key) + list(far_color) + [0, 0, 0] * 253)
+    normal_path = tmp_path / "sprite.png"
+    shiny_path = tmp_path / "sprite_shiny.png"
+    img.save(normal_path)
+    generate_shiny(str(normal_path), "Teleshound", str(shiny_path))
+    return normal_path, shiny_path
+
+
+def test_near_key_pair_actually_disagrees_on_raw_classification(tmp_path):
+    """Sanity check on the fixture itself: without the #107 fix, the raw
+    paired-downscale cells really do classify the same position differently
+    between normal and shiny -- otherwise the regression test below would
+    pass for the wrong reason.
+    """
+    normal_path, shiny_path = _near_key_pair_stage(tmp_path)
+    normal, shiny = Image.open(normal_path), Image.open(shiny_path)
+    n_cell, s_cell = _k_centroid_paired_index(normal, shiny, 64, 64)
+    n_px, s_px = n_cell.load(), s_cell.load()
+    disagreements = sum(
+        1
+        for y in range(64) for x in range(64)
+        if _is_cell_background(n_px[x, y]) != _is_cell_background(s_px[x, y])
+    )
+    assert disagreements > 0
+
+
+def test_cleanup_sheet_cell_pair_agrees_despite_classification_disagreement(tmp_path):
+    """#107: even when the normal and shiny cell disagree on which pixels are
+    background, the cleaned-up pair must still agree on colour correspondence.
+    """
+    normal_path, shiny_path = _near_key_pair_stage(tmp_path)
+    normal, shiny = Image.open(normal_path), Image.open(shiny_path)
+    n_cell, s_cell = _k_centroid_paired_index(normal, shiny, 64, 64)
+    color_map = _paired_color_map(normal, shiny)
+    n_out, s_out = _cleanup_sheet_cell_pair(n_cell, s_cell, color_map)
+
+    seen = {}
+    for y in range(64):
+        for x in range(64):
+            nc, sc = n_out.getpixel((x, y)), s_out.getpixel((x, y))
+            assert seen.setdefault(nc, sc) == sc
+
+
+def test_stitch_spritesheet_pairs_agree_despite_near_key_shiny_colour(tmp_path):
+    """End-to-end version of the above, through the public entrypoint."""
+    _near_key_pair_stage(tmp_path)
     out = tmp_path / "spritesheet.png"
     stitch_spritesheet(str(tmp_path), str(out))
     sheet = Image.open(out).convert("RGB")
