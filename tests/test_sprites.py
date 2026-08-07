@@ -25,6 +25,8 @@ from fakemon_forge.sprites import (
     build_frame2,
     stitch_spritesheet,
     k_centroid,
+    _k_centroid_paired_index,
+    _stitch_paired_cells,
     _background_index,
     _flatten_background_to_key,
     _quantize_gen3,
@@ -2399,6 +2401,88 @@ def test_spritesheet_multi_tone_views_stay_on_source_palette(tmp_path):
     stitch_spritesheet(str(tmp_path), str(out))
     sheet_colors = set(Image.open(out).convert("RGB").get_flattened_data())
     assert sheet_colors <= allowed
+
+
+# ---------------------------------------------------------------------------
+# _k_centroid_paired_index() / _stitch_paired_cells() — #103: normal/shiny
+# pairs must agree on which source tile wins a position, regardless of palette.
+# ---------------------------------------------------------------------------
+
+def test_paired_index_downscale_agrees_on_winning_tile_regardless_of_palette():
+    # Same index data (simulates generate_shiny's putpalette-only recolour),
+    # two unrelated palettes. Index 1 is a large majority of the tile, index
+    # 0 a minority — an RGB-clustering downscale run independently per image
+    # could flip which one "wins" once the colours differ; index-space must
+    # not.
+    size = 12
+    data = [1] * (size * size)
+    for y in range(5):  # minority block, well under half the tile
+        for x in range(5):
+            data[y * size + x] = 0
+    normal = Image.new("P", (size, size))
+    normal.putdata(data)
+    normal.putpalette([10, 20, 30, 200, 100, 50] + [0, 0, 0] * 254)
+    shiny = normal.copy()
+    shiny.putpalette([90, 90, 90, 5, 5, 5] + [0, 0, 0] * 254)  # unrelated palette
+
+    out_normal, out_shiny = _k_centroid_paired_index(normal, shiny, 1, 1)
+    # Index 1 (the majority) must win in both, each through its own palette.
+    assert out_normal.getpixel((0, 0)) == (200, 100, 50)
+    assert out_shiny.getpixel((0, 0)) == (5, 5, 5)
+
+
+def test_paired_index_downscale_falls_back_to_nearest_when_upscaling():
+    # Mirrors k_centroid's own NEAREST fallback: nothing to pick a dominant
+    # index from when the target isn't smaller than the source.
+    normal = Image.new("P", (2, 2))
+    normal.putpalette([1, 2, 3, 4, 5, 6] + [0, 0, 0] * 254)
+    shiny = normal.copy()
+    shiny.putpalette([7, 8, 9, 10, 11, 12] + [0, 0, 0] * 254)
+    out_normal, out_shiny = _k_centroid_paired_index(normal, shiny, 4, 4)
+    assert out_normal.size == out_shiny.size == (4, 4)
+
+
+def test_stitch_paired_cells_warns_and_falls_back_on_mode_mismatch(capsys):
+    normal = Image.new("P", (12, 12), 0)
+    normal.putpalette([10, 20, 30] + [0, 0, 0] * 255)
+    shiny_rgb = Image.new("RGB", (12, 12), (5, 5, 5))  # not P-mode: shares no index data
+    _stitch_paired_cells(normal, shiny_rgb, 1)
+    assert "warning" in capsys.readouterr().err
+
+
+def test_stitch_spritesheet_pairs_agree_on_winning_tile_after_shiny_recolor(tmp_path):
+    """#103: stitching a normal/shiny pair whose only difference is
+    ``putpalette`` must never disagree on which source tile wins a position.
+    """
+    size = 24  # cell_size=2 below -> two output pixels per axis, 12x12 tiles
+    majority_color = (220, 60, 60)
+    minority_color = (60, 60, 220)
+    data = [1] * (size * size)  # index 1 = majority everywhere
+    for y in range(5):  # minority block confined to the (0, 0) output tile
+        for x in range(5):
+            data[y * size + x] = 2
+    img = Image.new("P", (size, size))
+    img.putdata(data)
+    img.putpalette(
+        [200, 200, 168] + list(majority_color) + list(minority_color) + [0, 0, 0] * 253
+    )
+    img.save(tmp_path / "sprite.png")
+    generate_shiny(str(tmp_path / "sprite.png"), "Testmon", str(tmp_path / "sprite_shiny.png"))
+
+    out = tmp_path / "spritesheet.png"
+    stitch_spritesheet(str(tmp_path), str(out), cell_size=2)
+    sheet = Image.open(out).convert("RGB")
+    shiny_palette = Image.open(tmp_path / "sprite_shiny.png").getpalette()
+    shiny_majority = tuple(shiny_palette[3:6])
+    shiny_minority = tuple(shiny_palette[6:9])
+
+    # Every pixel of both cells must trace back to index 1 (the majority),
+    # never index 2 -- in the normal cell's own colour and in whatever
+    # generate_shiny rotated index 1 to, respectively.
+    for x, y in ((0, 0), (1, 0)):
+        assert sheet.getpixel((x, y)) == majority_color
+        assert sheet.getpixel((x + 2, y)) == shiny_majority
+        assert sheet.getpixel((x + 2, y)) != shiny_minority
 
 
 # ---------------------------------------------------------------------------

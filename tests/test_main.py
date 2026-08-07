@@ -691,8 +691,10 @@ def test_icon_failure_warns_but_does_not_exit(ctx, capsys):
 
 def test_icon_not_added_to_spritesheet_layout():
     from fakemon_forge.sprites import _SHEET_LAYOUT
-    names = {name for name, *_ in _SHEET_LAYOUT}
-    assert len(_SHEET_LAYOUT) == 6
+    # _SHEET_LAYOUT is grouped as normal/shiny pairs (#103) rather than a flat
+    # list of six entries; flatten back out to check the view names.
+    names = {name for pair in _SHEET_LAYOUT for name, *_ in pair}
+    assert sum(len(pair) for pair in _SHEET_LAYOUT) == 6
     assert "sprite_small.png" not in names
     # The intermediate chibi render is likewise never stitched into the sheet.
     assert "sprite_chibi.png" not in names
