@@ -1786,6 +1786,74 @@ def _cleanup_sheet_cell(cell: Image.Image) -> Image.Image:
     return _restore_cell_outline(_despeckle_cell(cell))
 
 
+def _cleanup_sheet_cell_pair(
+    normal_cell: Image.Image, shiny_cell: Image.Image, color_map: dict
+) -> tuple[Image.Image, Image.Image]:
+    """Paired ``_cleanup_sheet_cell`` for a normal/shiny cell pair (#105).
+
+    Despeckling is already pair-safe: ``_k_centroid_paired_index`` gives both
+    cells an identical background/creature split (background pixels are
+    literally ``_KEY_COLOR`` in both, since ``generate_shiny`` pins index 0
+    unconditionally), and ``_despeckle_cell``'s only replacement colour is
+    that same constant — so both cells go through it independently with no
+    risk of disagreement. Outline restoration is not pair-safe:
+    ``_restore_cell_outline`` picks each edit's replacement colour by
+    searching *this* cell's own dark_pool for the nearest/darkest match, and
+    a hue shift doesn't preserve relative luminance ordering — the "nearest
+    darker colour available here" it lands on can be an unrelated colour
+    family on the shiny side even though the two cells started out agreeing
+    on every tile (#103's exact symptom, one function later).
+
+    Rather than recompute the outline independently per cell, this runs the
+    unchanged ``_restore_cell_outline`` algorithm once, on the normal cell,
+    then diffs its result against the pre-outline cell to find exactly the
+    positions it touched. The shiny cell gets the identical edits — same
+    positions, values translated through ``color_map`` (normal colour ->
+    shiny colour, built by ``_paired_color_map``) instead of recomputed from
+    its own palette. Positions the outline pass left alone keep whatever
+    ``_k_centroid_paired_index`` produced, which already agrees between the
+    pair. A colour absent from ``color_map`` (only the reserved-black
+    fallback ``_restore_cell_outline`` reaches for without a dark_pool of
+    its own) is applied to the shiny cell verbatim, since black is pinned
+    identically in both palettes by ``generate_shiny``.
+    """
+    normal_despeckled = _despeckle_cell(normal_cell)
+    shiny_despeckled = _despeckle_cell(shiny_cell)
+    normal_outlined = _restore_cell_outline(normal_despeckled)
+
+    shiny_outlined = shiny_despeckled.copy()
+    before_px = normal_despeckled.load()
+    after_px = normal_outlined.load()
+    shiny_px = shiny_outlined.load()
+    w, h = normal_outlined.size
+    for y in range(h):
+        for x in range(w):
+            new_color = after_px[x, y]
+            if new_color != before_px[x, y]:
+                shiny_px[x, y] = color_map.get(new_color, new_color)
+    return normal_outlined, shiny_outlined
+
+
+def _paired_color_map(normal: Image.Image, shiny: Image.Image) -> dict:
+    """Normal RGB colour -> shiny RGB colour, for every index the pair shares.
+
+    Built straight from the two ``P``-mode palettes (index *i* ->
+    ``(r, g, b)`` via ``getpalette()``), independent of which pixels of
+    either image actually occur — safe to build before or after any
+    downscale, as long as ``normal``/``shiny`` share index data (the
+    ``generate_shiny`` contract). Two different indices sharing one source
+    RGB always rotate to the same shiny RGB (``generate_shiny``'s hue
+    rotation is a pure function of the source colour, not the index), so
+    overwriting a key with a later index's entry never loses information.
+    """
+    normal_palette = normal.getpalette()
+    shiny_palette = shiny.getpalette()
+    return {
+        tuple(normal_palette[i * 3:i * 3 + 3]): tuple(shiny_palette[i * 3:i * 3 + 3])
+        for i in range(len(normal_palette) // 3)
+    }
+
+
 # Cell layout of the 4x2 stitched sheet, matching the hand-made reference
 # sheets kept outside the repo (Blitin, Bluchis, and one official sheet):
 # row 0 is normal/shiny column pairs of front then back, row 1 is frame 2.
@@ -1860,19 +1928,29 @@ def _stitch_single_cell(image: Image.Image, cell_size: int) -> Image.Image:
 def _stitch_paired_cells(
     normal: Image.Image, shiny: Image.Image, cell_size: int
 ) -> tuple[Image.Image, Image.Image]:
-    """Both cells of a normal/shiny pair, via ``_k_centroid_paired_index`` when safe.
+    """Both cleaned-up cells of a normal/shiny pair, kept in sync end to end.
 
-    Falls back to independent ``_stitch_single_cell`` calls — same as an
-    unpaired view — when the pair doesn't actually share index data (mode or
-    size mismatch). That's only a defensive path: ``generate_shiny`` always
-    produces a same-size ``P``-mode copy of its input, so this should never
-    fire in practice; if it does, a warning says so rather than silently
-    losing the colour-correspondence guarantee.
+    Downscales via ``_k_centroid_paired_index`` when safe (#103), then runs
+    ``_cleanup_sheet_cell_pair`` (#105) instead of two independent
+    ``_cleanup_sheet_cell`` calls, so despeckle and outline restoration can't
+    reintroduce the disagreement the paired downscale just closed. Returns
+    fully cleaned cells — callers should paste the results directly, not run
+    them through ``_cleanup_sheet_cell`` again.
+
+    Falls back to independent ``_stitch_single_cell`` + ``_cleanup_sheet_cell``
+    calls — same as an unpaired view — when the pair doesn't actually share
+    index data (mode or size mismatch). That's only a defensive path:
+    ``generate_shiny`` always produces a same-size ``P``-mode copy of its
+    input, so this should never fire in practice; if it does, a warning says
+    so rather than silently losing the colour-correspondence guarantee.
     """
     if normal.mode == "P" and shiny.mode == "P" and normal.size == shiny.size:
+        color_map = _paired_color_map(normal, shiny)
         if normal.size == (cell_size, cell_size):
-            return normal.convert("RGB"), shiny.convert("RGB")
-        return _k_centroid_paired_index(normal, shiny, cell_size, cell_size)
+            n_cell, s_cell = normal.convert("RGB"), shiny.convert("RGB")
+        else:
+            n_cell, s_cell = _k_centroid_paired_index(normal, shiny, cell_size, cell_size)
+        return _cleanup_sheet_cell_pair(n_cell, s_cell, color_map)
     print(
         "warning: stitch_spritesheet got a normal/shiny pair that doesn't share "
         "index data (mode or size mismatch) — stitching independently, so the "
@@ -1880,8 +1958,8 @@ def _stitch_paired_cells(
         file=sys.stderr,
     )
     return (
-        _stitch_single_cell(normal, cell_size),
-        _stitch_single_cell(shiny, cell_size),
+        _cleanup_sheet_cell(_stitch_single_cell(normal, cell_size)),
+        _cleanup_sheet_cell(_stitch_single_cell(shiny, cell_size)),
     )
 
 
@@ -1897,17 +1975,19 @@ def stitch_spritesheet(stage_dir: str, output_path: str, *, cell_size: int = 64)
     chain — which picks each cell's dominant tile colour without blending new
     colours into the palette.
 
-    Each normal/shiny pair is downscaled together via
-    ``_stitch_paired_cells``/``_k_centroid_paired_index`` rather than each
-    cell on its own, so the two cells of a pair always agree on which source
-    tile wins a given position (#103) — plain ``k_centroid`` clusters on RGB
-    colour independently per image and has no way to keep two differently
-    palettized views of the same index data in sync.
+    Each normal/shiny pair is downscaled and cleaned up together via
+    ``_stitch_paired_cells`` rather than each cell on its own, so the two
+    cells of a pair always agree on which source tile wins a given position
+    (#103) and never drift apart again in despeckle/outline cleanup (#105) —
+    plain ``k_centroid``/``_cleanup_sheet_cell`` each work purely from one
+    cell's own colours and have no way to keep two differently palettized
+    views of the same index data in sync.
 
-    Each cell then goes through ``_cleanup_sheet_cell`` — despeckle plus the
-    NW-lit outline restoration calibrated against real Gen-3 sprites (see the
-    calibration comment above ``_despeckle_cell``) — which likewise only reuses
-    colours the cell already has.
+    An unpaired cell (the other half of its pair missing) goes through
+    ``_stitch_single_cell`` then the ordinary ``_cleanup_sheet_cell`` —
+    despeckle plus the NW-lit outline restoration calibrated against real
+    Gen-3 sprites (see the calibration comment above ``_despeckle_cell``) —
+    which likewise only reuses colours the cell already has.
     """
     sheet = Image.new("RGB", (4 * cell_size, 2 * cell_size), _KEY_COLOR)
     for (n_name, n_col, n_row), (s_name, s_col, s_row) in _SHEET_LAYOUT:
@@ -1919,13 +1999,19 @@ def stitch_spritesheet(stage_dir: str, output_path: str, *, cell_size: int = 64)
         if n_image is not None and s_image is not None:
             n_cell, s_cell = _stitch_paired_cells(n_image, s_image, cell_size)
         else:
-            n_cell = _stitch_single_cell(n_image, cell_size) if n_image is not None else None
-            s_cell = _stitch_single_cell(s_image, cell_size) if s_image is not None else None
+            n_cell = (
+                _cleanup_sheet_cell(_stitch_single_cell(n_image, cell_size))
+                if n_image is not None else None
+            )
+            s_cell = (
+                _cleanup_sheet_cell(_stitch_single_cell(s_image, cell_size))
+                if s_image is not None else None
+            )
 
         if n_cell is not None:
-            sheet.paste(_cleanup_sheet_cell(n_cell), (n_col * cell_size, n_row * cell_size))
+            sheet.paste(n_cell, (n_col * cell_size, n_row * cell_size))
         if s_cell is not None:
-            sheet.paste(_cleanup_sheet_cell(s_cell), (s_col * cell_size, s_row * cell_size))
+            sheet.paste(s_cell, (s_col * cell_size, s_row * cell_size))
     sheet.save(output_path)
 
 
