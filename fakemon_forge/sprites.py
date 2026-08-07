@@ -1789,15 +1789,100 @@ def _cleanup_sheet_cell(cell: Image.Image) -> Image.Image:
 # Cell layout of the 4x2 stitched sheet, matching the hand-made reference
 # sheets kept outside the repo (Blitin, Bluchis, and one official sheet):
 # row 0 is normal/shiny column pairs of front then back, row 1 is frame 2.
-# The remaining two cells stay on the transparency key.
+# The remaining two cells stay on the transparency key. Grouped as
+# normal/shiny pairs (rather than a flat list) because that's the unit
+# ``generate_shiny`` guarantees shares index data — see
+# ``_k_centroid_paired_index`` and #103.
 _SHEET_LAYOUT = [
-    ("sprite.png", 0, 0),
-    ("sprite_shiny.png", 1, 0),
-    ("sprite_back.png", 2, 0),
-    ("sprite_back_shiny.png", 3, 0),
-    ("sprite_frame2.png", 0, 1),
-    ("sprite_frame2_shiny.png", 1, 1),
+    (("sprite.png", 0, 0), ("sprite_shiny.png", 1, 0)),
+    (("sprite_back.png", 2, 0), ("sprite_back_shiny.png", 3, 0)),
+    (("sprite_frame2.png", 0, 1), ("sprite_frame2_shiny.png", 1, 1)),
 ]
+
+
+def _k_centroid_paired_index(
+    normal: Image.Image, shiny: Image.Image, width: int, height: int
+) -> tuple[Image.Image, Image.Image]:
+    """Downscale a normal/shiny ``P``-mode pair, keeping their tile-winner in sync.
+
+    Sibling to ``k_centroid`` for ``stitch_spritesheet``'s three normal/shiny
+    cell pairs (#103). ``generate_shiny`` derives the shiny view from the
+    exact same ``P``-mode index data as the normal view (``shiny =
+    img.copy(); shiny.putpalette(new_palette)``), so at full resolution every
+    normal pixel and its shiny counterpart share one index at every position.
+    ``k_centroid`` doesn't know that — it converts to RGB and clusters purely
+    on colour, independently per image, so a hue shift alone can flip which
+    tile "wins" the downscale for the shiny cell versus the normal cell, even
+    though the source tiles are pixel-for-pixel identical in index space.
+
+    This instead makes the winning-tile decision once, in index space: the
+    modal (most frequent) source index over each output tile — the same
+    "largest cluster" idea ``k_centroid`` uses (#92), just decided from
+    discrete indices instead of post-quantize RGB, which needs no clustering
+    at all since there's no colour distance to cluster on. That one winning
+    index is then mapped through each image's own palette, so the two
+    outputs are guaranteed to agree on every tile.
+
+    Both inputs must be ``P``-mode with identical size (the contract
+    ``generate_shiny`` produces; not verified here — callers check via
+    ``_stitch_paired_cells``). Falls back to plain ``NEAREST`` per image when
+    the source isn't larger than the target, mirroring ``k_centroid``. Does
+    not mutate either input.
+    """
+    wf = normal.width / width
+    hf = normal.height / height
+    if wf < 1 or hf < 1:
+        return (
+            normal.convert("RGB").resize((width, height), Image.NEAREST),
+            shiny.convert("RGB").resize((width, height), Image.NEAREST),
+        )
+    normal_palette = normal.getpalette()
+    shiny_palette = shiny.getpalette()
+    out_normal = Image.new("RGB", (width, height))
+    out_shiny = Image.new("RGB", (width, height))
+    for x in range(width):
+        for y in range(height):
+            tile = normal.crop((int(x * wf), int(y * hf), int((x + 1) * wf), int((y + 1) * hf)))
+            idx = Counter(tile.get_flattened_data()).most_common(1)[0][0]
+            out_normal.putpixel((x, y), tuple(normal_palette[idx * 3:idx * 3 + 3]))
+            out_shiny.putpixel((x, y), tuple(shiny_palette[idx * 3:idx * 3 + 3]))
+    return out_normal, out_shiny
+
+
+def _stitch_single_cell(image: Image.Image, cell_size: int) -> Image.Image:
+    """One sheet cell from a lone (unpaired) view: RGB, downscaled to fit."""
+    cell = image.convert("RGB")
+    if cell.size != (cell_size, cell_size):
+        cell = k_centroid(cell, cell_size, cell_size)
+    return cell
+
+
+def _stitch_paired_cells(
+    normal: Image.Image, shiny: Image.Image, cell_size: int
+) -> tuple[Image.Image, Image.Image]:
+    """Both cells of a normal/shiny pair, via ``_k_centroid_paired_index`` when safe.
+
+    Falls back to independent ``_stitch_single_cell`` calls — same as an
+    unpaired view — when the pair doesn't actually share index data (mode or
+    size mismatch). That's only a defensive path: ``generate_shiny`` always
+    produces a same-size ``P``-mode copy of its input, so this should never
+    fire in practice; if it does, a warning says so rather than silently
+    losing the colour-correspondence guarantee.
+    """
+    if normal.mode == "P" and shiny.mode == "P" and normal.size == shiny.size:
+        if normal.size == (cell_size, cell_size):
+            return normal.convert("RGB"), shiny.convert("RGB")
+        return _k_centroid_paired_index(normal, shiny, cell_size, cell_size)
+    print(
+        "warning: stitch_spritesheet got a normal/shiny pair that doesn't share "
+        "index data (mode or size mismatch) — stitching independently, so the "
+        "two cells' colour correspondence is not guaranteed",
+        file=sys.stderr,
+    )
+    return (
+        _stitch_single_cell(normal, cell_size),
+        _stitch_single_cell(shiny, cell_size),
+    )
 
 
 def stitch_spritesheet(stage_dir: str, output_path: str, *, cell_size: int = 64) -> None:
@@ -1808,9 +1893,16 @@ def stitch_spritesheet(stage_dir: str, output_path: str, *, cell_size: int = 64)
     leaves its cell on the key rather than failing — mirroring how sprite
     generation degrades per-view. The individual views are kept at the native
     SD render size (``_SPRITE_SIZE``), so the default 64px cell is a **single**
-    ``k_centroid`` downscale (768/64 = an exact /12) — one resample from full
-    detail, never a chain — which picks each cell's dominant tile colour
-    without blending new colours into the palette.
+    downscale (768/64 = an exact /12) — one resample from full detail, never a
+    chain — which picks each cell's dominant tile colour without blending new
+    colours into the palette.
+
+    Each normal/shiny pair is downscaled together via
+    ``_stitch_paired_cells``/``_k_centroid_paired_index`` rather than each
+    cell on its own, so the two cells of a pair always agree on which source
+    tile wins a given position (#103) — plain ``k_centroid`` clusters on RGB
+    colour independently per image and has no way to keep two differently
+    palettized views of the same index data in sync.
 
     Each cell then goes through ``_cleanup_sheet_cell`` — despeckle plus the
     NW-lit outline restoration calibrated against real Gen-3 sprites (see the
@@ -1818,14 +1910,22 @@ def stitch_spritesheet(stage_dir: str, output_path: str, *, cell_size: int = 64)
     colours the cell already has.
     """
     sheet = Image.new("RGB", (4 * cell_size, 2 * cell_size), _KEY_COLOR)
-    for name, col, row in _SHEET_LAYOUT:
-        path = Path(stage_dir) / name
-        if not path.exists():
-            continue
-        cell = Image.open(path).convert("RGB")
-        if cell.size != (cell_size, cell_size):
-            cell = k_centroid(cell, cell_size, cell_size)
-        sheet.paste(_cleanup_sheet_cell(cell), (col * cell_size, row * cell_size))
+    for (n_name, n_col, n_row), (s_name, s_col, s_row) in _SHEET_LAYOUT:
+        n_path = Path(stage_dir) / n_name
+        s_path = Path(stage_dir) / s_name
+        n_image = Image.open(n_path) if n_path.exists() else None
+        s_image = Image.open(s_path) if s_path.exists() else None
+
+        if n_image is not None and s_image is not None:
+            n_cell, s_cell = _stitch_paired_cells(n_image, s_image, cell_size)
+        else:
+            n_cell = _stitch_single_cell(n_image, cell_size) if n_image is not None else None
+            s_cell = _stitch_single_cell(s_image, cell_size) if s_image is not None else None
+
+        if n_cell is not None:
+            sheet.paste(_cleanup_sheet_cell(n_cell), (n_col * cell_size, n_row * cell_size))
+        if s_cell is not None:
+            sheet.paste(_cleanup_sheet_cell(s_cell), (s_col * cell_size, s_row * cell_size))
     sheet.save(output_path)
 
 
